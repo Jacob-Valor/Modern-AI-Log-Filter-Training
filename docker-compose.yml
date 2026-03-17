@@ -1,0 +1,256 @@
+version: "3.9"
+
+# ── AI Log Filter — Full Production Stack ─────────────────────────────────────
+#
+# Services:
+#   zookeeper      — Kafka coordination
+#   kafka          — Message bus (raw-logs, scored-logs topics)
+#   kafka-init     — One-shot topic creation
+#   elasticsearch  — Raw log archive (archive-first pattern)
+#   kibana         — ES dashboard (optional, dev only)
+#   logfilter-api  — FastAPI AI scoring service (SecureBERT2.0 models)
+#   collector      — Syslog/HTTP receiver → Kafka producer
+#   router         — Kafka consumer → LEEF enricher → QRadar syslog forwarder
+#   prometheus     — Metrics scraping
+#   grafana        — Dashboard
+#
+# Usage:
+#   docker compose up -d           # start all services
+#   docker compose up logfilter-api # start only the API
+#   docker compose logs -f router  # tail router logs
+#
+# Environment variables (override via .env file):
+#   KAFKA_BOOTSTRAP_SERVERS  ES_HOST  ES_USER  ES_PASSWORD  QRADAR_HOST
+
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+  ES_HOST: "http://elasticsearch:9200"
+  ES_USER: "elastic"
+  ES_PASSWORD: "changeme"
+  QRADAR_HOST: "${QRADAR_HOST:-localhost}"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+services:
+
+  # ── Kafka infrastructure ───────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    hostname: zookeeper
+    container_name: logfilter-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    hostname: kafka
+    container_name: logfilter-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"       # external (host) access
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_RETENTION_HOURS: 168      # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824 # 1 GB
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: logfilter-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        kafka-topics --create --if-not-exists \
+          --bootstrap-server kafka:29092 \
+          --replication-factor 1 --partitions 12 \
+          --topic raw-logs
+        kafka-topics --create --if-not-exists \
+          --bootstrap-server kafka:29092 \
+          --replication-factor 1 --partitions 12 \
+          --topic scored-logs
+        kafka-topics --create --if-not-exists \
+          --bootstrap-server kafka:29092 \
+          --replication-factor 1 --partitions 4 \
+          --topic archived-logs
+        echo "Kafka topics created."
+    restart: "no"
+
+  # ── Elasticsearch (raw log archive) ───────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: logfilter-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=changeme
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - cluster.name=logfilter-cluster
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -su elastic:changeme http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: logfilter-kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      ELASTICSEARCH_USERNAME: elastic
+      ELASTICSEARCH_PASSWORD: changeme
+    profiles: ["dev"]   # only started with: docker compose --profile dev up
+    restart: unless-stopped
+
+  # ── AI Scoring API ─────────────────────────────────────────────────────────
+  logfilter-api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: logfilter-api
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config:/app/config:ro
+      - ./models:/app/models:ro          # trained ONNX + scaler
+      - hf-cache:/home/logfilter/.cache  # HuggingFace model cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s   # allow time for model downloads on first start
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "4.0"
+    restart: unless-stopped
+
+  # ── Log Collector (syslog listener → Kafka) ────────────────────────────────
+  collector:
+    build:
+      context: .
+      dockerfile: docker/collector/Dockerfile
+    container_name: logfilter-collector
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "5140:5140/udp"   # syslog UDP (unprivileged port; map from 514 at load balancer)
+      - "5140:5140/tcp"   # syslog TCP
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+
+  # ── Router (Kafka consumer → LEEF → QRadar) ───────────────────────────────
+  router:
+    build:
+      context: .
+      dockerfile: docker/router/Dockerfile
+    container_name: logfilter-router
+    depends_on:
+      kafka:
+        condition: service_healthy
+      logfilter-api:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: logfilter-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  # ── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: logfilter-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    restart: unless-stopped
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  zookeeper-data:
+  zookeeper-log:
+  kafka-data:
+  es-data:
+  prometheus-data:
+  grafana-data:
+  hf-cache:   # persist HuggingFace model downloads across container restarts

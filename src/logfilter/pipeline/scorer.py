@@ -1,0 +1,357 @@
+"""
+Tiered AI scoring pipeline.
+
+Architecture (per the session design doc):
+
+  Tier 1 — Sigma rule engine (fast pattern matching, runs on every event)
+  Tier 2 — BiEncoder embedding + FAISS dedup + ATT&CK candidate retrieval
+  Tier 3 — NER extraction + CrossEncoder relevance scoring
+            (only on non-duplicates, top-k candidates only)
+
+Final score formula:
+  score = w_cls  * classifier_score
+        + w_ent  * entity_boost    (0.2 if high-value IOC/malware/CVE found)
+        + w_ce   * cross_encoder_score  (max over top-k ATT&CK candidates)
+        + w_nov  * novelty_score   (placeholder — 0.5 default)
+        - dedup_penalty            (applied when is_duplicate=True)
+
+All weights are read from config.yaml.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from logfilter.models.biencoder import ATTACKCandidate, BiEncoderModel, DedupResult
+from logfilter.models.classifier import LogClassifier
+from logfilter.models.cross_encoder import CrossEncoderModel
+from logfilter.models.ner import ExtractedEntities, NERModel
+from logfilter.pipeline.normalizer import NormalizedEvent
+
+logger = structlog.get_logger(__name__)
+
+# ── Score result ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ScoredEvent:
+    """
+    Complete scoring result for one log event, ready for LEEF enrichment.
+    """
+
+    # Provenance
+    source_type: str
+    timestamp: str
+    host: str
+    raw: str
+    normalized_text: str
+    fields: dict[str, Any] = field(default_factory=dict)
+
+    # Tier 1 — Sigma
+    sigma_matched: bool = False
+    sigma_rule_ids: list[str] = field(default_factory=list)
+
+    # Tier 2 — BiEncoder
+    is_duplicate: bool = False
+    dedup_similarity: float = 0.0
+    attack_candidates: list[dict[str, Any]] = field(default_factory=list)
+
+    # Tier 3 — NER + CrossEncoder
+    entities: dict[str, Any] = field(default_factory=dict)
+    cross_encoder_scores: list[dict[str, Any]] = field(default_factory=list)
+
+    # Final score components
+    classifier_score: float = 0.0
+    entity_boost: float = 0.0
+    cross_encoder_max: float = 0.0
+    novelty_score: float = 0.5
+    dedup_penalty: float = 0.0
+
+    # Final composite score + routing label
+    ai_threat_score: float = 0.0
+    ai_priority: str = "LOW"  # HIGH / MEDIUM / LOW / INFO
+    ai_mitre_technique: str = ""  # Top-matching ATT&CK technique ID
+    ai_confidence: float = 0.0  # Average model confidence
+    ai_entities: str = ""  # Comma-separated entity string
+
+    # Timing
+    scoring_latency_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_type": self.source_type,
+            "timestamp": self.timestamp,
+            "host": self.host,
+            "normalized_text": self.normalized_text,
+            "fields": self.fields,
+            "sigma_matched": self.sigma_matched,
+            "sigma_rule_ids": self.sigma_rule_ids,
+            "is_duplicate": self.is_duplicate,
+            "dedup_similarity": round(self.dedup_similarity, 4),
+            "attack_candidates": self.attack_candidates,
+            "entities": self.entities,
+            "cross_encoder_scores": self.cross_encoder_scores,
+            "classifier_score": round(self.classifier_score, 4),
+            "entity_boost": round(self.entity_boost, 4),
+            "cross_encoder_max": round(self.cross_encoder_max, 4),
+            "novelty_score": round(self.novelty_score, 4),
+            "dedup_penalty": round(self.dedup_penalty, 4),
+            "ai_threat_score": round(self.ai_threat_score, 4),
+            "ai_priority": self.ai_priority,
+            "ai_mitre_technique": self.ai_mitre_technique,
+            "ai_confidence": round(self.ai_confidence, 4),
+            "ai_entities": self.ai_entities,
+            "scoring_latency_ms": round(self.scoring_latency_ms, 2),
+        }
+
+
+# ── Scorer ─────────────────────────────────────────────────────────────────────
+
+
+class LogScorer:
+    """
+    Orchestrates the full tiered scoring pipeline.
+
+    Parameters
+    ----------
+    config : dict
+        Loaded from config/config.yaml (the 'scoring' and 'models' sections).
+    classifier : LogClassifier | None
+        Pre-instantiated classifier (optional; created lazily if None).
+    ner_model : NERModel | None
+    biencoder : BiEncoderModel | None
+    cross_encoder : CrossEncoderModel | None
+    """
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        classifier: LogClassifier | None = None,
+        ner_model: NERModel | None = None,
+        biencoder: BiEncoderModel | None = None,
+        cross_encoder: CrossEncoderModel | None = None,
+    ) -> None:
+        self._cfg = config
+        scoring = config.get("scoring", {})
+        weights = scoring.get("weights", {})
+
+        self.w_cls = float(weights.get("classifier", 0.30))
+        self.w_ent = float(weights.get("entity_boost", 0.20))
+        self.w_ce = float(weights.get("cross_encoder", 0.35))
+        self.w_nov = float(weights.get("novelty", 0.15))
+        self.entity_boost_value = float(scoring.get("entity_boost_value", 0.20))
+        self.dedup_penalty_value = float(scoring.get("dedup_penalty", 0.30))
+
+        routing = scoring.get("routing", {})
+        self.threshold_high = float(routing.get("high", 0.85))
+        self.threshold_medium = float(routing.get("medium", 0.50))
+        self.threshold_low = float(routing.get("low", 0.20))
+
+        models_cfg = config.get("models", {})
+
+        self.classifier = classifier or LogClassifier(
+            model_path=models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
+        )
+        self.ner_model = ner_model or NERModel(
+            model_id=models_cfg.get("ner", {}).get("model_id", NERModel.MODEL_ID),
+            device=models_cfg.get("ner", {}).get("device", "cpu"),
+            batch_size=int(models_cfg.get("ner", {}).get("batch_size", 32)),
+            min_confidence=float(models_cfg.get("ner", {}).get("min_confidence", 0.80)),
+        )
+        self.biencoder = biencoder or BiEncoderModel(
+            model_id=models_cfg.get("biencoder", {}).get("model_id", BiEncoderModel.MODEL_ID),
+            device=models_cfg.get("biencoder", {}).get("device", "cpu"),
+            batch_size=int(models_cfg.get("biencoder", {}).get("batch_size", 64)),
+            dedup_threshold=float(models_cfg.get("biencoder", {}).get("dedup_threshold", 0.95)),
+            dedup_window_minutes=float(
+                models_cfg.get("biencoder", {}).get("dedup_window_minutes", 5.0)
+            ),
+            faiss_top_k=int(models_cfg.get("biencoder", {}).get("faiss_top_k", 3)),
+            mitre_techniques_path=models_cfg.get(
+                "mitre_techniques_path", "config/mitre_techniques.json"
+            ),
+        )
+        self.cross_encoder = cross_encoder or CrossEncoderModel(
+            model_id=models_cfg.get("cross_encoder", {}).get(
+                "model_id", CrossEncoderModel.MODEL_ID
+            ),
+            device=models_cfg.get("cross_encoder", {}).get("device", "cpu"),
+            batch_size=int(models_cfg.get("cross_encoder", {}).get("batch_size", 16)),
+        )
+
+    # ── public API ─────────────────────────────────────────────────────────────
+
+    def score(self, event: NormalizedEvent) -> ScoredEvent:
+        """Score a single normalized event. Thread-safe."""
+        results = self.score_batch([event])
+        return results[0]
+
+    def score_batch(self, events: list[NormalizedEvent]) -> list[ScoredEvent]:
+        """
+        Score a batch of normalized events through the full tiered pipeline.
+
+        Returns a list of ScoredEvent, one per input event.
+        """
+        t0 = time.perf_counter()
+
+        scored = [self._init_scored(ev) for ev in events]
+        texts = [ev.text for ev in events]
+
+        # ── Tier 1: Sigma ──────────────────────────────────────────────────────
+        self._apply_sigma(scored, events)
+
+        # ── Tier 2: BiEncoder dedup + ATT&CK candidate retrieval ──────────────
+        bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
+        for se, (dedup_res, candidates) in zip(scored, bi_results):
+            se.is_duplicate = dedup_res.is_duplicate
+            se.dedup_similarity = dedup_res.similarity
+            se.attack_candidates = [
+                {
+                    "id": c.technique_id,
+                    "name": c.name,
+                    "description": c.description,
+                    "bi_similarity": round(c.similarity, 4),
+                }
+                for c in candidates
+            ]
+            if se.is_duplicate:
+                se.dedup_penalty = self.dedup_penalty_value
+
+        # ── Tier 3: NER + CrossEncoder (skip duplicates) ───────────────────────
+        non_dup_indices = [i for i, se in enumerate(scored) if not se.is_duplicate]
+        if non_dup_indices:
+            nd_texts = [texts[i] for i in non_dup_indices]
+            nd_events = [events[i] for i in non_dup_indices]
+            nd_scored = [scored[i] for i in non_dup_indices]
+
+            # NER
+            ner_results = self.ner_model.extract_batch(nd_texts)
+            for se, ner_result in zip(nd_scored, ner_results):
+                se.entities = ner_result.to_dict()
+                se.ai_entities = ner_result.flat_entity_string()
+                if ner_result.has_high_value_entities:
+                    se.entity_boost = self.entity_boost_value
+
+            # CrossEncoder
+            candidates_per_event = [
+                [
+                    {
+                        "id": c["id"],
+                        "name": c["name"],
+                        "description": c["description"],
+                    }
+                    for c in se.attack_candidates
+                ]
+                for se in nd_scored
+            ]
+            ce_results = self.cross_encoder.score_batch(nd_texts, candidates_per_event)
+            for se, ce_scores in zip(nd_scored, ce_results):
+                se.cross_encoder_scores = [
+                    {"id": s.technique_id, "name": s.name, "score": round(s.score, 4)}
+                    for s in ce_scores
+                ]
+                if ce_scores:
+                    se.cross_encoder_max = ce_scores[0].score
+                    se.ai_mitre_technique = ce_scores[0].technique_id
+
+        # ── Final score + routing ──────────────────────────────────────────────
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        for se in scored:
+            se.ai_threat_score = self._compute_score(se)
+            se.ai_priority = self._routing_label(se)
+            se.ai_confidence = self._confidence(se)
+            se.scoring_latency_ms = elapsed_ms / len(scored)
+
+        logger.debug(
+            "Batch scored",
+            n=len(scored),
+            elapsed_ms=round(elapsed_ms, 1),
+        )
+        return scored
+
+    # ── internal helpers ───────────────────────────────────────────────────────
+
+    def _init_scored(self, event: NormalizedEvent) -> ScoredEvent:
+        return ScoredEvent(
+            source_type=event.source_type.value,
+            timestamp=event.timestamp,
+            host=event.host,
+            raw=event.raw,
+            normalized_text=event.text,
+            fields=event.fields,
+        )
+
+    def _apply_sigma(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
+        """
+        Apply Sigma rules via sigma-cli / pySigma.
+
+        Sigma rules live in config/sigma_rules/*.yml.
+        If sigma-cli is not installed or no rules exist, this is a no-op.
+        """
+        try:
+            from sigma.collection import SigmaCollection
+            from sigma.backends.elasticsearch import ElasticsearchQuerystringBackend
+        except ImportError:
+            # sigma is optional; skip gracefully
+            return
+
+        sigma_rules_dir = Path("config/sigma_rules")
+        if not sigma_rules_dir.exists() or not list(sigma_rules_dir.glob("*.yml")):
+            return
+
+        try:
+            rules = SigmaCollection.load_ruleset([str(sigma_rules_dir)])
+            for i, (se, ev) in enumerate(zip(scored, events)):
+                # Simplified: we match raw text against rule titles/descriptions
+                # In production: pipe events through a full Sigma evaluation engine
+                for rule in rules:
+                    rule_text = (
+                        (rule.title or "").lower()
+                        + " "
+                        + " ".join(str(d) for d in (rule.detection or {}))
+                    )
+                    if any(kw in ev.text.lower() for kw in rule_text.split() if len(kw) > 4):
+                        se.sigma_matched = True
+                        se.sigma_rule_ids.append(str(rule.id or rule.title))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Sigma evaluation failed", error=str(exc))
+
+    def _compute_score(self, se: ScoredEvent) -> float:
+        """Compute final composite threat score."""
+        # Sigma match → immediate HIGH signal
+        if se.sigma_matched:
+            se.classifier_score = max(se.classifier_score, 0.90)
+
+        score = (
+            self.w_cls * se.classifier_score
+            + self.w_ent * se.entity_boost
+            + self.w_ce * se.cross_encoder_max
+            + self.w_nov * se.novelty_score
+            - se.dedup_penalty
+        )
+        # Clamp to [0, 1]
+        return max(0.0, min(1.0, score))
+
+    def _routing_label(self, se: ScoredEvent) -> str:
+        if se.sigma_matched or se.ai_threat_score >= self.threshold_high:
+            return "HIGH"
+        if se.ai_threat_score >= self.threshold_medium:
+            return "MEDIUM"
+        if se.ai_threat_score >= self.threshold_low:
+            return "LOW"
+        return "INFO"
+
+    def _confidence(self, se: ScoredEvent) -> float:
+        """Average non-zero model confidence signals."""
+        signals = [
+            se.classifier_score if se.classifier_score > 0 else None,
+            se.entities.get("confidence", 0) if se.entities else None,
+            se.cross_encoder_max if se.cross_encoder_max > 0 else None,
+        ]
+        valid = [s for s in signals if s is not None]
+        return float(sum(valid) / len(valid)) if valid else 0.0

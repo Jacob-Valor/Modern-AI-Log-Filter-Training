@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "logfilter-api"
+    static_configs:
+      - targets: ["logfilter-api:8080"]
+    metrics_path: "/metrics"
+    scrape_interval: 10s
+
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["kafka:9308"]  # kafka-exporter if deployed
+
+  - job_name: "elasticsearch"
+    static_configs:
+      - targets: ["elasticsearch:9114"]  # elasticsearch_exporter if deployed
