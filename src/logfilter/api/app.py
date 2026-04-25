@@ -12,14 +12,14 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import structlog
-import yaml
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -39,10 +39,7 @@ from logfilter.api.schemas import (
     ScoreRequest,
     ScoreResponse,
 )
-from logfilter.models.biencoder import BiEncoderModel
-from logfilter.models.classifier import LogClassifier
-from logfilter.models.cross_encoder import CrossEncoderModel
-from logfilter.models.ner import NERModel
+from logfilter.config import load_config
 from logfilter.pipeline.enricher import LEEFEnricher
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
 from logfilter.pipeline.scorer import LogScorer
@@ -101,15 +98,9 @@ async def lifespan(app: FastAPI):
     """Load configuration and initialise models at startup."""
     logger.info("LogFilter API starting …")
 
-    # Load config
-    if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH) as f:
-            _state.config = yaml.safe_load(f) or {}
-    else:
-        logger.warning("config.yaml not found — using defaults")
-
-    # Resolve env vars in config (simple pattern: "${VAR:default}")
-    _state.config = _resolve_env_vars(_state.config)
+    _state.config = load_config(_CONFIG_PATH)
+    if not _state.config:
+        logger.warning("config.yaml not found or empty — using defaults")
 
     # Build scorer and enricher
     _state.scorer = LogScorer(config=_state.config)
@@ -143,7 +134,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        origin.strip()
+        for origin in os.environ.get(
+            "CORS_ALLOW_ORIGINS",
+            "http://localhost,http://localhost:3000,http://localhost:8080",
+        ).split(",")
+        if origin.strip()
+    ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -216,6 +214,17 @@ def _update_metrics(scored_event) -> None:
         _state.events_high += 1
     _state.score_sum += scored_event.ai_threat_score
     _state.latency_sum += scored_event.scoring_latency_ms
+
+
+async def _require_admin(x_admin_token: str | None = Header(default=None)) -> None:
+    token = os.environ.get("LOGFILTER_ADMIN_TOKEN") or _state.config.get("api", {}).get(
+        "admin_token",
+        "",
+    )
+    if not token:
+        raise HTTPException(status_code=403, detail="Admin token is not configured")
+    if x_admin_token != token:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -332,7 +341,7 @@ async def metrics_snapshot() -> MetricsSnapshot:
 
 
 @app.post("/admin/reload", tags=["Operations"])
-async def reload_models() -> dict[str, str]:
+async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
     """
     Trigger a hot reload of the scoring pipeline.
     Useful after retraining the classifier without restarting the service.
@@ -343,27 +352,6 @@ async def reload_models() -> dict[str, str]:
     _state.scorer = LogScorer(config=_state.config)
     logger.info("Models reloaded via /admin/reload")
     return {"status": "reloaded"}
-
-
-# ── Env var resolution ─────────────────────────────────────────────────────────
-import os
-import re as _re
-
-
-def _resolve_env_vars(obj: Any) -> Any:
-    """Recursively resolve ${VAR:default} placeholders in a config dict."""
-    if isinstance(obj, dict):
-        return {k: _resolve_env_vars(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_resolve_env_vars(v) for v in obj]
-    if isinstance(obj, str):
-
-        def _replace(m: _re.Match) -> str:
-            var, _, default = m.group(1).partition(":")
-            return os.environ.get(var, default)
-
-        return _re.sub(r"\$\{([^}]+)\}", _replace, obj)
-    return obj
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

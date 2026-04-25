@@ -4,6 +4,7 @@ transformers>=4.40.0
 sentence-transformers>=3.0.0
 onnxruntime>=1.18.0
 onnx>=1.16.0
+onnxmltools>=1.12.0
 skl2onnx>=1.17.0
 xgboost>=2.0.0
 scikit-learn>=1.4.0

@@ -15,10 +15,8 @@ from your own environment. It serves as Tier-1 fast classification.
 from __future__ import annotations
 
 import json
-import logging
 import pickle
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import structlog
@@ -139,6 +137,21 @@ class LogClassifier:
         if not self._feature_names and self.feature_names_path.exists():
             self._feature_names = json.loads(self.feature_names_path.read_text())
         return self._feature_names
+
+    @property
+    def expected_feature_count(self) -> int:
+        """Best-effort input feature count for callers that need to build vectors."""
+        if self.feature_names:
+            return len(self.feature_names)
+        if self._scaler is not None and hasattr(self._scaler, "n_features_in_"):
+            return int(self._scaler.n_features_in_)
+        if self._session is not None:
+            shape = self._session.get_inputs()[0].shape
+            if len(shape) > 1 and isinstance(shape[1], int):
+                return int(shape[1])
+        if self._xgb_model is not None and hasattr(self._xgb_model, "n_features_in_"):
+            return int(self._xgb_model.n_features_in_)
+        return 0
 
     def is_ready(self) -> bool:
         """Return True if the model has been loaded successfully."""

@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-LABEL description="AI Log Filter — Log Collector + Normalizer + Kafka Producer"
+LABEL description="AI Log Filter — Kafka Raw Log Archiver → Elasticsearch"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir kafka-python structlog tenacity pyyaml
+RUN pip install --no-cache-dir kafka-python structlog pyyaml elasticsearch
 
 COPY src/ ./src/
 COPY config/ ./config/
@@ -19,9 +19,4 @@ RUN pip install --no-cache-dir -e . --no-deps
 RUN useradd -m -u 1000 logfilter && chown -R logfilter:logfilter /app
 USER logfilter
 
-# The collector entrypoint: listens on syslog port 5140 (unprivileged)
-# and publishes received events to Kafka
-EXPOSE 5140/udp
-EXPOSE 5140/tcp
-
-CMD ["python", "-m", "logfilter.collector"]
+CMD ["python", "-m", "logfilter.archive_consumer"]

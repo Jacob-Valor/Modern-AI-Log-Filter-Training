@@ -53,6 +53,11 @@ class LogArchive:
         )
         self._ensure_index_template()
 
+    @property
+    def client(self) -> Elasticsearch:
+        """Underlying Elasticsearch client for integrations that need bulk APIs."""
+        return self._es
+
     def _today_index(self) -> str:
         return f"{self.index_prefix}-{time.strftime('%Y.%m.%d')}"
 

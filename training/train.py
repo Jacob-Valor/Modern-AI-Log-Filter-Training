@@ -34,7 +34,7 @@ from sklearn.metrics import (
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from training.data_loader import load_event_vocabulary, load_traces, scale_features, split_dataset
+from training.data_loader import load_traces, scale_features, split_dataset  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,

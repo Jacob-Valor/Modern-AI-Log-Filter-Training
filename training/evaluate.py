@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import pickle
 import sys
@@ -31,7 +30,7 @@ from sklearn.metrics import (
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from training.data_loader import load_traces, split_dataset
+from training.data_loader import load_traces, split_dataset  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,7 +78,7 @@ def main() -> None:
     print(f"  Log Classifier Evaluation  (threshold={args.threshold:.2f})")
     print(f"{'=' * 60}")
     print(f"\nTest samples: {len(y_test):,}  |  Failures: {int(y_test.sum()):,}")
-    print(f"\nClassification Report:\n")
+    print("\nClassification Report:\n")
     print(classification_report(y_test, y_pred, target_names=["normal", "failure"]))
     print(f"ROC-AUC:  {roc_auc_score(y_test, y_prob):.4f}")
     print(f"F1:       {f1_score(y_test, y_pred):.4f}")

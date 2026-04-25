@@ -1,9 +1,10 @@
-HDFS_v3_TraceBench
+# HDFS_v3_TraceBench
 .venv/
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.ipynb_checkpoints/
 htmlcov/
 .coverage
 *.egg-info/
@@ -14,6 +15,6 @@ models/*.onnx
 models/*.json
 models/*.pkl
 models/*.bin
+notebooks/artifacts/
 # HuggingFace cache
 .cache/
-
