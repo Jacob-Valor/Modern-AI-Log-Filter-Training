@@ -7,7 +7,7 @@ Usage:
 Outputs:
     models/log_classifier.onnx       (ONNX export for production inference)
     models/log_classifier.json       (XGBoost native format)
-    models/scaler.pkl                (fitted MaxAbsScaler)
+    models/scaler.json               (safe MaxAbsScaler parameters)
     models/feature_names.json        (ordered list of feature column names)
     models/training_metrics.json     (precision, recall, F1, ROC-AUC)
 """
@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import pickle
 import sys
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from sklearn.metrics import (
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402
 from training.data_loader import load_traces, scale_features, split_dataset  # noqa: E402
 
 logging.basicConfig(
@@ -189,10 +189,9 @@ def main() -> None:
     onnx_path = args.output_dir / "log_classifier.onnx"
     export_onnx(model, X_train_s.shape[1], onnx_path)
 
-    # Scaler
-    scaler_path = args.output_dir / "scaler.pkl"
-    with open(scaler_path, "wb") as f:
-        pickle.dump(scaler, f)
+    # Scaler parameters are JSON so the API never has to unpickle model artifacts.
+    scaler_path = args.output_dir / "scaler.json"
+    SafeMaxAbsScaler.from_sklearn(scaler).to_json(scaler_path)
     logger.info("Scaler saved to %s", scaler_path)
 
     # Feature names (required to align inference-time feature vectors)

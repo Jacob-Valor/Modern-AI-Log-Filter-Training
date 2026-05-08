@@ -15,7 +15,7 @@ from your own environment. It serves as Tier-1 fast classification.
 from __future__ import annotations
 
 import json
-import pickle
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +24,66 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent.parent  # project root
+
+
+@dataclass
+class SafeMaxAbsScaler:
+    """Minimal, JSON-backed MaxAbsScaler runtime representation."""
+
+    scale: np.ndarray
+
+    def __post_init__(self) -> None:
+        self.scale = np.asarray(self.scale, dtype=np.float32).reshape(-1)
+        if self.scale.size == 0:
+            raise ValueError("Scaler scale vector is empty")
+        if not np.isfinite(self.scale).all():
+            raise ValueError("Scaler scale vector contains non-finite values")
+        if np.any(self.scale == 0):
+            raise ValueError("Scaler scale vector contains zero values")
+
+    @property
+    def n_features_in_(self) -> int:
+        return int(self.scale.size)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> SafeMaxAbsScaler:
+        payload = json.loads(Path(path).read_text())
+        if payload.get("type") != "MaxAbsScaler":
+            raise ValueError("Unsupported scaler type")
+        scale = payload.get("scale")
+        if not isinstance(scale, list):
+            raise ValueError("Scaler JSON must contain a list-valued scale field")
+        scaler = cls(np.asarray(scale, dtype=np.float32))
+        expected_features = int(payload.get("n_features_in", scaler.n_features_in_))
+        if expected_features != scaler.n_features_in_:
+            raise ValueError("Scaler feature count does not match scale length")
+        return scaler
+
+    @classmethod
+    def from_sklearn(cls, scaler) -> SafeMaxAbsScaler:  # noqa: ANN001
+        scale = getattr(scaler, "scale_", None)
+        if scale is None:
+            raise ValueError("Expected a fitted sklearn MaxAbsScaler with scale_")
+        return cls(np.asarray(scale, dtype=np.float32))
+
+    def to_json(self, path: str | Path) -> None:
+        payload = {
+            "schema_version": 1,
+            "type": "MaxAbsScaler",
+            "n_features_in": self.n_features_in_,
+            "scale": self.scale.astype(float).tolist(),
+        }
+        Path(path).write_text(json.dumps(payload, indent=2))
+
+    def transform(self, values: np.ndarray) -> np.ndarray:
+        matrix = np.asarray(values, dtype=np.float32)
+        if matrix.ndim != 2:
+            raise ValueError("Scaler input must be a 2D array")
+        if matrix.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"Scaler expected {self.n_features_in_} features, got {matrix.shape[1]}"
+            )
+        return matrix / self.scale
 
 
 class LogClassifier:
@@ -36,7 +96,7 @@ class LogClassifier:
     def __init__(
         self,
         model_path: str | Path = ROOT / "models" / "log_classifier.onnx",
-        scaler_path: str | Path = ROOT / "models" / "scaler.pkl",
+        scaler_path: str | Path = ROOT / "models" / "scaler.json",
         feature_names_path: str | Path = ROOT / "models" / "feature_names.json",
     ) -> None:
         self.model_path = Path(model_path)
@@ -50,10 +110,13 @@ class LogClassifier:
         self._input_name: str = ""
 
     def _load(self) -> None:
-        # Load scaler
         if self.scaler_path.exists():
-            with open(self.scaler_path, "rb") as f:
-                self._scaler = pickle.load(f)
+            if self.scaler_path.suffix != ".json":
+                raise ValueError(
+                    f"Refusing to load unsafe scaler artifact {self.scaler_path}. "
+                    "Export scaler parameters to models/scaler.json instead."
+                )
+            self._scaler = SafeMaxAbsScaler.from_json(self.scaler_path)
             logger.info("Scaler loaded", path=str(self.scaler_path))
 
         # Load feature names

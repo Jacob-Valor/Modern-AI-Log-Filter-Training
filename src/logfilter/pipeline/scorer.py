@@ -20,6 +20,7 @@ All weights are read from config.yaml.
 
 from __future__ import annotations
 
+import importlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ from logfilter.models.biencoder import BiEncoderModel
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
 from logfilter.models.ner import NERModel
+from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.pipeline.normalizer import NormalizedEvent
 
 logger = structlog.get_logger(__name__)
@@ -87,9 +89,14 @@ class ScoredEvent:
 
     # Final score components
     classifier_score: float = 0.0
+    tier2_score: float = 0.0
+    tier2_used: bool = False
     entity_boost: float = 0.0
     cross_encoder_max: float = 0.0
-    novelty_score: float = 0.5
+    # Novelty detection is not yet implemented. Default 0.0 means it contributes
+    # nothing to the fused score (was 0.5 placeholder, which silently added a
+    # constant 0.5 * w_novelty bias to every event). See docs/ML_REMEDIATION.md.
+    novelty_score: float = 0.0
     dedup_penalty: float = 0.0
 
     # Final composite score + routing label
@@ -117,6 +124,8 @@ class ScoredEvent:
             "entities": self.entities,
             "cross_encoder_scores": self.cross_encoder_scores,
             "classifier_score": round(self.classifier_score, 4),
+            "tier2_score": round(self.tier2_score, 4),
+            "tier2_used": self.tier2_used,
             "entity_boost": round(self.entity_boost, 4),
             "cross_encoder_max": round(self.cross_encoder_max, 4),
             "novelty_score": round(self.novelty_score, 4),
@@ -143,6 +152,8 @@ class LogScorer:
         Loaded from config/config.yaml (the 'scoring' and 'models' sections).
     classifier : LogClassifier | None
         Pre-instantiated classifier (optional; created lazily if None).
+    tier2_classifier : Tier2Classifier | None
+        Pre-instantiated Tier-2 classifier for uncertain Tier-1 scores.
     ner_model : NERModel | None
     biencoder : BiEncoderModel | None
     cross_encoder : CrossEncoderModel | None
@@ -152,6 +163,7 @@ class LogScorer:
         self,
         config: dict[str, Any],
         classifier: LogClassifier | None = None,
+        tier2_classifier: Tier2Classifier | None = None,
         ner_model: NERModel | None = None,
         biencoder: BiEncoderModel | None = None,
         cross_encoder: CrossEncoderModel | None = None,
@@ -177,6 +189,7 @@ class LogScorer:
         self.classifier = classifier or LogClassifier(
             model_path=models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
         )
+        self.tier2_classifier = tier2_classifier or Tier2Classifier()
         self.ner_model = ner_model or NERModel(
             model_id=models_cfg.get("ner", {}).get("model_id", NERModel.MODEL_ID),
             device=models_cfg.get("ner", {}).get("device", "cpu"),
@@ -289,7 +302,9 @@ class LogScorer:
             se.ai_threat_score = self._compute_score(se)
             se.ai_priority = self._routing_label(se)
             se.ai_confidence = self._confidence(se)
-            se.scoring_latency_ms = elapsed_ms / len(scored)
+            # Total wall-clock for the batch (per-event latency is meaningless
+            # because models batch-encode). Each event records the full batch time.
+            se.scoring_latency_ms = elapsed_ms
 
         logger.debug(
             "Batch scored",
@@ -318,7 +333,8 @@ class LogScorer:
         If sigma-cli is not installed or no rules exist, this is a no-op.
         """
         try:
-            from sigma.collection import SigmaCollection
+            sigma_collection = importlib.import_module("sigma.collection")
+            sigma_collection_cls = sigma_collection.SigmaCollection
         except ImportError:
             # sigma is optional; skip gracefully
             return
@@ -328,8 +344,8 @@ class LogScorer:
             return
 
         try:
-            rules = SigmaCollection.load_ruleset([str(sigma_rules_dir)])
-            for i, (se, ev) in enumerate(zip(scored, events)):
+            rules = sigma_collection_cls.load_ruleset([str(sigma_rules_dir)])
+            for se, ev in zip(scored, events):
                 # Simplified: we match raw text against rule titles/descriptions
                 # In production: pipe events through a full Sigma evaluation engine
                 for rule in rules:
@@ -355,6 +371,32 @@ class LogScorer:
 
         for se, prob in zip(scored, probabilities):
             se.classifier_score = max(0.0, min(1.0, float(prob)))
+
+        escalation_indices = [
+            i
+            for i, se in enumerate(scored)
+            if self.tier2_classifier.should_escalate(se.classifier_score)
+        ]
+        if not escalation_indices:
+            return
+        if not self.tier2_classifier.is_ready():
+            logger.warning("Tier-2 classifier unavailable; keeping Tier-1 uncertain scores")
+            return
+
+        tier2_texts = [events[i].raw for i in escalation_indices]
+        try:
+            tier2_probs = self.tier2_classifier.predict_proba(tier2_texts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Tier-2 classifier scoring failed; keeping Tier-1 scores", error=str(exc)
+            )
+            return
+
+        for index, prob in zip(escalation_indices, tier2_probs):
+            score = max(0.0, min(1.0, float(prob)))
+            scored[index].classifier_score = score
+            scored[index].tier2_score = score
+            scored[index].tier2_used = True
 
     def _classifier_feature_vectors(self, events: list[NormalizedEvent]) -> np.ndarray:
         """

@@ -1,7 +1,7 @@
 """
 Standalone evaluation script.
 
-Loads a saved XGBoost model and scaler, evaluates on the held-out test set,
+Loads a saved XGBoost model and scaler parameters, evaluates on the held-out test set,
 and prints a detailed classification report.
 
 Usage:
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import pickle
 import sys
 from pathlib import Path
 
@@ -30,6 +29,7 @@ from sklearn.metrics import (
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402
 from training.data_loader import load_traces, split_dataset  # noqa: E402
 
 logging.basicConfig(
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         default=ROOT / "models",
-        help="Directory with log_classifier.json and scaler.pkl",
+        help="Directory with log_classifier.json and scaler.json",
     )
     parser.add_argument(
         "--threshold",
@@ -63,8 +63,7 @@ def main() -> None:
     model = xgb.XGBClassifier()
     model.load_model(str(args.model_dir / "log_classifier.json"))
 
-    with open(args.model_dir / "scaler.pkl", "rb") as f:
-        scaler = pickle.load(f)
+    scaler = SafeMaxAbsScaler.from_json(args.model_dir / "scaler.json")
 
     # Load data and reproduce the exact same test split
     X, y, _ = load_traces()
