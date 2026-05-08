@@ -31,6 +31,7 @@ class RouterSettings:
     max_poll_records: int
     poll_timeout_ms: int
     api_url: str
+    api_token: str
     qradar_host: str
     qradar_port: int
     qradar_protocol: str
@@ -41,6 +42,10 @@ def _settings() -> RouterSettings:
     kafka_cfg = config.get("kafka", {})
     topics = kafka_cfg.get("topics", {})
     qradar_cfg = config.get("qradar", {})
+    api_cfg = config.get("api", {})
+    api_token = os.environ.get("LOGFILTER_API_TOKEN") or api_cfg.get("scoring_token", "")
+    if not api_token:
+        raise SystemExit("LOGFILTER_API_TOKEN must be set for router-to-API scoring calls")
     return RouterSettings(
         bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
         raw_topic=topics.get("raw_logs", "raw-logs"),
@@ -52,6 +57,7 @@ def _settings() -> RouterSettings:
         max_poll_records=int(kafka_cfg.get("max_poll_records", 100)),
         poll_timeout_ms=int(os.environ.get("ROUTER_POLL_TIMEOUT_MS", "1000")),
         api_url=os.environ.get("LOGFILTER_API_URL", "http://logfilter-api:8080").rstrip("/"),
+        api_token=api_token,
         qradar_host=qradar_cfg.get("syslog_host", "localhost"),
         qradar_port=int(qradar_cfg.get("syslog_port", 514)),
         qradar_protocol=qradar_cfg.get("syslog_protocol", "tcp"),
@@ -98,7 +104,11 @@ class KafkaQRadarRouter:
                 for event in events
             ]
         }
-        response = self.http.post(f"{self.settings.api_url}/score/batch", json=request)
+        response = self.http.post(
+            f"{self.settings.api_url}/score/batch",
+            json=request,
+            headers={"X-API-Token": self.settings.api_token},
+        )
         response.raise_for_status()
         payload = response.json()
         results = payload.get("results", [])
@@ -122,7 +132,7 @@ class KafkaQRadarRouter:
             )
         self.producer.flush(timeout=30)
 
-    def run(self) -> None:
+    def run(self) -> None:  # pragma: no cover
         logger.info(
             "Kafka QRadar router started",
             raw_topic=self.settings.raw_topic,
@@ -158,7 +168,7 @@ class KafkaQRadarRouter:
             logger.info("Kafka QRadar router stopped")
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     router = KafkaQRadarRouter(_settings())
 
     def _shutdown(signum, frame):  # noqa: ANN001
@@ -169,5 +179,5 @@ def main() -> None:
     router.run()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

@@ -18,11 +18,17 @@ def main() -> None:
     topics = kafka_cfg.get("topics", {})
     es_cfg = config.get("elasticsearch", {})
 
+    password = es_cfg.get("password", "") or ""
+    if not password:
+        raise SystemExit(
+            "ES password is unset. Set ES_PASSWORD in the environment or "
+            "config.elasticsearch.password before starting the archive consumer."
+        )
     archive = LogArchive(
         hosts=es_cfg.get("hosts", ["http://localhost:9200"]),
         index_prefix=es_cfg.get("index_prefix", "raw-logs"),
         username=es_cfg.get("username", "elastic"),
-        password=es_cfg.get("password", "changeme"),
+        password=password,
         shards=int(es_cfg.get("index_shards", 1)),
         replicas=int(es_cfg.get("index_replicas", 0)),
     )
@@ -40,5 +46,5 @@ def main() -> None:
     consumer.run()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
