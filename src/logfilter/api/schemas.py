@@ -85,6 +85,8 @@ class ScoreResponse(BaseModel):
 
     # Score components
     classifier_score: float
+    tier2_score: float
+    tier2_used: bool
     entity_boost: float
     cross_encoder_max: float
 
@@ -122,6 +124,8 @@ class ScoreResponse(BaseModel):
                     {"technique_id": "T1110.001", "name": "Password Guessing", "score": 0.82}
                 ],
                 "classifier_score": 0.76,
+                "tier2_score": 0.0,
+                "tier2_used": False,
                 "entity_boost": 0.20,
                 "cross_encoder_max": 0.82,
                 "source_type": "syslog",

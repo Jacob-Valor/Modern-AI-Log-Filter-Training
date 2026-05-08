@@ -16,7 +16,8 @@ elasticsearch:
   hosts: ["${ES_HOST:http://localhost:9200}"]
   index_prefix: "raw-logs"
   username: "${ES_USER:elastic}"
-  password: "${ES_PASSWORD:changeme}"
+  # No default. ES_PASSWORD must be set in the environment.
+  password: "${ES_PASSWORD:}"
   index_shards: 1
   index_replicas: 0
 
@@ -83,6 +84,9 @@ api:
   log_level: "info"
   max_batch_size: 200
   admin_token: "${LOGFILTER_ADMIN_TOKEN:}"
+  scoring_token: "${LOGFILTER_API_TOKEN:}"
+  metrics_token: "${LOGFILTER_METRICS_TOKEN:}"
+  rate_limit_per_minute: 60
 
 # ── Monitoring ───────────────────────────────────────────────────────────────
 monitoring:

@@ -12,14 +12,16 @@ Endpoints:
 
 from __future__ import annotations
 
+import importlib
 import os
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -39,6 +41,7 @@ from logfilter.api.schemas import (
     ScoreRequest,
     ScoreResponse,
 )
+from logfilter.api.security import AccessDenied, enforce_rate_limit, require_configured_token
 from logfilter.config import load_config
 from logfilter.pipeline.enricher import LEEFEnricher
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
@@ -48,6 +51,7 @@ logger = structlog.get_logger(__name__)
 
 # ── Config path ────────────────────────────────────────────────────────────────
 _CONFIG_PATH = Path("config/config.yaml")
+_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
 _events_total = Counter("logfilter_events_total", "Total log events scored", ["priority"])
@@ -87,15 +91,21 @@ class AppState:
         self.events_sigma: int = 0
         self.score_sum: float = 0.0
         self.latency_sum: float = 0.0
+        self.rate_limit_windows: dict[str, deque[float]] = {}
 
 
 _state = AppState()
+
+
+def _env_enabled(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in _TRUE_VALUES
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load configuration and initialise models at startup."""
+    del app
     logger.info("LogFilter API starting …")
 
     _state.config = load_config(_CONFIG_PATH)
@@ -128,8 +138,9 @@ app = FastAPI(
     ),
     version="0.1.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if _env_enabled("LOGFILTER_ENABLE_DOCS") else None,
+    redoc_url="/redoc" if _env_enabled("LOGFILTER_ENABLE_DOCS") else None,
+    openapi_url="/openapi.json" if _env_enabled("LOGFILTER_ENABLE_DOCS") else None,
 )
 
 app.add_middleware(
@@ -143,8 +154,24 @@ app.add_middleware(
         if origin.strip()
     ],
     allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-Admin-Token", "X-API-Token", "Authorization"],
+    allow_credentials=False,
+    max_age=3600,
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):  # noqa: ANN001
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'",
+    )
+    return response
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
@@ -188,6 +215,8 @@ def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
         entities=entity_summary,
         attack_matches=attack_matches,
         classifier_score=scored_event.classifier_score,
+        tier2_score=scored_event.tier2_score,
+        tier2_used=scored_event.tier2_used,
         entity_boost=scored_event.entity_boost,
         cross_encoder_max=scored_event.cross_encoder_max,
         source_type=scored_event.source_type,
@@ -221,17 +250,93 @@ async def _require_admin(x_admin_token: str | None = Header(default=None)) -> No
         "admin_token",
         "",
     )
+    try:
+        require_configured_token(
+            x_admin_token,
+            token,
+            not_configured_detail="Admin token is not configured",
+            invalid_detail="Invalid admin token",
+        )
+    except AccessDenied as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+def _configured_api_token() -> str:
+    return os.environ.get("LOGFILTER_API_TOKEN") or _state.config.get("api", {}).get(
+        "scoring_token",
+        "",
+    )
+
+
+def _configured_metrics_token() -> str:
+    return os.environ.get("LOGFILTER_METRICS_TOKEN") or _state.config.get("api", {}).get(
+        "metrics_token",
+        "",
+    )
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
+
+
+def _enforce_rate_limit(request: Request) -> None:
+    limit = int(_state.config.get("api", {}).get("rate_limit_per_minute", 60))
+    client_host = request.client.host if request.client else "unknown"
+    try:
+        enforce_rate_limit(_state.rate_limit_windows, client_host, limit)
+    except AccessDenied as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+async def _require_scoring_access(
+    request: Request,
+    x_api_token: str | None = Header(default=None),
+) -> None:
+    token = _configured_api_token()
+    try:
+        require_configured_token(
+            x_api_token,
+            token,
+            not_configured_detail="Scoring API token is not configured",
+            invalid_detail="Invalid scoring API token",
+        )
+    except AccessDenied as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    _enforce_rate_limit(request)
+
+
+async def _require_metrics_access(
+    x_metrics_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> None:
+    token = _configured_metrics_token()
     if not token:
-        raise HTTPException(status_code=403, detail="Admin token is not configured")
-    if x_admin_token != token:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+        return
+    provided = x_metrics_token or _extract_bearer_token(authorization)
+    try:
+        require_configured_token(
+            provided,
+            token,
+            not_configured_detail="Metrics token is not configured",
+            invalid_detail="Invalid metrics token",
+        )
+    except AccessDenied as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 
 @app.post("/score", response_model=ScoreResponse, tags=["Scoring"])
-async def score_event(request: ScoreRequest) -> ScoreResponse:
+async def score_event(
+    payload: ScoreRequest,
+    _: None = Depends(_require_scoring_access),
+) -> ScoreResponse:
     """
     Score a single log event.
 
@@ -244,17 +349,24 @@ async def score_event(request: ScoreRequest) -> ScoreResponse:
             detail="Scoring service not initialised",
         )
 
-    hint = _source_hint(request.source_type)
-    normalized = _state.normalizer.normalize(request.raw, source_type_hint=hint)
-    scored = _state.scorer.score(normalized)
-    leef = _state.enricher.enrich(scored)
+    hint = _source_hint(payload.source_type)
+    try:
+        normalized = _state.normalizer.normalize(payload.raw, source_type_hint=hint)
+        scored = _state.scorer.score(normalized)
+        leef = _state.enricher.enrich(scored)
+    except (ValueError, TypeError, KeyError) as exc:
+        logger.warning("Score request rejected", error=str(exc))
+        raise HTTPException(status_code=400, detail=f"Invalid log event: {exc}") from exc
 
     _update_metrics(scored)
     return _build_response(scored, leef)
 
 
 @app.post("/score/batch", response_model=BatchScoreResponse, tags=["Scoring"])
-async def score_batch(request: BatchScoreRequest) -> BatchScoreResponse:
+async def score_batch(
+    payload: BatchScoreRequest,
+    _: None = Depends(_require_scoring_access),
+) -> BatchScoreResponse:
     """
     Score a batch of up to 200 log events in a single call.
 
@@ -267,15 +379,29 @@ async def score_batch(request: BatchScoreRequest) -> BatchScoreResponse:
             detail="Scoring service not initialised",
         )
 
-    t0 = time.perf_counter()
-    _batch_size_histogram.observe(len(request.events))
+    # Enforce configured batch size cap (config: api.max_batch_size, default 200).
+    max_batch = int(_state.config.get("api", {}).get("max_batch_size", 200))
+    if len(payload.events) > max_batch:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch too large: {len(payload.events)} events (max {max_batch})",
+        )
+    if not payload.events:
+        raise HTTPException(status_code=400, detail="Batch must contain at least one event")
 
-    normalized_events = [
-        _state.normalizer.normalize(ev.raw, source_type_hint=_source_hint(ev.source_type))
-        for ev in request.events
-    ]
-    scored_events = _state.scorer.score_batch(normalized_events)
-    leef_payloads = _state.enricher.enrich_batch(scored_events)
+    t0 = time.perf_counter()
+    _batch_size_histogram.observe(len(payload.events))
+
+    try:
+        normalized_events = [
+            _state.normalizer.normalize(ev.raw, source_type_hint=_source_hint(ev.source_type))
+            for ev in payload.events
+        ]
+        scored_events = _state.scorer.score_batch(normalized_events)
+        leef_payloads = _state.enricher.enrich_batch(scored_events)
+    except (ValueError, TypeError, KeyError) as exc:
+        logger.warning("Batch score request rejected", error=str(exc))
+        raise HTTPException(status_code=400, detail=f"Invalid batch: {exc}") from exc
 
     responses = []
     high_count = 0
@@ -309,6 +435,9 @@ async def health() -> HealthResponse:
     }
     if scorer_ready and _state.scorer is not None:
         models_loaded["classifier"] = _state.scorer.classifier.is_ready()
+        tier2 = getattr(_state.scorer, "tier2_classifier", None)
+        if tier2 is not None:
+            models_loaded["tier2_classifier"] = tier2.is_ready()
 
     overall_status = "healthy" if scorer_ready else "degraded"
 
@@ -321,13 +450,13 @@ async def health() -> HealthResponse:
 
 
 @app.get("/metrics", tags=["Operations"])
-async def metrics() -> Response:
+async def metrics(_: None = Depends(_require_metrics_access)) -> Response:
     """Prometheus metrics endpoint."""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/metrics/snapshot", response_model=MetricsSnapshot, tags=["Operations"])
-async def metrics_snapshot() -> MetricsSnapshot:
+async def metrics_snapshot(_: None = Depends(_require_admin)) -> MetricsSnapshot:
     """JSON snapshot of in-process metrics counters."""
     n = max(_state.events_scored, 1)
     return MetricsSnapshot(
@@ -355,7 +484,7 @@ async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
+if __name__ == "__main__":  # pragma: no cover
+    uvicorn = importlib.import_module("uvicorn")
 
     uvicorn.run("logfilter.api.app:app", host="0.0.0.0", port=8080, reload=False)
