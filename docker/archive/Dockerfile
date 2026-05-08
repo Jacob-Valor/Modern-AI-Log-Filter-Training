@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir kafka-python structlog pyyaml elasticsearch
+RUN pip install --no-cache-dir -c requirements.txt kafka-python structlog PyYAML elasticsearch
 
 COPY src/ ./src/
 COPY config/ ./config/

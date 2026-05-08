@@ -1,8 +1,9 @@
 # ── AI Log Filter — Makefile ───────────────────────────────────────────────────
 # Usage: make <target>
 
-.PHONY: help install dev-install train evaluate test lint format up down logs \
-        build clean models-dir
+.PHONY: help install dev-install train evaluate test test-coverage lint format \
+        verify audit security-check up up-dev down logs logs-api logs-router \
+        build clean models-dir smoke-test smoke-pipeline
 
 PYTHON     ?= python3
 PIP        ?= pip3
@@ -21,6 +22,9 @@ help:
 	@echo "  evaluate       Evaluate saved model on test set"
 	@echo ""
 	@echo "  test           Run all unit tests (pytest)"
+	@echo "  verify         Run lint, tests, and local pipeline smoke test"
+	@echo "  audit          Run dependency vulnerability audit"
+	@echo "  security-check Run verify and dependency audit"
 	@echo "  lint           Lint with ruff"
 	@echo "  format         Format with ruff"
 	@echo ""
@@ -40,7 +44,7 @@ install:
 	$(PIP) install --no-cache-dir -e .
 
 dev-install: install
-	$(PIP) install --no-cache-dir pytest pytest-cov pytest-asyncio httpx ruff
+	$(PIP) install --no-cache-dir -e ".[dev]"
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
@@ -64,7 +68,17 @@ test:
 	$(PYTHON) -m pytest tests/ -v --tb=short
 
 test-coverage:
-	$(PYTHON) -m pytest tests/ --cov=src/logfilter --cov-report=term-missing --cov-report=html
+	$(PYTHON) -m pytest tests/ --cov=src/logfilter --cov-report=term-missing --cov-report=xml --cov-report=html
+
+smoke-pipeline:
+	$(PYTHON) scripts/smoke_test_pipeline.py
+
+verify: lint test-coverage smoke-pipeline
+
+audit:
+	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off
+
+security-check: verify audit
 
 # ── Linting ────────────────────────────────────────────────────────────────────
 
@@ -81,14 +95,16 @@ build:
 	$(COMPOSE) build
 
 up: models-dir
+	@test -f .env || (echo "ERROR: .env missing. Copy .env.example to .env and set required values." && exit 1)
 	$(COMPOSE) up -d
 	@echo ""
 	@echo "Services starting …"
-	@echo "  API:       http://localhost:8080/docs"
-	@echo "  Grafana:   http://localhost:3000  (admin/admin)"
+	@echo "  API:       http://localhost:8080/health"
+	@echo "  API docs:  disabled unless LOGFILTER_ENABLE_DOCS=1"
+	@echo "  Grafana:   http://localhost:3000  (credentials from .env: GRAFANA_ADMIN_USER/PASSWORD)"
 	@echo "  Prometheus:http://localhost:9090"
 	@echo "  Kafka:     localhost:9092"
-	@echo "  ES:        http://localhost:9200  (elastic/changeme)"
+	@echo "  ES:        http://localhost:9200  (credentials from .env: ES_USER/ES_PASSWORD)"
 	@echo ""
 
 up-dev: models-dir
@@ -115,6 +131,7 @@ smoke-test:
 	@echo ""
 	curl -s -X POST http://localhost:8080/score \
 	  -H "Content-Type: application/json" \
+	  -H "X-API-Token: $$LOGFILTER_API_TOKEN" \
 	  -d '{"raw": "Jan 15 11:07:53 prod-srv01 sshd[123]: Failed password for root from 10.0.0.5 port 44382 ssh2", "source_type": "syslog"}' \
 	  | python3 -m json.tool
 
