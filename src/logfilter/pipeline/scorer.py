@@ -20,20 +20,42 @@ All weights are read from config.yaml.
 
 from __future__ import annotations
 
+import importlib
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import structlog
 
-from logfilter.models.biencoder import ATTACKCandidate, BiEncoderModel, DedupResult
+from logfilter.models.biencoder import BiEncoderModel
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
-from logfilter.models.ner import ExtractedEntities, NERModel
+from logfilter.models.ner import NERModel
+from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.pipeline.normalizer import NormalizedEvent
 
 logger = structlog.get_logger(__name__)
+
+_TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
+_FEATURE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "by",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "return",
+    "the",
+    "to",
+    "with",
+}
 
 # ── Score result ───────────────────────────────────────────────────────────────
 
@@ -67,9 +89,14 @@ class ScoredEvent:
 
     # Final score components
     classifier_score: float = 0.0
+    tier2_score: float = 0.0
+    tier2_used: bool = False
     entity_boost: float = 0.0
     cross_encoder_max: float = 0.0
-    novelty_score: float = 0.5
+    # Novelty detection is not yet implemented. Default 0.0 means it contributes
+    # nothing to the fused score (was 0.5 placeholder, which silently added a
+    # constant 0.5 * w_novelty bias to every event). See docs/ML_REMEDIATION.md.
+    novelty_score: float = 0.0
     dedup_penalty: float = 0.0
 
     # Final composite score + routing label
@@ -97,6 +124,8 @@ class ScoredEvent:
             "entities": self.entities,
             "cross_encoder_scores": self.cross_encoder_scores,
             "classifier_score": round(self.classifier_score, 4),
+            "tier2_score": round(self.tier2_score, 4),
+            "tier2_used": self.tier2_used,
             "entity_boost": round(self.entity_boost, 4),
             "cross_encoder_max": round(self.cross_encoder_max, 4),
             "novelty_score": round(self.novelty_score, 4),
@@ -123,6 +152,8 @@ class LogScorer:
         Loaded from config/config.yaml (the 'scoring' and 'models' sections).
     classifier : LogClassifier | None
         Pre-instantiated classifier (optional; created lazily if None).
+    tier2_classifier : Tier2Classifier | None
+        Pre-instantiated Tier-2 classifier for uncertain Tier-1 scores.
     ner_model : NERModel | None
     biencoder : BiEncoderModel | None
     cross_encoder : CrossEncoderModel | None
@@ -132,6 +163,7 @@ class LogScorer:
         self,
         config: dict[str, Any],
         classifier: LogClassifier | None = None,
+        tier2_classifier: Tier2Classifier | None = None,
         ner_model: NERModel | None = None,
         biencoder: BiEncoderModel | None = None,
         cross_encoder: CrossEncoderModel | None = None,
@@ -157,6 +189,7 @@ class LogScorer:
         self.classifier = classifier or LogClassifier(
             model_path=models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
         )
+        self.tier2_classifier = tier2_classifier or Tier2Classifier()
         self.ner_model = ner_model or NERModel(
             model_id=models_cfg.get("ner", {}).get("model_id", NERModel.MODEL_ID),
             device=models_cfg.get("ner", {}).get("device", "cpu"),
@@ -183,6 +216,8 @@ class LogScorer:
             device=models_cfg.get("cross_encoder", {}).get("device", "cpu"),
             batch_size=int(models_cfg.get("cross_encoder", {}).get("batch_size", 16)),
         )
+        self._feature_cache_names: tuple[str, ...] = ()
+        self._feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -205,6 +240,9 @@ class LogScorer:
         # ── Tier 1: Sigma ──────────────────────────────────────────────────────
         self._apply_sigma(scored, events)
 
+        # ── Tier 1b: trained classifier ────────────────────────────────────────
+        self._apply_classifier(scored, events)
+
         # ── Tier 2: BiEncoder dedup + ATT&CK candidate retrieval ──────────────
         bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
         for se, (dedup_res, candidates) in zip(scored, bi_results):
@@ -226,7 +264,6 @@ class LogScorer:
         non_dup_indices = [i for i, se in enumerate(scored) if not se.is_duplicate]
         if non_dup_indices:
             nd_texts = [texts[i] for i in non_dup_indices]
-            nd_events = [events[i] for i in non_dup_indices]
             nd_scored = [scored[i] for i in non_dup_indices]
 
             # NER
@@ -265,7 +302,9 @@ class LogScorer:
             se.ai_threat_score = self._compute_score(se)
             se.ai_priority = self._routing_label(se)
             se.ai_confidence = self._confidence(se)
-            se.scoring_latency_ms = elapsed_ms / len(scored)
+            # Total wall-clock for the batch (per-event latency is meaningless
+            # because models batch-encode). Each event records the full batch time.
+            se.scoring_latency_ms = elapsed_ms
 
         logger.debug(
             "Batch scored",
@@ -294,8 +333,8 @@ class LogScorer:
         If sigma-cli is not installed or no rules exist, this is a no-op.
         """
         try:
-            from sigma.collection import SigmaCollection
-            from sigma.backends.elasticsearch import ElasticsearchQuerystringBackend
+            sigma_collection = importlib.import_module("sigma.collection")
+            sigma_collection_cls = sigma_collection.SigmaCollection
         except ImportError:
             # sigma is optional; skip gracefully
             return
@@ -305,8 +344,8 @@ class LogScorer:
             return
 
         try:
-            rules = SigmaCollection.load_ruleset([str(sigma_rules_dir)])
-            for i, (se, ev) in enumerate(zip(scored, events)):
+            rules = sigma_collection_cls.load_ruleset([str(sigma_rules_dir)])
+            for se, ev in zip(scored, events):
                 # Simplified: we match raw text against rule titles/descriptions
                 # In production: pipe events through a full Sigma evaluation engine
                 for rule in rules:
@@ -320,6 +359,91 @@ class LogScorer:
                         se.sigma_rule_ids.append(str(rule.id or rule.title))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Sigma evaluation failed", error=str(exc))
+
+    def _apply_classifier(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
+        """Populate classifier_score using the trained event-count classifier."""
+        try:
+            feature_vectors = self._classifier_feature_vectors(events)
+            probabilities = self.classifier.predict_proba(feature_vectors)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
+            probabilities = np.full(len(events), 0.5, dtype=np.float32)
+
+        for se, prob in zip(scored, probabilities):
+            se.classifier_score = max(0.0, min(1.0, float(prob)))
+
+        escalation_indices = [
+            i
+            for i, se in enumerate(scored)
+            if self.tier2_classifier.should_escalate(se.classifier_score)
+        ]
+        if not escalation_indices:
+            return
+        if not self.tier2_classifier.is_ready():
+            logger.warning("Tier-2 classifier unavailable; keeping Tier-1 uncertain scores")
+            return
+
+        tier2_texts = [events[i].raw for i in escalation_indices]
+        try:
+            tier2_probs = self.tier2_classifier.predict_proba(tier2_texts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Tier-2 classifier scoring failed; keeping Tier-1 scores", error=str(exc)
+            )
+            return
+
+        for index, prob in zip(escalation_indices, tier2_probs):
+            score = max(0.0, min(1.0, float(prob)))
+            scored[index].classifier_score = score
+            scored[index].tier2_score = score
+            scored[index].tier2_used = True
+
+    def _classifier_feature_vectors(self, events: list[NormalizedEvent]) -> np.ndarray:
+        """
+        Convert normalized log text into the bag-of-event vector expected by the
+        HDFS TraceBench classifier artifacts.
+        """
+        feature_names = tuple(getattr(self.classifier, "feature_names", []) or ())
+        n_features = len(feature_names) or int(
+            getattr(self.classifier, "expected_feature_count", 0) or 1
+        )
+        vectors = np.zeros((len(events), n_features), dtype=np.float32)
+        if not feature_names:
+            return vectors
+
+        prepared_features = self._prepared_classifier_features(feature_names)
+        for row, event in enumerate(events):
+            text = f"{event.text} {event.raw}".lower()
+            text_tokens = set(_TOKEN_RE.findall(text))
+            for col, (feature_text, feature_tokens) in enumerate(prepared_features):
+                if feature_text and feature_text in text:
+                    vectors[row, col] += 1.0
+                    continue
+                if feature_tokens and text_tokens:
+                    hits = sum(1 for token in feature_tokens if token in text_tokens)
+                    if hits / len(feature_tokens) >= 0.75:
+                        vectors[row, col] += 1.0
+        return vectors
+
+    def _prepared_classifier_features(
+        self, feature_names: tuple[str, ...]
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        if feature_names == self._feature_cache_names:
+            return self._feature_cache_tokens
+
+        prepared: list[tuple[str, tuple[str, ...]]] = []
+        for name in feature_names:
+            lowered = name.lower()
+            tokens = tuple(
+                token
+                for token in _TOKEN_RE.findall(lowered)
+                if len(token) > 2 and token not in _FEATURE_STOPWORDS
+            )
+            prepared.append((lowered, tokens))
+
+        self._feature_cache_names = feature_names
+        self._feature_cache_tokens = prepared
+        return prepared
 
     def _compute_score(self, se: ScoredEvent) -> float:
         """Compute final composite threat score."""

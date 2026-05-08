@@ -1,19 +1,27 @@
-HDFS_v3_TraceBench
+# Local datasets and generated artifacts
+HDFS_v3_TraceBench/
+models/*
+!models/.gitkeep
+notebooks/artifacts/
+
+# Local environments and tool state
 .venv/
+.codex
+.codex/
+.ruff_cache/
+.mypy_cache/
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.ipynb_checkpoints/
 htmlcov/
 .coverage
+.coverage.*
 *.egg-info/
 dist/
 build/
 .env
-models/*.onnx
-models/*.json
-models/*.pkl
-models/*.bin
+
 # HuggingFace cache
 .cache/
-

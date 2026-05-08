@@ -123,7 +123,7 @@ def test_onnx_classifier() -> bool:
 
     classifier = LogClassifier(
         model_path=ROOT / "models" / "log_classifier.onnx",
-        scaler_path=ROOT / "models" / "scaler.pkl",
+        scaler_path=ROOT / "models" / "scaler.json",
         feature_names_path=ROOT / "models" / "feature_names.json",
     )
 

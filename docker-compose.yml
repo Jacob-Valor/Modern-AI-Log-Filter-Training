@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ── AI Log Filter — Full Production Stack ─────────────────────────────────────
 #
 # Services:
@@ -8,8 +6,9 @@ version: "3.9"
 #   kafka-init     — One-shot topic creation
 #   elasticsearch  — Raw log archive (archive-first pattern)
 #   kibana         — ES dashboard (optional, dev only)
+#   archive        — Kafka consumer → Elasticsearch raw-log archive
 #   logfilter-api  — FastAPI AI scoring service (SecureBERT2.0 models)
-#   collector      — Syslog/HTTP receiver → Kafka producer
+#   collector      — Syslog receiver → Kafka producer
 #   router         — Kafka consumer → LEEF enricher → QRadar syslog forwarder
 #   prometheus     — Metrics scraping
 #   grafana        — Dashboard
@@ -26,10 +25,24 @@ x-common-env: &common-env
   KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
   ES_HOST: "http://elasticsearch:9200"
   ES_USER: "elastic"
-  ES_PASSWORD: "changeme"
+  # ES_PASSWORD MUST be supplied via .env (no default). docker compose will
+  # fail loudly if unset, which is intentional — this is security telemetry.
+  ES_PASSWORD: "${ES_PASSWORD:?ES_PASSWORD must be set in .env}"
   QRADAR_HOST: "${QRADAR_HOST:-localhost}"
+  LOGFILTER_ADMIN_TOKEN: "${LOGFILTER_ADMIN_TOKEN:?LOGFILTER_ADMIN_TOKEN must be set in .env}"
+  LOGFILTER_API_TOKEN: "${LOGFILTER_API_TOKEN:?LOGFILTER_API_TOKEN must be set in .env}"
+  LOGFILTER_METRICS_TOKEN: "${LOGFILTER_METRICS_TOKEN:-}"
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
+
+x-python-service-security: &python-service-security
+  security_opt:
+    - "no-new-privileges:true"
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=256m
 
 services:
 
@@ -59,7 +72,7 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"       # external (host) access
+      - "127.0.0.1:9092:9092"       # local dev access only
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
@@ -112,15 +125,17 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=true
-      - ELASTIC_PASSWORD=changeme
+      - ELASTIC_PASSWORD=${ES_PASSWORD:?ES_PASSWORD must be set in .env}
       - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
       - cluster.name=logfilter-cluster
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
     volumes:
       - es-data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -su elastic:changeme http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"]
+      test:
+        - "CMD-SHELL"
+        - "curl -su elastic:$$ELASTIC_PASSWORD http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"
       interval: 20s
       timeout: 10s
       retries: 5
@@ -137,16 +152,35 @@ services:
       elasticsearch:
         condition: service_healthy
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     environment:
       ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
       ELASTICSEARCH_USERNAME: elastic
-      ELASTICSEARCH_PASSWORD: changeme
+      ELASTICSEARCH_PASSWORD: ${ES_PASSWORD:?ES_PASSWORD must be set in .env}
     profiles: ["dev"]   # only started with: docker compose --profile dev up
+    restart: unless-stopped
+
+  # ── Raw Log Archiver (Kafka → Elasticsearch) ─────────────────────────────
+  archive:
+    <<: *python-service-security
+    build:
+      context: .
+      dockerfile: docker/archive/Dockerfile
+    container_name: logfilter-archive
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config:/app/config:ro
     restart: unless-stopped
 
   # ── AI Scoring API ─────────────────────────────────────────────────────────
   logfilter-api:
+    <<: *python-service-security
     build:
       context: .
       dockerfile: docker/api/Dockerfile
@@ -157,7 +191,7 @@ services:
       elasticsearch:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       <<: *common-env
     volumes:
@@ -179,6 +213,7 @@ services:
 
   # ── Log Collector (syslog listener → Kafka) ────────────────────────────────
   collector:
+    <<: *python-service-security
     build:
       context: .
       dockerfile: docker/collector/Dockerfile
@@ -187,16 +222,18 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "5140:5140/udp"   # syslog UDP (unprivileged port; map from 514 at load balancer)
-      - "5140:5140/tcp"   # syslog TCP
+      - "127.0.0.1:5140:5140/udp"   # local dev; expose via trusted load balancer in prod
+      - "127.0.0.1:5140:5140/tcp"   # local dev; expose via trusted load balancer in prod
     environment:
       <<: *common-env
+      SYSLOG_ALLOWED_CIDRS: "${SYSLOG_ALLOWED_CIDRS:-127.0.0.1/32,::1/128}"
     volumes:
       - ./config:/app/config:ro
     restart: unless-stopped
 
   # ── Router (Kafka consumer → LEEF → QRadar) ───────────────────────────────
   router:
+    <<: *python-service-security
     build:
       context: .
       dockerfile: docker/router/Dockerfile
@@ -217,7 +254,7 @@ services:
     image: prom/prometheus:v2.51.0
     container_name: logfilter-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -235,10 +272,12 @@ services:
     depends_on:
       - prometheus
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "admin"
-      GF_SECURITY_ADMIN_USER: "admin"
+      # Grafana admin password MUST be supplied via .env. Default-credentials
+      # were removed because dashboards may surface scored telemetry.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}"
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana-data:/var/lib/grafana

@@ -18,11 +18,11 @@ from __future__ import annotations
 import json
 import signal
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 from kafka import KafkaConsumer
-from kafka.errors import KafkaError
 
 logger = structlog.get_logger(__name__)
 
@@ -63,7 +63,7 @@ class ArchiveConsumer:
             bootstrap_servers=self.bootstrap_servers,
             group_id="logfilter-archiver",
             auto_offset_reset="latest",
-            enable_auto_commit=True,
+            enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             max_poll_records=self.batch_size,
         )
@@ -100,12 +100,15 @@ class ArchiveConsumer:
 
                 if bulk_body:
                     try:
-                        self.es.bulk(body=bulk_body)
+                        result = self.es.bulk(body=bulk_body)
+                        if result.get("errors"):
+                            raise RuntimeError("Elasticsearch bulk response contained errors")
                         n = len(bulk_body) // 2
                         archived_total += n
+                        consumer.commit()
                         logger.debug("Archived to ES", n=n, total=archived_total)
                     except Exception as exc:  # noqa: BLE001
-                        logger.error("ES bulk write failed", error=str(exc))
+                        logger.error("ES bulk write failed; offsets not committed", error=str(exc))
 
         finally:
             consumer.close()
@@ -150,7 +153,7 @@ class ScorerConsumer:
             bootstrap_servers=self.bootstrap_servers,
             group_id="logfilter-scorer",
             auto_offset_reset="latest",
-            enable_auto_commit=True,
+            enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             max_poll_records=self.batch_size,
         )
@@ -188,14 +191,21 @@ class ScorerConsumer:
                                 value=scored_event,
                                 key=scored_event.get("host", "unknown"),
                             )
+                        if hasattr(self._producer, "flush"):
+                            self._producer.flush(timeout=30)
 
+                    consumer.commit()
                     logger.debug(
                         "Batch scored and routed",
                         n=len(scored_batch),
                         total=scored_total,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logger.error("Scoring batch failed", error=str(exc), batch_size=len(batch))
+                    logger.error(
+                        "Scoring batch failed; offsets not committed",
+                        error=str(exc),
+                        batch_size=len(batch),
+                    )
 
         finally:
             consumer.close()

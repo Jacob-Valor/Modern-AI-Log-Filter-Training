@@ -19,7 +19,10 @@ def normalizer():
 
 class TestSyslog3164:
     def test_basic_syslog(self, normalizer):
-        raw = "Jan 15 11:07:53 prod-server01 sshd[22345]: Failed password for root from 10.0.0.5 port 44382 ssh2"
+        raw = (
+            "Jan 15 11:07:53 prod-server01 sshd[22345]: Failed password "
+            "for root from 10.0.0.5 port 44382 ssh2"
+        )
         ev = normalizer.normalize(raw)
         assert ev.source_type == LogSourceType.SYSLOG
         assert ev.host == "prod-server01"

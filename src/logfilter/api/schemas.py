@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
-
 
 # ── Request schemas ────────────────────────────────────────────────────────────
 
@@ -27,7 +24,10 @@ class ScoreRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "raw": "Jan 15 11:07:53 prod-server01 sshd[22345]: Failed password for root from 10.0.0.5 port 44382 ssh2",
+                "raw": (
+                    "Jan 15 11:07:53 prod-server01 sshd[22345]: Failed password "
+                    "for root from 10.0.0.5 port 44382 ssh2"
+                ),
                 "source_type": "syslog",
             }
         }
@@ -85,6 +85,8 @@ class ScoreResponse(BaseModel):
 
     # Score components
     classifier_score: float
+    tier2_score: float
+    tier2_used: bool
     entity_boost: float
     cross_encoder_max: float
 
@@ -122,14 +124,22 @@ class ScoreResponse(BaseModel):
                     {"technique_id": "T1110.001", "name": "Password Guessing", "score": 0.82}
                 ],
                 "classifier_score": 0.76,
+                "tier2_score": 0.0,
+                "tier2_used": False,
                 "entity_boost": 0.20,
                 "cross_encoder_max": 0.82,
                 "source_type": "syslog",
                 "host": "prod-server01",
                 "timestamp": "Jan 15 11:07:53",
-                "normalized_text": "Host prod-server01 Process sshd[22345]: Failed password for root from 10.0.0.5 port 44382 ssh2",
+                "normalized_text": (
+                    "Host prod-server01 Process sshd[22345]: Failed password "
+                    "for root from 10.0.0.5 port 44382 ssh2"
+                ),
                 "scoring_latency_ms": 45.3,
-                "leef_payload": "LEEF:2.0|YourCo|AIPreprocessor|1.0|LOG_EVENT|^|ai_threat_score=0.8700\t...",
+                "leef_payload": (
+                    "LEEF:2.0|YourCo|AIPreprocessor|1.0|LOG_EVENT|^|"
+                    "ai_threat_score=0.8700\t..."
+                ),
             }
         }
     }

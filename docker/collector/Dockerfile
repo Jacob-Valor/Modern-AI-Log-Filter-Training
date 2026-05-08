@@ -9,12 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir kafka-python structlog tenacity pyyaml
+RUN pip install --no-cache-dir -c requirements.txt kafka-python structlog tenacity PyYAML
 
 COPY src/ ./src/
 COPY config/ ./config/
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e . --no-deps
 
 RUN useradd -m -u 1000 logfilter && chown -R logfilter:logfilter /app
 USER logfilter

@@ -38,10 +38,16 @@ class LogArchive:
         hosts: list[str] | None = None,
         index_prefix: str = "raw-logs",
         username: str = "elastic",
-        password: str = "changeme",
+        password: str = "",
         shards: int = 1,
         replicas: int = 0,
     ) -> None:
+        if not password:
+            raise ValueError(
+                "LogArchive: Elasticsearch password is required. "
+                "Set ES_PASSWORD env var or config.elasticsearch.password "
+                "(no built-in default)."
+            )
         self.index_prefix = index_prefix
         self.shards = shards
         self.replicas = replicas
@@ -52,6 +58,11 @@ class LogArchive:
             max_retries=3,
         )
         self._ensure_index_template()
+
+    @property
+    def client(self) -> Elasticsearch:
+        """Underlying Elasticsearch client for integrations that need bulk APIs."""
+        return self._es
 
     def _today_index(self) -> str:
         return f"{self.index_prefix}-{time.strftime('%Y.%m.%d')}"

@@ -21,7 +21,7 @@ COPY models/ ./models/
 COPY pyproject.toml .
 
 # Install the logfilter package
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e . --no-deps
 
 # Non-root user
 RUN useradd -m -u 1000 logfilter && chown -R logfilter:logfilter /app

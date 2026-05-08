@@ -1,7 +1,7 @@
 """
 Standalone evaluation script.
 
-Loads a saved XGBoost model and scaler, evaluates on the held-out test set,
+Loads a saved XGBoost model and scaler parameters, evaluates on the held-out test set,
 and prints a detailed classification report.
 
 Usage:
@@ -11,9 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import pickle
 import sys
 from pathlib import Path
 
@@ -31,7 +29,8 @@ from sklearn.metrics import (
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from training.data_loader import load_traces, split_dataset
+from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402
+from training.data_loader import load_traces, split_dataset  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,7 +45,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         default=ROOT / "models",
-        help="Directory with log_classifier.json and scaler.pkl",
+        help="Directory with log_classifier.json and scaler.json",
     )
     parser.add_argument(
         "--threshold",
@@ -64,8 +63,7 @@ def main() -> None:
     model = xgb.XGBClassifier()
     model.load_model(str(args.model_dir / "log_classifier.json"))
 
-    with open(args.model_dir / "scaler.pkl", "rb") as f:
-        scaler = pickle.load(f)
+    scaler = SafeMaxAbsScaler.from_json(args.model_dir / "scaler.json")
 
     # Load data and reproduce the exact same test split
     X, y, _ = load_traces()
@@ -79,7 +77,7 @@ def main() -> None:
     print(f"  Log Classifier Evaluation  (threshold={args.threshold:.2f})")
     print(f"{'=' * 60}")
     print(f"\nTest samples: {len(y_test):,}  |  Failures: {int(y_test.sum()):,}")
-    print(f"\nClassification Report:\n")
+    print("\nClassification Report:\n")
     print(classification_report(y_test, y_pred, target_names=["normal", "failure"]))
     print(f"ROC-AUC:  {roc_auc_score(y_test, y_prob):.4f}")
     print(f"F1:       {f1_score(y_test, y_pred):.4f}")
