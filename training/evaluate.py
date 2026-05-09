@@ -27,6 +27,9 @@ from sklearn.metrics import (
 )
 
 ROOT = Path(__file__).parent.parent
+# Repo root must be on sys.path so ``from training.data_loader`` works when this
+# file is run directly (Python only auto-adds the script's own directory).
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import xgboost as xgb
+import xgboost.callback
 from sklearn.metrics import (
     classification_report,
     f1_score,
@@ -31,6 +32,9 @@ from sklearn.metrics import (
 )
 
 ROOT = Path(__file__).parent.parent
+# Repo root must be on sys.path so ``from training.data_loader`` works when this
+# file is run directly (Python only auto-adds the script's own directory).
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402
@@ -162,11 +166,14 @@ def main() -> None:
         learning_rate=args.learning_rate,
         scale_pos_weight=scale_pos_weight,
         eval_metric="aucpr",
-        early_stopping_rounds=20,
-        use_label_encoder=False,
-        tree_method="hist",  # CPU-friendly
+        tree_method="hist",
         n_jobs=-1,
         random_state=42,
+        callbacks=[
+            xgb.callback.EarlyStopping(
+                rounds=20, save_best=True, maximize=True, metric_name="aucpr"
+            )
+        ],
     )
     model.fit(
         X_train_s,

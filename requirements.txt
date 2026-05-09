@@ -1,6 +1,6 @@
 # Core ML
 torch>=2.8.0
-transformers>=5.0.0
+transformers>=4.46.0
 sentence-transformers>=5.4.1
 onnxruntime>=1.18.0
 onnx>=1.21.0

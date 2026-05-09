@@ -122,10 +122,12 @@ def build_hf_dataset(
     )
 
     def tokenize_batch(batch: dict[str, list[str]]) -> dict[str, Any]:
+        # No padding here: DataCollatorWithPadding pads each batch to the
+        # longest sequence in that batch, which is ~10x cheaper than padding
+        # every input to ``max_length`` when most windows are far shorter.
         return tokenizer(
             batch["text"],
             truncation=True,
-            padding="max_length",
             max_length=max_length,
         )
 
@@ -253,6 +255,7 @@ def main() -> None:
     auto_model = transformers.AutoModelForSequenceClassification
     early_stopping_callback = transformers.EarlyStoppingCallback
     training_args_cls = transformers.TrainingArguments
+    data_collator_cls = transformers.DataCollatorWithPadding
     set_seed = transformers.set_seed
     weighted_trainer_cls = make_weighted_loss_trainer(transformers.Trainer, nn_module)
 
@@ -339,7 +342,8 @@ def main() -> None:
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
+        data_collator=data_collator_cls(tokenizer=tokenizer),
         compute_metrics=compute_metrics,
         callbacks=[early_stopping_callback(early_stopping_patience=2)],
         class_weights=class_weights,
