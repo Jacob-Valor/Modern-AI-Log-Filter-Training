@@ -36,7 +36,8 @@ jobs:
             numpy \
             prometheus-client \
             pydantic \
-            structlog
+            structlog \
+            tenacity
           python -m pip install \
             pytest \
             pytest-asyncio \
