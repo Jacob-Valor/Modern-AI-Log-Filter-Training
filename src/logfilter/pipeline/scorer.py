@@ -39,6 +39,48 @@ from logfilter.pipeline.normalizer import NormalizedEvent
 
 logger = structlog.get_logger(__name__)
 
+
+def _enabled(value: Any, default: bool = True) -> bool:
+    """Parse config values that may arrive as booleans or env-substituted strings."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+class DisabledNERModel(NERModel):
+    """No-op NER stage for local validation or deployments without NER artifacts."""
+
+    def extract_batch(self, texts: list[str]) -> list[Any]:
+        from logfilter.models.ner import ExtractedEntities
+
+        return [ExtractedEntities() for _ in texts]
+
+
+class DisabledBiEncoderModel(BiEncoderModel):
+    """No-op BiEncoder stage that marks events as non-duplicates with no candidates."""
+
+    def check_dedup_and_retrieve_batch(self, texts: list[str]) -> list[tuple[Any, list[Any]]]:
+        from logfilter.models.biencoder import DedupResult
+
+        return [(DedupResult(is_duplicate=False, similarity=0.0), []) for _ in texts]
+
+
+class DisabledCrossEncoderModel(CrossEncoderModel):
+    """No-op CrossEncoder stage for local validation without downloading HF models."""
+
+    def score_batch(
+        self,
+        log_texts: list[str],
+        candidates_per_log: list[list[dict[str, str]]],
+    ) -> list[list[Any]]:
+        del candidates_per_log
+        return [[] for _ in log_texts]
+
+
 _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
 _FEATURE_STOPWORDS = {
     "a",
@@ -190,31 +232,43 @@ class LogScorer:
             model_path=models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
         )
         self.tier2_classifier = tier2_classifier or Tier2Classifier()
-        self.ner_model = ner_model or NERModel(
-            model_id=models_cfg.get("ner", {}).get("model_id", NERModel.MODEL_ID),
-            device=models_cfg.get("ner", {}).get("device", "cpu"),
-            batch_size=int(models_cfg.get("ner", {}).get("batch_size", 32)),
-            min_confidence=float(models_cfg.get("ner", {}).get("min_confidence", 0.80)),
+        ner_cfg = models_cfg.get("ner", {})
+        biencoder_cfg = models_cfg.get("biencoder", {})
+        cross_encoder_cfg = models_cfg.get("cross_encoder", {})
+
+        self.ner_model = ner_model or (
+            NERModel(
+                model_id=ner_cfg.get("model_id", NERModel.MODEL_ID),
+                device=ner_cfg.get("device", "cpu"),
+                batch_size=int(ner_cfg.get("batch_size", 32)),
+                min_confidence=float(ner_cfg.get("min_confidence", 0.80)),
+            )
+            if _enabled(ner_cfg.get("enabled", True))
+            else DisabledNERModel()
         )
-        self.biencoder = biencoder or BiEncoderModel(
-            model_id=models_cfg.get("biencoder", {}).get("model_id", BiEncoderModel.MODEL_ID),
-            device=models_cfg.get("biencoder", {}).get("device", "cpu"),
-            batch_size=int(models_cfg.get("biencoder", {}).get("batch_size", 64)),
-            dedup_threshold=float(models_cfg.get("biencoder", {}).get("dedup_threshold", 0.95)),
-            dedup_window_minutes=float(
-                models_cfg.get("biencoder", {}).get("dedup_window_minutes", 5.0)
-            ),
-            faiss_top_k=int(models_cfg.get("biencoder", {}).get("faiss_top_k", 3)),
-            mitre_techniques_path=models_cfg.get(
-                "mitre_techniques_path", "config/mitre_techniques.json"
-            ),
+        self.biencoder = biencoder or (
+            BiEncoderModel(
+                model_id=biencoder_cfg.get("model_id", BiEncoderModel.MODEL_ID),
+                device=biencoder_cfg.get("device", "cpu"),
+                batch_size=int(biencoder_cfg.get("batch_size", 64)),
+                dedup_threshold=float(biencoder_cfg.get("dedup_threshold", 0.95)),
+                dedup_window_minutes=float(biencoder_cfg.get("dedup_window_minutes", 5.0)),
+                faiss_top_k=int(biencoder_cfg.get("faiss_top_k", 3)),
+                mitre_techniques_path=models_cfg.get(
+                    "mitre_techniques_path", "config/mitre_techniques.json"
+                ),
+            )
+            if _enabled(biencoder_cfg.get("enabled", True))
+            else DisabledBiEncoderModel()
         )
-        self.cross_encoder = cross_encoder or CrossEncoderModel(
-            model_id=models_cfg.get("cross_encoder", {}).get(
-                "model_id", CrossEncoderModel.MODEL_ID
-            ),
-            device=models_cfg.get("cross_encoder", {}).get("device", "cpu"),
-            batch_size=int(models_cfg.get("cross_encoder", {}).get("batch_size", 16)),
+        self.cross_encoder = cross_encoder or (
+            CrossEncoderModel(
+                model_id=cross_encoder_cfg.get("model_id", CrossEncoderModel.MODEL_ID),
+                device=cross_encoder_cfg.get("device", "cpu"),
+                batch_size=int(cross_encoder_cfg.get("batch_size", 16)),
+            )
+            if _enabled(cross_encoder_cfg.get("enabled", True))
+            else DisabledCrossEncoderModel()
         )
         self._feature_cache_names: tuple[str, ...] = ()
         self._feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
@@ -349,10 +403,11 @@ class LogScorer:
                 # Simplified: we match raw text against rule titles/descriptions
                 # In production: pipe events through a full Sigma evaluation engine
                 for rule in rules:
+                    detection = getattr(rule, "detection", {}) or {}
                     rule_text = (
                         (rule.title or "").lower()
                         + " "
-                        + " ".join(str(d) for d in (rule.detection or {}))
+                        + " ".join(str(d) for d in detection)
                     )
                     if any(kw in ev.text.lower() for kw in rule_text.split() if len(kw) > 4):
                         se.sigma_matched = True

@@ -25,17 +25,19 @@ elasticsearch:
 models:
   # ONNX classifier trained on HDFS TraceBench
   classifier:
-    path: "models/log_classifier.onnx"
+    path: "${LOGFILTER_CLASSIFIER_PATH:models/log_classifier.onnx}"
     threshold: 0.6
 
   # SecureBERT 2.0 family (downloaded from Hugging Face)
   ner:
+    enabled: "${LOGFILTER_NER_ENABLED:true}"
     model_id: "cisco-ai/SecureBERT2.0-NER"
     device: "cpu"          # or "cuda"
     batch_size: 32
     min_confidence: 0.80
 
   biencoder:
+    enabled: "${LOGFILTER_BIENCODER_ENABLED:true}"
     model_id: "cisco-ai/SecureBERT2.0-biencoder"
     device: "cpu"
     batch_size: 64
@@ -44,6 +46,7 @@ models:
     faiss_top_k: 3         # ATT&CK candidate retrieval
 
   cross_encoder:
+    enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"
     model_id: "cisco-ai/SecureBERT2.0-cross_encoder"
     device: "cpu"
     batch_size: 16
