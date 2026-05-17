@@ -51,6 +51,27 @@ def _enabled(value: Any, default: bool = True) -> bool:
     return bool(value)
 
 
+def _probability_config(value: Any, name: str) -> float:
+    """Parse and validate a probability threshold from config or env."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a numeric probability") from exc
+    if not 0.0 <= parsed <= 1.0:
+        raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return parsed
+
+
+def _routing_thresholds(routing: dict[str, Any]) -> tuple[float, float, float]:
+    """Return validated low/medium/high routing thresholds."""
+    high = _probability_config(routing.get("high", 0.85), "routing.high")
+    medium = _probability_config(routing.get("medium", 0.50), "routing.medium")
+    low = _probability_config(routing.get("low", 0.20), "routing.low")
+    if not low < medium < high:
+        raise ValueError("routing thresholds must satisfy low < medium < high")
+    return low, medium, high
+
+
 class DisabledNERModel(NERModel):
     """No-op NER stage for local validation or deployments without NER artifacts."""
 
@@ -222,16 +243,20 @@ class LogScorer:
         self.dedup_penalty_value = float(scoring.get("dedup_penalty", 0.30))
 
         routing = scoring.get("routing", {})
-        self.threshold_high = float(routing.get("high", 0.85))
-        self.threshold_medium = float(routing.get("medium", 0.50))
-        self.threshold_low = float(routing.get("low", 0.20))
+        self.threshold_low, self.threshold_medium, self.threshold_high = _routing_thresholds(
+            routing
+        )
 
         models_cfg = config.get("models", {})
 
         self.classifier = classifier or LogClassifier(
             model_path=models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
         )
-        self.tier2_classifier = tier2_classifier or Tier2Classifier()
+        tier2_cfg = scoring.get("tier2", {})
+        self.tier2_classifier = tier2_classifier or Tier2Classifier(
+            uncertainty_low=tier2_cfg.get("uncertainty_low", 0.10),
+            uncertainty_high=tier2_cfg.get("uncertainty_high", 0.90),
+        )
         ner_cfg = models_cfg.get("ner", {})
         biencoder_cfg = models_cfg.get("biencoder", {})
         cross_encoder_cfg = models_cfg.get("cross_encoder", {})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from logfilter.models.biencoder import ATTACKCandidate, BiEncoderModel, DedupResult
 from logfilter.models.classifier import LogClassifier
@@ -168,3 +169,61 @@ def test_optional_downstream_models_can_be_disabled_for_local_validation() -> No
     assert scored.entities["confidence"] == 0.0
     assert scored.cross_encoder_scores == []
     assert scored.ai_priority == "MEDIUM"
+
+
+def test_routing_thresholds_accept_env_substituted_strings() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "routing": {"high": "0.90", "medium": "0.60", "low": "0.30"}
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    assert scorer.threshold_high == pytest.approx(0.90)
+    assert scorer.threshold_medium == pytest.approx(0.60)
+    assert scorer.threshold_low == pytest.approx(0.30)
+
+
+def test_scorer_wires_tier2_uncertainty_config() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {"tier2": {"uncertainty_low": "0.25", "uncertainty_high": "0.75"}}
+        },
+        classifier=FakeClassifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    assert scorer.tier2_classifier.uncertainty_low == pytest.approx(0.25)
+    assert scorer.tier2_classifier.uncertainty_high == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize(
+    "routing, message",
+    [
+        ({"high": "1.20", "medium": "0.50", "low": "0.20"}, "between"),
+        ({"high": "0.85", "medium": "0.50", "low": "-0.10"}, "between"),
+        ({"high": "0.85", "medium": "abc", "low": "0.20"}, "numeric"),
+        ({"high": "0.85", "medium": "0.20", "low": "0.20"}, "low < medium"),
+        ({"high": "0.50", "medium": "0.50", "low": "0.20"}, "low < medium"),
+    ],
+)
+def test_invalid_routing_thresholds_fail_fast(
+    routing: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        LogScorer(
+            config={"scoring": {"routing": routing}},
+            classifier=FakeClassifier(),
+            tier2_classifier=FakeTier2Classifier(),
+            ner_model=FakeNER(),
+            biencoder=FakeBiEncoder(),
+            cross_encoder=FakeCrossEncoder(),
+        )

@@ -121,6 +121,32 @@ def test_tier2_should_escalate_band() -> None:
     assert not classifier.should_escalate(0.95)
 
 
+def test_tier2_custom_uncertainty_band_accepts_config_strings() -> None:
+    classifier = Tier2Classifier(uncertainty_low="0.30", uncertainty_high="0.70")
+
+    assert not classifier.should_escalate(0.20)
+    assert classifier.should_escalate(0.30)
+    assert classifier.should_escalate(0.50)
+    assert classifier.should_escalate(0.70)
+    assert not classifier.should_escalate(0.80)
+
+
+@pytest.mark.parametrize(
+    "low, high, message",
+    [
+        ("-0.01", "0.90", "between"),
+        ("0.10", "1.01", "between"),
+        ("abc", "0.90", "numeric"),
+        ("0.91", "0.90", "<= uncertainty_high"),
+    ],
+)
+def test_tier2_invalid_uncertainty_band_fails_fast(
+    low: str, high: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Tier2Classifier(uncertainty_low=low, uncertainty_high=high)
+
+
 def test_tier2_predict_returns_valid_probs(tmp_path) -> None:
     (tmp_path / "tokenizer.json").write_text("{}")
     (tmp_path / "log_classifier_tier2.onnx").write_bytes(b"fake")

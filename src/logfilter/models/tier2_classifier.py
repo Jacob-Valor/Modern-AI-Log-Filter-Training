@@ -15,18 +15,35 @@ logger = structlog.get_logger(__name__)
 ROOT = Path(__file__).parent.parent.parent.parent
 
 
+def _probability_config(value: float | str, name: str) -> float:
+    """Parse and validate a probability threshold from config or env."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a numeric probability") from exc
+    if not 0.0 <= parsed <= 1.0:
+        raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return parsed
+
+
 class Tier2Classifier:
     """Lazy-loading transformer classifier for Tier-1 uncertainty escalation."""
 
     def __init__(
         self,
         model_dir: Path = ROOT / "models" / "tier2",
-        uncertainty_low: float = 0.10,
-        uncertainty_high: float = 0.90,
+        uncertainty_low: float | str = 0.10,
+        uncertainty_high: float | str = 0.90,
     ) -> None:
         self.model_dir = Path(model_dir)
-        self.uncertainty_low = float(uncertainty_low)
-        self.uncertainty_high = float(uncertainty_high)
+        self.uncertainty_low = _probability_config(
+            uncertainty_low, "tier2 uncertainty_low"
+        )
+        self.uncertainty_high = _probability_config(
+            uncertainty_high, "tier2 uncertainty_high"
+        )
+        if self.uncertainty_low > self.uncertainty_high:
+            raise ValueError("tier2 uncertainty_low must be <= uncertainty_high")
         self.onnx_path = self.model_dir / "log_classifier_tier2.onnx"
         self.label_map_path = self.model_dir / "tier2_label_map.json"
 
