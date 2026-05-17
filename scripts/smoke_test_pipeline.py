@@ -15,7 +15,6 @@ Also validates the ONNX classifier directly on a zero-vector input.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,10 +22,10 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from logfilter.pipeline.enricher import LEEFEnricher
-from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
-from logfilter.pipeline.router import LogRouter, RoutingMode
-from logfilter.pipeline.scorer import LogScorer, ScoredEvent
+from logfilter.pipeline.enricher import LEEFEnricher  # noqa: E402
+from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType  # noqa: E402
+from logfilter.pipeline.router import LogRouter  # noqa: E402
+from logfilter.pipeline.scorer import LogScorer, ScoredEvent  # noqa: E402
 
 PASS = "\033[92m✓\033[0m"
 FAIL = "\033[91m✗\033[0m"
@@ -50,7 +49,8 @@ def test_normalizer() -> bool:
     cases = [
         (
             "syslog",
-            "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for root from 10.0.0.5 port 44382 ssh2",
+            "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for "
+            "root from 10.0.0.5 port 44382 ssh2",
             LogSourceType.SYSLOG,
             "prod-srv01",
         ),
@@ -69,7 +69,8 @@ def test_normalizer() -> bool:
         ),
         (
             "CEF firewall",
-            "CEF:0|Palo Alto|NGFW|10.0|threat|SSH brute force|8|src=10.0.0.5 dst=192.168.1.1 spt=55000 dpt=22",
+            "CEF:0|Palo Alto|NGFW|10.0|threat|SSH brute force|8|"
+            "src=10.0.0.5 dst=192.168.1.1 spt=55000 dpt=22",
             LogSourceType.FIREWALL,
             None,
         ),
@@ -208,7 +209,7 @@ def test_leef_enricher() -> bool:
             ok = False
         print(f"  {status} {name}")
 
-    print(f"\n  LEEF preview (first 200 chars):")
+    print("\n  LEEF preview (first 200 chars):")
     print(f"  {leef[:200]}…")
 
     return ok
@@ -298,6 +299,7 @@ def test_scorer_mocked() -> bool:
     ):
         # Set up mock return values
         import numpy as np
+
         from logfilter.models.biencoder import ATTACKCandidate, DedupResult
         from logfilter.models.ner import ExtractedEntities
 
@@ -347,6 +349,7 @@ def test_scorer_mocked() -> bool:
                 "entity_boost_value": 0.20,
                 "dedup_penalty": 0.30,
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+                "tier2": {"uncertainty_low": 0.10, "uncertainty_high": 0.90},
             },
             "models": {
                 "classifier": {"path": "models/log_classifier.onnx"},
@@ -381,7 +384,10 @@ def test_scorer_mocked() -> bool:
             cross_encoder=mock_ce,
         )
 
-        raw = "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for root from 10.0.0.5 port 44382 ssh2"
+        raw = (
+            "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for "
+            "root from 10.0.0.5 port 44382 ssh2"
+        )
         normalized = normalizer.normalize(raw)
         scored = scorer.score(normalized)
         leef = enricher.enrich(scored)
