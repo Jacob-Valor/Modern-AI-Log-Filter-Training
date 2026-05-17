@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -28,9 +29,11 @@ from sklearn.metrics import (
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402
 from training.data_loader import load_traces, split_dataset  # noqa: E402
+from training.thresholds import summarize_threshold_sweep, threshold_sweep  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +55,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Decision threshold for positive (failure) class",
+    )
+    parser.add_argument(
+        "--threshold-report",
+        type=Path,
+        default=None,
+        help="Optional JSON output path for a threshold sweep report",
+    )
+    parser.add_argument(
+        "--min-recall",
+        type=float,
+        default=0.90,
+        help="Recall target used when summarizing threshold candidates",
     )
     return parser.parse_args()
 
@@ -93,6 +108,26 @@ def main() -> None:
     print(f"  False Negatives (failure missed):           {fn:,}")
     print(f"  True Positives  (failure correctly flagged): {tp:,}")
     print(f"\n  False Negative Rate (missed failures): {fn / max(fn + tp, 1):.4f}")
+
+    sweep = threshold_sweep(y_test, y_prob)
+    summary = summarize_threshold_sweep(sweep, min_recall=args.min_recall)
+    print("\nThreshold strategy candidates:")
+    print(f"  Best F1: {summary['best_f1']}")
+    print(
+        f"  Best precision at recall>={args.min_recall:.2f}: "
+        f"{summary['best_precision_at_min_recall']}"
+    )
+    if args.threshold_report is not None:
+        payload = {
+            "model": "tier1_xgboost",
+            "split": "test",
+            "selected_threshold": round(float(args.threshold), 4),
+            "summary": summary,
+            "sweep": sweep,
+        }
+        args.threshold_report.parent.mkdir(parents=True, exist_ok=True)
+        args.threshold_report.write_text(json.dumps(payload, indent=2))
+        print(f"\nThreshold report saved to {args.threshold_report}")
 
 
 if __name__ == "__main__":
