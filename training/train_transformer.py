@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from training.data_loader import split_dataset  # noqa: E402
 from training.text_dataset import build_windows  # noqa: E402
+from training.thresholds import summarize_threshold_sweep, threshold_sweep  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -185,14 +186,25 @@ def compute_metrics(eval_pred: tuple[np.ndarray, np.ndarray]) -> dict[str, float
     }
 
 
-def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, float | str]:
-    metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split)
+def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, Any]:
+    predictions = trainer.predict(test_dataset=dataset, metric_key_prefix=split)
+    metrics = predictions.metrics
+    logits = np.asarray(predictions.predictions, dtype=np.float32)
+    labels = np.asarray(predictions.label_ids, dtype=np.int32)
+    logits_shifted = logits - np.max(logits, axis=-1, keepdims=True)
+    exp_logits = np.exp(logits_shifted)
+    y_prob = (exp_logits / exp_logits.sum(axis=-1, keepdims=True))[:, 1]
+    sweep = threshold_sweep(labels, y_prob)
     result = {
         "split": split,
         "precision": round(float(metrics[f"{split}_precision"]), 4),
         "recall": round(float(metrics[f"{split}_recall"]), 4),
         "f1": round(float(metrics[f"{split}_f1"]), 4),
         "roc_auc": round(float(metrics[f"{split}_roc_auc"]), 4),
+        "threshold_strategy": {
+            "summary": summarize_threshold_sweep(sweep),
+            "sweep": sweep,
+        },
     }
     logger.info(
         "[%s]  Precision=%.4f  Recall=%.4f  F1=%.4f  ROC-AUC=%.4f",
