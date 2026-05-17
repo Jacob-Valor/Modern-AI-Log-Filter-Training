@@ -26,7 +26,6 @@ models:
   # ONNX classifier trained on HDFS TraceBench
   classifier:
     path: "${LOGFILTER_CLASSIFIER_PATH:models/log_classifier.onnx}"
-    threshold: 0.6
 
   # SecureBERT 2.0 family (downloaded from Hugging Face)
   ner:
@@ -64,10 +63,14 @@ scoring:
   dedup_penalty: 0.30
 
   routing:
-    high:   0.85   # ai_priority=HIGH
-    medium: 0.50   # ai_priority=MEDIUM
-    low:    0.20   # ai_priority=LOW (forward, sampled at 10%)
+    high:   "${LOGFILTER_SCORE_HIGH:0.85}"   # ai_priority=HIGH
+    medium: "${LOGFILTER_SCORE_MEDIUM:0.50}" # ai_priority=MEDIUM
+    low:    "${LOGFILTER_SCORE_LOW:0.20}"    # ai_priority=LOW (forward, sampled at 10%)
     # below low → archive only (enrichment-only mode: always forward)
+
+  tier2:
+    uncertainty_low: "${LOGFILTER_TIER2_UNCERTAINTY_LOW:0.10}"
+    uncertainty_high: "${LOGFILTER_TIER2_UNCERTAINTY_HIGH:0.90}"
 
 # ── Forwarding to QRadar ─────────────────────────────────────────────────────
 qradar:
