@@ -43,6 +43,14 @@ syslog event ──► tier-1 (XGBoost / ONNX, ms)
 
 Tier-1 is sufficient for most decisions. Tier-2 is invoked only in the uncertainty band (0.10-0.90) to resolve ambiguous cases. The cascade preserves low latency for the common case while allowing the transformer to handle novel templates, semantic variation, and cross-domain transfer that the bag-of-events model cannot see. See [notebooks/MODEL_SELECTION.md](notebooks/MODEL_SELECTION.md) for model selection rationale, data flow, and limitations.
 
+Before changing production thresholds, generate a Tier-2 threshold report:
+
+```bash
+PYTHONPATH=src python scripts/evaluate_tier2_thresholds.py
+```
+
+That report shows precision/recall/F1 and false-positive/false-negative tradeoffs across candidate cutoffs.
+
 ## Security Defaults
 
 The local Docker stack requires explicit secrets in `.env`; unsafe default

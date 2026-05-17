@@ -117,6 +117,27 @@ F1:        0.8906
 ROC-AUC:   0.9956
 ```
 
+## Phase 5: Threshold Strategy
+
+The metrics above use the model's default class decision. Before production, generate a
+threshold sweep so you can choose between fewer false alerts and fewer missed failures:
+
+```bash
+PYTHONPATH=src python scripts/evaluate_tier2_thresholds.py \
+  --model-dir models/tier2 \
+  --output models/tier2/tier2_threshold_report.json
+```
+
+The report includes:
+
+- `best_f1`: the best balanced threshold on the held-out split.
+- `best_precision_at_min_recall`: the highest-precision threshold that still meets the recall
+  target, controlled by `--min-recall`.
+- Per-threshold confusion counts and false-positive/false-negative rates.
+
+Keep the runtime cascade defaults unchanged until you review this report against logs that
+represent your deployment environment.
+
 ## Optional MLM-Adapted Base Model
 
 The READY notebook defaults to `cisco-ai/SecureBERT2.0-base`, but it will automatically prefer a local log-adapted MLM artifact when one is present. Detection order is:
