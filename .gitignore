@@ -3,6 +3,9 @@ HDFS_v3_TraceBench/
 models/*
 !models/.gitkeep
 notebooks/artifacts/
+artifacts/kaggle-runs/
+coverage.xml
+dataset-metadata.json
 
 # Local environments and tool state
 .venv/

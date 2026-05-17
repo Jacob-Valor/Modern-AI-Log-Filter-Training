@@ -478,6 +478,9 @@ async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
     if _state.scorer is None:
         raise HTTPException(status_code=503, detail="Scorer not initialised")
 
+    _state.config = load_config(_CONFIG_PATH)
+    if not _state.config:
+        logger.warning("config.yaml not found or empty — using defaults")
     _state.scorer = LogScorer(config=_state.config)
     logger.info("Models reloaded via /admin/reload")
     return {"status": "reloaded"}

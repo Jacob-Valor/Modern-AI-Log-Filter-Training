@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
@@ -33,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from training.data_loader import split_dataset  # noqa: E402
 from training.text_dataset import build_windows  # noqa: E402
+from training.thresholds import summarize_threshold_sweep, threshold_sweep  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +45,22 @@ logger = logging.getLogger("train_transformer")
 LABEL_MAP = {"0": "normal", "1": "failure"}
 DEFAULT_MODEL_ID = "cisco-ai/SecureBERT2.0-base"
 # Override option for experiments: answerdotai/ModernBERT-base
+
+
+@runtime_checkable
+class TrainTokenizer(Protocol):
+    """Tokenizer capabilities required by the training/export pipeline."""
+
+    def __call__(
+        self,
+        text: str | list[str],
+        *,
+        truncation: bool,
+        padding: str | bool,
+        max_length: int,
+    ) -> dict[str, Any]: ...
+
+    def save_pretrained(self, save_directory: str | Path) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -114,7 +132,7 @@ def build_hf_dataset(
     texts: np.ndarray,
     labels: np.ndarray,
     dataset_cls: Any,
-    tokenizer: Any,
+    tokenizer: TrainTokenizer,
     max_length: int,
 ) -> Any:
     dataset = dataset_cls.from_dict(
@@ -132,6 +150,13 @@ def build_hf_dataset(
         )
 
     return dataset.map(tokenize_batch, batched=True, remove_columns=["text"])
+
+
+def require_train_tokenizer(candidate: object) -> TrainTokenizer:
+    """Validate that a dynamically loaded tokenizer supports training outputs."""
+    if not isinstance(candidate, TrainTokenizer):
+        raise TypeError("Loaded tokenizer must support tokenization and save_pretrained()")
+    return candidate
 
 
 def compute_class_weights(labels: np.ndarray) -> np.ndarray:
@@ -163,14 +188,25 @@ def compute_metrics(eval_pred: tuple[np.ndarray, np.ndarray]) -> dict[str, float
     }
 
 
-def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, float | str]:
-    metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split)
+def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, Any]:
+    predictions = trainer.predict(test_dataset=dataset, metric_key_prefix=split)
+    metrics = predictions.metrics
+    logits = np.asarray(predictions.predictions, dtype=np.float32)
+    labels = np.asarray(predictions.label_ids, dtype=np.int32)
+    logits_shifted = logits - np.max(logits, axis=-1, keepdims=True)
+    exp_logits = np.exp(logits_shifted)
+    y_prob = (exp_logits / exp_logits.sum(axis=-1, keepdims=True))[:, 1]
+    sweep = threshold_sweep(labels, y_prob)
     result = {
         "split": split,
         "precision": round(float(metrics[f"{split}_precision"]), 4),
         "recall": round(float(metrics[f"{split}_recall"]), 4),
         "f1": round(float(metrics[f"{split}_f1"]), 4),
         "roc_auc": round(float(metrics[f"{split}_roc_auc"]), 4),
+        "threshold_strategy": {
+            "summary": summarize_threshold_sweep(sweep),
+            "sweep": sweep,
+        },
     }
     logger.info(
         "[%s]  Precision=%.4f  Recall=%.4f  F1=%.4f  ROC-AUC=%.4f",
@@ -277,13 +313,15 @@ def main() -> None:
     )
 
     logger.info("Loading tokenizer/model: %s", args.model_id)
-    tokenizer = auto_tokenizer.from_pretrained(args.model_id)
+    tokenizer = require_train_tokenizer(auto_tokenizer.from_pretrained(args.model_id))
     model = auto_model.from_pretrained(
         args.model_id,
         num_labels=2,
         id2label={0: "normal", 1: "failure"},
         label2id={"normal": 0, "failure": 1},
     )
+    if hasattr(model.config, "reference_compile"):
+        model.config.reference_compile = False
     num_params = count_parameters(model)
     logger.info("Model parameters: %d", num_params)
 
@@ -315,27 +353,29 @@ def main() -> None:
         class_weights=[round(float(v), 6) for v in class_weights_np.tolist()],
     )
 
-    training_args = training_args_cls(
-        output_dir=str(args.output_dir / "checkpoints"),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        eval_strategy="steps",
-        eval_steps=eval_steps,
-        save_strategy="steps",
-        save_steps=eval_steps,
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_f1",
-        greater_is_better=True,
-        report_to="none",
-        logging_steps=max(1, eval_steps // 2),
-        dataloader_num_workers=2,
-        fp16=fp16,
-        seed=args.seed,
-        save_safetensors=True,
-    )
+    training_kwargs: dict[str, Any] = {
+        "output_dir": str(args.output_dir / "checkpoints"),
+        "num_train_epochs": args.epochs,
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "eval_strategy": "steps",
+        "eval_steps": eval_steps,
+        "save_strategy": "steps",
+        "save_steps": eval_steps,
+        "save_total_limit": 2,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_f1",
+        "greater_is_better": True,
+        "report_to": "none",
+        "logging_steps": max(1, eval_steps // 2),
+        "dataloader_num_workers": 2,
+        "fp16": fp16,
+        "seed": args.seed,
+    }
+    if "save_safetensors" in inspect.signature(training_args_cls).parameters:
+        training_kwargs["save_safetensors"] = True
+    training_args = training_args_cls(**training_kwargs)
 
     trainer = weighted_trainer_cls(
         model=model,

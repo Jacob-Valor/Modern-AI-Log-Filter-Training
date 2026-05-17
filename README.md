@@ -43,6 +43,29 @@ syslog event ──► tier-1 (XGBoost / ONNX, ms)
 
 Tier-1 is sufficient for most decisions. Tier-2 is invoked only in the uncertainty band (0.10-0.90) to resolve ambiguous cases. The cascade preserves low latency for the common case while allowing the transformer to handle novel templates, semantic variation, and cross-domain transfer that the bag-of-events model cannot see. See [notebooks/MODEL_SELECTION.md](notebooks/MODEL_SELECTION.md) for model selection rationale, data flow, and limitations.
 
+Before changing production thresholds, generate a Tier-2 threshold report:
+
+```bash
+PYTHONPATH=src python scripts/evaluate_tier2_thresholds.py
+```
+
+That report shows precision/recall/F1 and false-positive/false-negative tradeoffs across candidate cutoffs.
+
+Runtime thresholds are configurable without changing code. Defaults preserve the shipped cascade
+behavior; invalid ranges fail startup instead of being silently clamped.
+
+```bash
+LOGFILTER_TIER2_UNCERTAINTY_LOW=0.10
+LOGFILTER_TIER2_UNCERTAINTY_HIGH=0.90
+LOGFILTER_SCORE_HIGH=0.85
+LOGFILTER_SCORE_MEDIUM=0.50
+LOGFILTER_SCORE_LOW=0.20
+```
+
+Only adjust these after reviewing a threshold report from representative logs. Routing thresholds
+must satisfy `0.0 <= low < medium < high <= 1.0`; Tier-2 uncertainty thresholds must satisfy
+`0.0 <= uncertainty_low <= uncertainty_high <= 1.0`.
+
 ## Security Defaults
 
 The local Docker stack requires explicit secrets in `.env`; unsafe default

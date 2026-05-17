@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
@@ -127,8 +128,8 @@ def test_health_reports_classifier_state_when_ready() -> None:
     class FakeScorer:
         classifier = FakeClassifier()
 
-    api_app._state.scorer = FakeScorer()
-    api_app._state.enricher = object()
+    api_app._state.scorer = cast(Any, FakeScorer())
+    api_app._state.enricher = cast(Any, object())
 
     response = asyncio.run(api_app.health())
 
@@ -219,8 +220,8 @@ class FakeEnricher:
 
 
 def test_score_event_success_and_validation_error() -> None:
-    api_app._state.scorer = FakeScorer()
-    api_app._state.enricher = FakeEnricher()
+    api_app._state.scorer = cast(Any, FakeScorer())
+    api_app._state.enricher = cast(Any, FakeEnricher())
 
     response = asyncio.run(
         api_app.score_event(ScoreRequest(raw="Jan 15 host sshd: Failed password"))
@@ -243,8 +244,8 @@ def test_score_event_requires_initialized_service() -> None:
 
 
 def test_score_batch_success_and_configured_limit() -> None:
-    api_app._state.scorer = FakeScorer()
-    api_app._state.enricher = FakeEnricher()
+    api_app._state.scorer = cast(Any, FakeScorer())
+    api_app._state.enricher = cast(Any, FakeEnricher())
     api_app._state.config = {"api": {"max_batch_size": 1}}
 
     too_large = BatchScoreRequest(
@@ -279,12 +280,18 @@ def test_reload_models_requires_scorer_and_replaces_it(monkeypatch) -> None:
         asyncio.run(api_app.reload_models())
     assert missing.value.status_code == 503
 
-    api_app._state.scorer = FakeScorer()
+    api_app._state.scorer = cast(Any, FakeScorer())
+    monkeypatch.setattr(
+        api_app,
+        "load_config",
+        lambda path: {"scoring": {"routing": {"high": "0.90"}}},
+    )
     monkeypatch.setattr(api_app, "LogScorer", lambda config: "new-scorer")
 
     response = asyncio.run(api_app.reload_models())
 
     assert response == {"status": "reloaded"}
+    assert api_app._state.config == {"scoring": {"routing": {"high": "0.90"}}}
     assert api_app._state.scorer == "new-scorer"
 
 
@@ -304,6 +311,6 @@ def test_lifespan_initializes_scorer_and_enricher(monkeypatch) -> None:
         async with api_app.lifespan(api_app.app):
             assert api_app._state.config == {"qradar": {"leef_vendor": "Vendor"}}
             assert api_app._state.scorer == "scorer"
-            assert api_app._state.enricher[0] == "enricher"
+            assert cast(tuple[Any, dict[str, str]], api_app._state.enricher)[0] == "enricher"
 
     asyncio.run(run_lifespan())

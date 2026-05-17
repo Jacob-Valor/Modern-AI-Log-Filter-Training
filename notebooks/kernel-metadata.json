@@ -1,0 +1,19 @@
+{
+  "id": "jacobvalor/logfilter-tier-2-transformer-training",
+  "title": "LogFilter Tier 2 Transformer Training",
+  "code_file": "kaggle_train_transformer_READY.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "jacobvalor/hdfs-tracebench-preprocessed-logs"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [
+    "jacobvalor/logfilter-mlm-pretrain"
+  ],
+  "model_sources": []
+}
