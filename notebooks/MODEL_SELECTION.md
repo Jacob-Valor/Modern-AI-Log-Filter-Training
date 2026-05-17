@@ -149,9 +149,25 @@ Use the report to choose the operating point:
 - **Missed-incident posture:** prefer `best_precision_at_min_recall` with an explicit recall
   target when false negatives are more expensive.
 
-Do not change the `0.10`-`0.90` cascade band or routing thresholds until this report has been
-reviewed against production-like logs. The Kaggle HDFS split is useful for reproducibility, but
-production syslog distributions may shift both the best Tier-2 cutoff and the ideal cascade band.
+Do not change the default `0.10`-`0.90` cascade band or routing thresholds until this report has
+been reviewed against production-like logs. The Kaggle HDFS split is useful for reproducibility,
+but production syslog distributions may shift both the best Tier-2 cutoff and the ideal cascade
+band.
+
+Runtime configuration lives under `scoring:` in `config/config.yaml` and can be overridden with
+environment variables:
+
+| Runtime setting | Config key | Environment variable | Default |
+|---|---|---|---|
+| Tier-2 lower escalation bound | `scoring.tier2.uncertainty_low` | `LOGFILTER_TIER2_UNCERTAINTY_LOW` | `0.10` |
+| Tier-2 upper escalation bound | `scoring.tier2.uncertainty_high` | `LOGFILTER_TIER2_UNCERTAINTY_HIGH` | `0.90` |
+| HIGH priority score threshold | `scoring.routing.high` | `LOGFILTER_SCORE_HIGH` | `0.85` |
+| MEDIUM priority score threshold | `scoring.routing.medium` | `LOGFILTER_SCORE_MEDIUM` | `0.50` |
+| LOW priority score threshold | `scoring.routing.low` | `LOGFILTER_SCORE_LOW` | `0.20` |
+
+Startup validation requires `0.0 <= low < medium < high <= 1.0` for routing and
+`0.0 <= uncertainty_low <= uncertainty_high <= 1.0` for Tier-2 escalation. Invalid values should
+be treated as deployment configuration errors, not as values to clamp at runtime.
 
 ### Text Window Truncation
 

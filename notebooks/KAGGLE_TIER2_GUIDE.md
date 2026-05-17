@@ -138,6 +138,20 @@ The report includes:
 Keep the runtime cascade defaults unchanged until you review this report against logs that
 represent your deployment environment.
 
+After choosing an operating point, set runtime thresholds through `config/config.yaml` or
+environment variables rather than editing code:
+
+```bash
+LOGFILTER_TIER2_UNCERTAINTY_LOW=0.10
+LOGFILTER_TIER2_UNCERTAINTY_HIGH=0.90
+LOGFILTER_SCORE_HIGH=0.85
+LOGFILTER_SCORE_MEDIUM=0.50
+LOGFILTER_SCORE_LOW=0.20
+```
+
+The service validates these at startup. Routing thresholds must be ordered
+`low < medium < high`, and all threshold values must stay within `[0.0, 1.0]`.
+
 ## Optional MLM-Adapted Base Model
 
 The READY notebook defaults to `cisco-ai/SecureBERT2.0-base`, but it will automatically prefer a local log-adapted MLM artifact when one is present. Detection order is:

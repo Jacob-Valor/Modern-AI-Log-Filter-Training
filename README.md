@@ -51,6 +51,21 @@ PYTHONPATH=src python scripts/evaluate_tier2_thresholds.py
 
 That report shows precision/recall/F1 and false-positive/false-negative tradeoffs across candidate cutoffs.
 
+Runtime thresholds are configurable without changing code. Defaults preserve the shipped cascade
+behavior; invalid ranges fail startup instead of being silently clamped.
+
+```bash
+LOGFILTER_TIER2_UNCERTAINTY_LOW=0.10
+LOGFILTER_TIER2_UNCERTAINTY_HIGH=0.90
+LOGFILTER_SCORE_HIGH=0.85
+LOGFILTER_SCORE_MEDIUM=0.50
+LOGFILTER_SCORE_LOW=0.20
+```
+
+Only adjust these after reviewing a threshold report from representative logs. Routing thresholds
+must satisfy `0.0 <= low < medium < high <= 1.0`; Tier-2 uncertainty thresholds must satisfy
+`0.0 <= uncertainty_low <= uncertainty_high <= 1.0`.
+
 ## Security Defaults
 
 The local Docker stack requires explicit secrets in `.env`; unsafe default
