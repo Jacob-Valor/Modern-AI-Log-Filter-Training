@@ -31,6 +31,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from logfilter import telemetry
 from logfilter.api.schemas import (
     ATTACKMatch,
     BatchScoreRequest,
@@ -105,28 +106,32 @@ def _env_enabled(name: str, default: str = "0") -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load configuration and initialise models at startup."""
-    del app
-    logger.info("LogFilter API starting …")
+    telemetry.setup_tracing()
+    telemetry.instrument_fastapi_app(app)
+    with telemetry.start_as_current_span("api.lifespan.startup"):
+        logger.info("LogFilter API starting …")
 
-    _state.config = load_config(_CONFIG_PATH)
-    if not _state.config:
-        logger.warning("config.yaml not found or empty — using defaults")
+        _state.config = load_config(_CONFIG_PATH)
+        if not _state.config:
+            logger.warning("config.yaml not found or empty — using defaults")
 
-    # Build scorer and enricher
-    _state.scorer = LogScorer(config=_state.config)
-    qradar_cfg = _state.config.get("qradar", {})
-    _state.enricher = LEEFEnricher(
-        vendor=qradar_cfg.get("leef_vendor", "YourCo"),
-        product=qradar_cfg.get("leef_product", "AIPreprocessor"),
-        version=qradar_cfg.get("leef_version", "1.0"),
-    )
+        # Build scorer and enricher
+        model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
+        _state.scorer = LogScorer(config=_state.config, model_version=model_version)
+        qradar_cfg = _state.config.get("qradar", {})
+        _state.enricher = LEEFEnricher(
+            vendor=qradar_cfg.get("leef_vendor", "YourCo"),
+            product=qradar_cfg.get("leef_product", "AIPreprocessor"),
+            version=qradar_cfg.get("leef_version", "1.0"),
+        )
 
-    _model_loaded.labels(model="scorer").set(1)
-    logger.info("LogFilter API ready")
+        _model_loaded.labels(model="scorer").set(1)
+        logger.info("LogFilter API ready")
 
     yield
 
-    logger.info("LogFilter API shutting down")
+    with telemetry.start_as_current_span("api.lifespan.shutdown"):
+        logger.info("LogFilter API shutting down")
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -162,16 +167,21 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):  # noqa: ANN001
-    response = await call_next(request)
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("Cache-Control", "no-store")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'none'; frame-ancestors 'none'",
-    )
-    return response
+    extracted = telemetry.extract_http_context(request.headers)
+    token = telemetry.attach_context(extracted)
+    try:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        )
+        return response
+    finally:
+        telemetry.detach_context(token)
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
@@ -343,23 +353,37 @@ async def score_event(
     Returns threat score, ATT&CK technique match, extracted entities,
     and a LEEF-formatted enriched payload ready for QRadar forwarding.
     """
-    if _state.scorer is None or _state.enricher is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Scoring service not initialised",
+    with telemetry.start_as_current_span(
+        "api.score_event",
+        {"logfilter.event_count": 1, "logfilter.source_type": payload.source_type or "generic"},
+    ) as span:
+        if _state.scorer is None or _state.enricher is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Scoring service not initialised",
+            )
+
+        hint = _source_hint(payload.source_type)
+        try:
+            normalized = _state.normalizer.normalize(payload.raw, source_type_hint=hint)
+            scored = _state.scorer.score(normalized)
+            leef = _state.enricher.enrich(scored)
+        except (ValueError, TypeError, KeyError) as exc:
+            telemetry.record_exception(span, exc)
+            logger.warning("Score request rejected", error=str(exc))
+            raise HTTPException(status_code=400, detail=f"Invalid log event: {exc}") from exc
+
+        telemetry.set_span_attributes(
+            span,
+            {
+                "logfilter.host": scored.host,
+                "logfilter.priority": scored.ai_priority,
+                "logfilter.threat_score": scored.ai_threat_score,
+                "logfilter.sigma_matched": scored.sigma_matched,
+            },
         )
-
-    hint = _source_hint(payload.source_type)
-    try:
-        normalized = _state.normalizer.normalize(payload.raw, source_type_hint=hint)
-        scored = _state.scorer.score(normalized)
-        leef = _state.enricher.enrich(scored)
-    except (ValueError, TypeError, KeyError) as exc:
-        logger.warning("Score request rejected", error=str(exc))
-        raise HTTPException(status_code=400, detail=f"Invalid log event: {exc}") from exc
-
-    _update_metrics(scored)
-    return _build_response(scored, leef)
+        _update_metrics(scored)
+        return _build_response(scored, leef)
 
 
 @app.post("/score/batch", response_model=BatchScoreResponse, tags=["Scoring"])
@@ -373,80 +397,95 @@ async def score_batch(
     Recommended for high-throughput scenarios — batching amortises model
     loading overhead and enables efficient GPU/CPU utilisation.
     """
-    if _state.scorer is None or _state.enricher is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Scoring service not initialised",
+    with telemetry.start_as_current_span(
+        "api.score_batch",
+        {"logfilter.batch_size": len(payload.events), "logfilter.event_count": len(payload.events)},
+    ) as span:
+        if _state.scorer is None or _state.enricher is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Scoring service not initialised",
+            )
+
+        # Enforce configured batch size cap (config: api.max_batch_size, default 200).
+        max_batch = int(_state.config.get("api", {}).get("max_batch_size", 200))
+        if len(payload.events) > max_batch:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Batch too large: {len(payload.events)} events (max {max_batch})",
+            )
+        if not payload.events:
+            raise HTTPException(status_code=400, detail="Batch must contain at least one event")
+
+        t0 = time.perf_counter()
+        _batch_size_histogram.observe(len(payload.events))
+
+        try:
+            normalized_events = [
+                _state.normalizer.normalize(ev.raw, source_type_hint=_source_hint(ev.source_type))
+                for ev in payload.events
+            ]
+            scored_events = _state.scorer.score_batch(normalized_events)
+            leef_payloads = _state.enricher.enrich_batch(scored_events)
+        except (ValueError, TypeError, KeyError) as exc:
+            telemetry.record_exception(span, exc)
+            logger.warning("Batch score request rejected", error=str(exc))
+            raise HTTPException(status_code=400, detail=f"Invalid batch: {exc}") from exc
+
+        responses = []
+        high_count = 0
+        medium_count = 0
+        for scored, leef in zip(scored_events, leef_payloads):
+            _update_metrics(scored)
+            if scored.ai_priority == "HIGH":
+                high_count += 1
+            elif scored.ai_priority == "MEDIUM":
+                medium_count += 1
+            responses.append(_build_response(scored, leef))
+
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        telemetry.set_span_attributes(
+            span,
+            {
+                "logfilter.high_priority_count": high_count,
+                "logfilter.medium_priority_count": medium_count,
+                "logfilter.elapsed_ms": elapsed,
+            },
         )
-
-    # Enforce configured batch size cap (config: api.max_batch_size, default 200).
-    max_batch = int(_state.config.get("api", {}).get("max_batch_size", 200))
-    if len(payload.events) > max_batch:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Batch too large: {len(payload.events)} events (max {max_batch})",
+        return BatchScoreResponse(
+            results=responses,
+            total=len(responses),
+            high_priority_count=high_count,
+            medium_priority_count=medium_count,
+            elapsed_ms=round(elapsed, 2),
         )
-    if not payload.events:
-        raise HTTPException(status_code=400, detail="Batch must contain at least one event")
-
-    t0 = time.perf_counter()
-    _batch_size_histogram.observe(len(payload.events))
-
-    try:
-        normalized_events = [
-            _state.normalizer.normalize(ev.raw, source_type_hint=_source_hint(ev.source_type))
-            for ev in payload.events
-        ]
-        scored_events = _state.scorer.score_batch(normalized_events)
-        leef_payloads = _state.enricher.enrich_batch(scored_events)
-    except (ValueError, TypeError, KeyError) as exc:
-        logger.warning("Batch score request rejected", error=str(exc))
-        raise HTTPException(status_code=400, detail=f"Invalid batch: {exc}") from exc
-
-    responses = []
-    high_count = 0
-    medium_count = 0
-    for scored, leef in zip(scored_events, leef_payloads):
-        _update_metrics(scored)
-        if scored.ai_priority == "HIGH":
-            high_count += 1
-        elif scored.ai_priority == "MEDIUM":
-            medium_count += 1
-        responses.append(_build_response(scored, leef))
-
-    elapsed = (time.perf_counter() - t0) * 1000.0
-    return BatchScoreResponse(
-        results=responses,
-        total=len(responses),
-        high_priority_count=high_count,
-        medium_priority_count=medium_count,
-        elapsed_ms=round(elapsed, 2),
-    )
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Operations"])
 async def health() -> HealthResponse:
     """Liveness and readiness check."""
-    scorer_ready = _state.scorer is not None
+    with telemetry.start_as_current_span("api.health") as span:
+        scorer_ready = _state.scorer is not None
 
-    models_loaded = {
-        "scorer": scorer_ready,
-        "enricher": _state.enricher is not None,
-    }
-    if scorer_ready and _state.scorer is not None:
-        models_loaded["classifier"] = _state.scorer.classifier.is_ready()
-        tier2 = getattr(_state.scorer, "tier2_classifier", None)
-        if tier2 is not None:
-            models_loaded["tier2_classifier"] = tier2.is_ready()
+        models_loaded = {
+            "scorer": scorer_ready,
+            "enricher": _state.enricher is not None,
+        }
+        if scorer_ready and _state.scorer is not None:
+            models_loaded["classifier"] = _state.scorer.classifier.is_ready()
+            tier2 = getattr(_state.scorer, "tier2_classifier", None)
+            if tier2 is not None:
+                models_loaded["tier2_classifier"] = tier2.is_ready()
 
-    overall_status = "healthy" if scorer_ready else "degraded"
+        overall_status = "healthy" if scorer_ready else "degraded"
+        span.set_attribute("logfilter.health.status", overall_status)
 
-    return HealthResponse(
-        status=overall_status,
-        version="0.1.0",
-        models_loaded=models_loaded,
-        uptime_seconds=round(time.monotonic() - _state.start_time, 1),
-    )
+        return HealthResponse(
+            status=overall_status,
+            version="0.1.0",
+            models_loaded=models_loaded,
+            uptime_seconds=round(time.monotonic() - _state.start_time, 1),
+        )
 
 
 @app.get("/metrics", tags=["Operations"])

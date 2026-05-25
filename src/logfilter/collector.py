@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from logfilter import telemetry
 from logfilter.config import load_config
 from logfilter.kafka.producer import LogProducer
 from logfilter.pipeline.normalizer import LogNormalizer
@@ -58,25 +59,42 @@ class SyslogCollector:
         self.stop_event = threading.Event()
 
     def publish(self, raw: str, peer_host: str, protocol: str) -> None:
-        raw = raw.strip()
-        if not raw:
-            return
-        try:
-            allowed = self.settings.allowed_cidrs.allows(peer_host)
-        except ValueError:
-            allowed = False
-        if not allowed:
-            logger.warning("Rejected syslog event from disallowed source", peer_host=peer_host)
-            return
+        with telemetry.start_as_current_span(
+            "collector.syslog.publish",
+            {
+                "logfilter.collector.peer_host": peer_host,
+                "logfilter.collector.protocol": protocol,
+                "messaging.destination.name": self.settings.raw_topic,
+            },
+        ) as span:
+            raw = raw.strip()
+            if not raw:
+                span.set_attribute("logfilter.collector.dropped", "empty")
+                return
+            try:
+                allowed = self.settings.allowed_cidrs.allows(peer_host)
+            except ValueError:
+                allowed = False
+            if not allowed:
+                span.set_attribute("logfilter.collector.dropped", "disallowed_peer")
+                logger.warning("Rejected syslog event from disallowed source", peer_host=peer_host)
+                return
 
-        normalized = self.normalizer.normalize(raw)
-        host = normalized.host if normalized.host != "unknown" else peer_host
-        self.producer.send(
-            raw_log=raw,
-            source_type=normalized.source_type.value,
-            host=host,
-            metadata={"collector_peer": peer_host, "collector_protocol": protocol},
-        )
+            normalized = self.normalizer.normalize(raw)
+            host = normalized.host if normalized.host != "unknown" else peer_host
+            telemetry.set_span_attributes(
+                span,
+                {
+                    "logfilter.host": host,
+                    "logfilter.source_type": normalized.source_type.value,
+                },
+            )
+            self.producer.send(
+                raw_log=raw,
+                source_type=normalized.source_type.value,
+                host=host,
+                metadata={"collector_peer": peer_host, "collector_protocol": protocol},
+            )
 
     def serve_udp(self) -> None:  # pragma: no cover
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -97,11 +115,19 @@ class SyslogCollector:
                         logger.error("UDP listener error", error=str(exc))
                     continue
 
-                raw = data.decode("utf-8", errors="replace")
-                try:
-                    self.publish(raw, peer_host=addr[0], protocol="udp")
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Failed to publish UDP syslog event", error=str(exc))
+                with telemetry.start_as_current_span(
+                    "collector.syslog.receive_udp",
+                    {
+                        "network.transport": "udp",
+                        "logfilter.collector.peer_host": addr[0],
+                    },
+                ) as span:
+                    raw = data.decode("utf-8", errors="replace")
+                    try:
+                        self.publish(raw, peer_host=addr[0], protocol="udp")
+                    except Exception as exc:  # noqa: BLE001
+                        telemetry.record_exception(span, exc)
+                        logger.error("Failed to publish UDP syslog event", error=str(exc))
 
     def serve_tcp_client(self, conn: socket.socket, peer_host: str) -> None:  # pragma: no cover
         with conn:
@@ -120,18 +146,34 @@ class SyslogCollector:
                 buffer += chunk
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
-                    raw = line.decode("utf-8", errors="replace")
+                    with telemetry.start_as_current_span(
+                        "collector.syslog.receive_tcp",
+                        {
+                            "network.transport": "tcp",
+                            "logfilter.collector.peer_host": peer_host,
+                        },
+                    ) as span:
+                        raw = line.decode("utf-8", errors="replace")
+                        try:
+                            self.publish(raw, peer_host=peer_host, protocol="tcp")
+                        except Exception as exc:  # noqa: BLE001
+                            telemetry.record_exception(span, exc)
+                            logger.error("Failed to publish TCP syslog event", error=str(exc))
+
+            if buffer.strip():
+                with telemetry.start_as_current_span(
+                    "collector.syslog.receive_tcp",
+                    {
+                        "network.transport": "tcp",
+                        "logfilter.collector.peer_host": peer_host,
+                    },
+                ) as span:
+                    raw = buffer.decode("utf-8", errors="replace")
                     try:
                         self.publish(raw, peer_host=peer_host, protocol="tcp")
                     except Exception as exc:  # noqa: BLE001
+                        telemetry.record_exception(span, exc)
                         logger.error("Failed to publish TCP syslog event", error=str(exc))
-
-            if buffer.strip():
-                raw = buffer.decode("utf-8", errors="replace")
-                try:
-                    self.publish(raw, peer_host=peer_host, protocol="tcp")
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Failed to publish TCP syslog event", error=str(exc))
 
     def serve_tcp(self) -> None:  # pragma: no cover
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

@@ -20,6 +20,8 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from logfilter import telemetry
+
 logger = structlog.get_logger(__name__)
 
 
@@ -88,30 +90,49 @@ class LogProducer:
         The message value is a JSON envelope preserving the raw payload.
         Partition key = host (for ordered processing per source host).
         """
-        payload = {
-            "raw": raw_log,
-            "source_type": source_type,
-            "host": host,
-            "ingest_ts": time.time(),
-            **(metadata or {}),
-        }
-        producer = self._get_producer()
-        future = producer.send(
-            self.topic,
-            value=payload,
-            key=host,
-        )
-        try:
-            record_metadata = future.get(timeout=10)
-            logger.debug(
-                "Message sent",
-                topic=record_metadata.topic,
-                partition=record_metadata.partition,
-                offset=record_metadata.offset,
+        with telemetry.start_as_current_span(
+            "kafka.producer.send",
+            {
+                "messaging.system": "kafka",
+                "messaging.destination.name": self.topic,
+                "logfilter.host": host,
+                "logfilter.source_type": source_type,
+            },
+        ) as span:
+            payload = {
+                "raw": raw_log,
+                "source_type": source_type,
+                "host": host,
+                "ingest_ts": time.time(),
+                **(metadata or {}),
+            }
+            producer = self._get_producer()
+            headers = telemetry.inject_kafka_headers(span=span)
+            future = producer.send(
+                self.topic,
+                value=payload,
+                key=host,
+                headers=headers,
             )
-        except KafkaError as exc:
-            logger.error("Failed to send message to Kafka", error=str(exc))
-            raise
+            try:
+                record_metadata = future.get(timeout=10)
+                telemetry.set_span_attributes(
+                    span,
+                    {
+                        "messaging.kafka.partition": record_metadata.partition,
+                        "messaging.kafka.offset": record_metadata.offset,
+                    },
+                )
+                logger.debug(
+                    "Message sent",
+                    topic=record_metadata.topic,
+                    partition=record_metadata.partition,
+                    offset=record_metadata.offset,
+                )
+            except KafkaError as exc:
+                telemetry.record_exception(span, exc)
+                logger.error("Failed to send message to Kafka", error=str(exc))
+                raise
 
     def send_batch(
         self,
@@ -124,27 +145,40 @@ class LogProducer:
         """
         producer = self._get_producer()
         sent = 0
-        for event in events:
-            payload = {
-                "raw": event.get("raw", ""),
-                "source_type": event.get("source_type", "generic"),
-                "host": event.get("host", "unknown"),
-                "ingest_ts": time.time(),
-            }
-            try:
-                producer.send(
-                    self.topic,
-                    value=payload,
-                    key=event.get("host", "unknown"),
-                )
-                sent += 1
-            except KafkaError as exc:
-                logger.error("Batch send error", error=str(exc))
+        with telemetry.start_as_current_span(
+            "kafka.producer.send_batch",
+            {
+                "messaging.system": "kafka",
+                "messaging.destination.name": self.topic,
+                "logfilter.batch_size": len(events),
+            },
+        ) as span:
+            for event in events:
+                host = event.get("host", "unknown")
+                source_type = event.get("source_type", "generic")
+                payload = {
+                    "raw": event.get("raw", ""),
+                    "source_type": source_type,
+                    "host": host,
+                    "ingest_ts": time.time(),
+                }
+                try:
+                    producer.send(
+                        self.topic,
+                        value=payload,
+                        key=host,
+                        headers=telemetry.inject_kafka_headers(span=span),
+                    )
+                    sent += 1
+                except KafkaError as exc:
+                    telemetry.record_exception(span, exc)
+                    logger.error("Batch send error", error=str(exc))
 
-        # Flush buffered messages
-        producer.flush(timeout=30)
-        logger.debug("Batch flushed", sent=sent, total=len(events))
-        return sent
+            # Flush buffered messages
+            producer.flush(timeout=30)
+            span.set_attribute("logfilter.kafka.messages_sent", sent)
+            logger.debug("Batch flushed", sent=sent, total=len(events))
+            return sent
 
     def close(self) -> None:
         if self._producer:
