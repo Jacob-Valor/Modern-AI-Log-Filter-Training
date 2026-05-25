@@ -304,7 +304,7 @@ def test_metrics_endpoint_returns_prometheus_payload() -> None:
 
 def test_lifespan_initializes_scorer_and_enricher(monkeypatch) -> None:
     monkeypatch.setattr(api_app, "load_config", lambda path: {"qradar": {"leef_vendor": "Vendor"}})
-    monkeypatch.setattr(api_app, "LogScorer", lambda config: "scorer")
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "scorer")
     monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
 
     async def run_lifespan() -> None:

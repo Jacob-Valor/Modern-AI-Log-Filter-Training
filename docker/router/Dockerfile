@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -c requirements.txt kafka-python structlog tenacity PyYAML elasticsearch httpx
+RUN sed -i 's/\[.*\]//g' requirements.txt && \
+    pip install --no-cache-dir -c requirements.txt kafka-python structlog tenacity PyYAML elasticsearch httpx
 
 COPY src/ ./src/
 COPY config/ ./config/

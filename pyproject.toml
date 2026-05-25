@@ -46,7 +46,16 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
     "ruff>=0.6.0",
+    "mypy>=1.10.0",
     "pip-audit>=2.7.3",
+    "locust>=2.32.0",
+]
+telemetry = [
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp>=1.25.0",
+    "opentelemetry-instrumentation-fastapi>=0.46b0",
+    "opentelemetry-instrumentation-kafka-python>=0.46b0",
 ]
 
 [tool.setuptools.packages.find]

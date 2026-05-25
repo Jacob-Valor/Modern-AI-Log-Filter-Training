@@ -10,6 +10,7 @@
 #   logfilter-api  — FastAPI AI scoring service (SecureBERT2.0 models)
 #   collector      — Syslog receiver → Kafka producer
 #   router         — Kafka consumer → LEEF enricher → QRadar syslog forwarder
+#   otel-collector — OpenTelemetry trace collector
 #   prometheus     — Metrics scraping
 #   grafana        — Dashboard
 #
@@ -39,6 +40,9 @@ x-common-env: &common-env
   LOGFILTER_SCORE_LOW: "${LOGFILTER_SCORE_LOW:-0.20}"
   LOGFILTER_TIER2_UNCERTAINTY_LOW: "${LOGFILTER_TIER2_UNCERTAINTY_LOW:-0.10}"
   LOGFILTER_TIER2_UNCERTAINTY_HIGH: "${LOGFILTER_TIER2_UNCERTAINTY_HIGH:-0.90}"
+  OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-logfilter}"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}"
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
 
@@ -85,6 +89,7 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -256,6 +261,18 @@ services:
       - ./config:/app/config:ro
     restart: unless-stopped
 
+  # ── OpenTelemetry Collector ────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: logfilter-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    volumes:
+      - ./config/otel-collector.yml:/etc/otelcol/config.yaml:ro
+    restart: unless-stopped
+
   # ── Prometheus ─────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.51.0
@@ -292,6 +309,14 @@ services:
     restart: unless-stopped
 
 # ── Volumes ────────────────────────────────────────────────────────────────────
+secrets:
+  kafka_keystore_creds:
+    file: ./scripts/certs/keystore_creds
+  kafka_sslkey_creds:
+    file: ./scripts/certs/sslkey_creds
+  kafka_truststore_creds:
+    file: ./scripts/certs/truststore_creds
+
 volumes:
   zookeeper-data:
   zookeeper-log:

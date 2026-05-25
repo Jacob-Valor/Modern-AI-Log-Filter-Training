@@ -127,7 +127,7 @@ def test_score_batch_posts_api_token(fake_router) -> None:
     results = fake_router._score_batch([{"raw": "raw", "source_type": "syslog"}])
 
     assert results == [{"leef_payload": "leef", "ai_priority": "HIGH"}]
-    assert fake_router.http.posts[0][1]["headers"] == {"X-API-Token": "token"}
+    assert fake_router.http.posts[0][1]["headers"]["X-API-Token"] == "token"
 
 
 def test_score_batch_rejects_result_count_mismatch(monkeypatch) -> None:

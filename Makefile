@@ -2,8 +2,9 @@
 # Usage: make <target>
 
 .PHONY: help install dev-install train evaluate test test-coverage lint format \
-        verify audit security-check up up-dev down logs logs-api logs-router \
-        build clean models-dir smoke-test smoke-pipeline
+         verify audit security-check up up-dev down logs logs-api logs-router \
+         build clean models-dir smoke-test smoke-pipeline benchmark \
+         k8s-apply k8s-delete k8s-secrets certs
 
 PYTHON     ?= python3
 PIP        ?= pip3
@@ -23,6 +24,7 @@ help:
 	@echo ""
 	@echo "  test           Run all unit tests (pytest)"
 	@echo "  verify         Run lint, tests, and local pipeline smoke test"
+	@echo "  benchmark      Benchmark live API with Locust (set BENCHMARK_ARGS='...')"
 	@echo "  audit          Run dependency vulnerability audit"
 	@echo "  security-check Run verify and dependency audit"
 	@echo "  lint           Lint with ruff"
@@ -54,13 +56,13 @@ models-dir:
 train: models-dir
 	@echo "Training classifier (SAMPLE_N=$(SAMPLE_N)) …"
 	@if [ "$(SAMPLE_N)" = "0" ]; then \
-		$(PYTHON) training/train.py; \
+		PYTHONPATH=. $(PYTHON) training/train.py; \
 	else \
-		$(PYTHON) training/train.py --sample-normal $(SAMPLE_N) --sample-failure 10000; \
+		PYTHONPATH=. $(PYTHON) training/train.py --sample-normal $(SAMPLE_N) --sample-failure 10000; \
 	fi
 
 evaluate:
-	$(PYTHON) training/evaluate.py
+	PYTHONPATH=. $(PYTHON) training/evaluate.py
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
@@ -134,6 +136,35 @@ smoke-test:
 	  -H "X-API-Token: $$LOGFILTER_API_TOKEN" \
 	  -d '{"raw": "Jan 15 11:07:53 prod-srv01 sshd[123]: Failed password for root from 10.0.0.5 port 44382 ssh2", "source_type": "syslog"}' \
 	  | python3 -m json.tool
+
+benchmark:
+	$(PYTHON) scripts/benchmark.py $(BENCHMARK_ARGS)
+
+# ── Kubernetes ─────────────────────────────────────────────────────────────────
+
+k8s-secrets:
+	kubectl create secret generic logfilter-secrets \
+	  --from-literal=LOGFILTER_ADMIN_TOKEN="$${LOGFILTER_ADMIN_TOKEN:?required}" \
+	  --from-literal=LOGFILTER_API_TOKEN="$${LOGFILTER_API_TOKEN:?required}" \
+	  --from-literal=ES_PASSWORD="$${ES_PASSWORD:?required}" \
+	  -n logfilter --dry-run=client -o yaml | kubectl apply -f -
+
+k8s-apply: k8s-secrets
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/configmap.yaml
+	kubectl apply -f k8s/pvc.yaml
+	kubectl apply -f k8s/api.yaml
+	kubectl apply -f k8s/router.yaml
+	kubectl apply -f k8s/collector.yaml
+	kubectl apply -f k8s/archive.yaml
+
+k8s-delete:
+	kubectl delete -f k8s/ --ignore-not-found=true
+
+# ── TLS Certificates ───────────────────────────────────────────────────────────
+
+certs:
+	bash scripts/certs/generate.sh
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 

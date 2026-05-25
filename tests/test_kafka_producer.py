@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from logfilter.kafka import producer as producer_module
@@ -35,8 +37,8 @@ class FakeKafkaProducer:
         self.fail_next = False
         FakeKafkaProducer.instances.append(self)
 
-    def send(self, topic, value, key=None):
-        self.sent.append({"topic": topic, "value": value, "key": key})
+    def send(self, topic, value, key=None, headers=None):
+        self.sent.append({"topic": topic, "value": value, "key": key, "headers": headers})
         return FakeFuture(fail=self.fail_next)
 
     def flush(self, timeout: int) -> None:
@@ -62,15 +64,16 @@ def test_log_producer_send_builds_payload() -> None:
     assert fake.sent[0]["key"] == "host"
     assert fake.sent[0]["value"]["raw"] == "raw log"
     assert fake.sent[0]["value"]["peer"] == "10.0.0.1"
+    assert isinstance(fake.sent[0]["headers"], list)
 
 
 def test_log_producer_send_raises_kafka_error() -> None:
     producer = LogProducer(topic="raw-logs")
-    fake = producer._get_producer()
+    fake = cast(Any, producer._get_producer())
     fake.fail_next = True
 
     with pytest.raises(producer_module.KafkaError):
-        producer.send.retry.statistics.clear()
+        cast(Any, producer.send).retry.statistics.clear()
         producer.send("raw")
 
 
@@ -92,7 +95,7 @@ def test_log_producer_send_batch_flushes() -> None:
 
 def test_log_producer_close_flushes_and_closes() -> None:
     producer = LogProducer(topic="raw-logs")
-    fake = producer._get_producer()
+    fake = cast(Any, producer._get_producer())
 
     producer.close()
 
