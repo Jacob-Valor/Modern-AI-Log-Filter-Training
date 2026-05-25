@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter
+    app.kubernetes.io/version: "0.1.0"

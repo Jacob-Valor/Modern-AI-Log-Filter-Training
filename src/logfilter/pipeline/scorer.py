@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 import structlog
 
+from logfilter import telemetry
 from logfilter.models.biencoder import BiEncoderModel
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
@@ -230,8 +231,10 @@ class LogScorer:
         ner_model: NERModel | None = None,
         biencoder: BiEncoderModel | None = None,
         cross_encoder: CrossEncoderModel | None = None,
+        model_version: str = "",
     ) -> None:
         self._cfg = config
+        self._model_version = model_version
         scoring = config.get("scoring", {})
         weights = scoring.get("weights", {})
 
@@ -248,12 +251,28 @@ class LogScorer:
         )
 
         models_cfg = config.get("models", {})
+        classifier_path = models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
+        scaler_path = models_cfg.get("classifier", {}).get("scaler_path", "models/scaler.json")
+        feature_names_path = models_cfg.get("classifier", {}).get(
+            "feature_names_path", "models/feature_names.json"
+        )
+        if self._model_version:
+            version_root = Path("models") / self._model_version
+            classifier_path = str(version_root / "log_classifier.onnx")
+            scaler_path = str(version_root / "scaler.json")
+            feature_names_path = str(version_root / "feature_names.json")
 
         self.classifier = classifier or LogClassifier(
-            model_path=models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
+            model_path=classifier_path,
+            scaler_path=scaler_path,
+            feature_names_path=feature_names_path,
         )
         tier2_cfg = scoring.get("tier2", {})
+        tier2_model_dir = Path("models") / "tier2"
+        if self._model_version:
+            tier2_model_dir = Path("models") / self._model_version / "tier2"
         self.tier2_classifier = tier2_classifier or Tier2Classifier(
+            model_dir=tier2_model_dir,
             uncertainty_low=tier2_cfg.get("uncertainty_low", 0.10),
             uncertainty_high=tier2_cfg.get("uncertainty_high", 0.90),
         )
@@ -311,86 +330,142 @@ class LogScorer:
 
         Returns a list of ScoredEvent, one per input event.
         """
-        t0 = time.perf_counter()
+        with telemetry.start_as_current_span(
+            "scorer.score_batch",
+            {"logfilter.batch_size": len(events), "logfilter.model_version": self._model_version},
+        ) as span:
+            t0 = time.perf_counter()
 
-        scored = [self._init_scored(ev) for ev in events]
-        texts = [ev.text for ev in events]
+            scored = [self._init_scored(ev) for ev in events]
+            texts = [ev.text for ev in events]
 
-        # ── Tier 1: Sigma ──────────────────────────────────────────────────────
-        self._apply_sigma(scored, events)
+            # ── Tier 1: Sigma ──────────────────────────────────────────────────
+            self._apply_sigma(scored, events)
 
-        # ── Tier 1b: trained classifier ────────────────────────────────────────
-        self._apply_classifier(scored, events)
+            # ── Tier 1b: trained classifier ────────────────────────────────────
+            self._apply_classifier(scored, events)
 
-        # ── Tier 2: BiEncoder dedup + ATT&CK candidate retrieval ──────────────
-        bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
-        for se, (dedup_res, candidates) in zip(scored, bi_results):
-            se.is_duplicate = dedup_res.is_duplicate
-            se.dedup_similarity = dedup_res.similarity
-            se.attack_candidates = [
-                {
-                    "id": c.technique_id,
-                    "name": c.name,
-                    "description": c.description,
-                    "bi_similarity": round(c.similarity, 4),
-                }
-                for c in candidates
-            ]
-            if se.is_duplicate:
-                se.dedup_penalty = self.dedup_penalty_value
-
-        # ── Tier 3: NER + CrossEncoder (skip duplicates) ───────────────────────
-        non_dup_indices = [i for i, se in enumerate(scored) if not se.is_duplicate]
-        if non_dup_indices:
-            nd_texts = [texts[i] for i in non_dup_indices]
-            nd_scored = [scored[i] for i in non_dup_indices]
-
-            # NER
-            ner_results = self.ner_model.extract_batch(nd_texts)
-            for se, ner_result in zip(nd_scored, ner_results):
-                se.entities = ner_result.to_dict()
-                se.ai_entities = ner_result.flat_entity_string()
-                if ner_result.has_high_value_entities:
-                    se.entity_boost = self.entity_boost_value
-
-            # CrossEncoder
-            candidates_per_event = [
-                [
+            # ── Tier 2: BiEncoder dedup + ATT&CK candidate retrieval ──────────
+            with telemetry.start_as_current_span(
+                "scorer.tier2.biencoder",
+                {"logfilter.batch_size": len(texts)},
+            ) as bi_span:
+                bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
+                duplicate_count = 0
+                candidate_count = 0
+                for se, (dedup_res, candidates) in zip(scored, bi_results):
+                    se.is_duplicate = dedup_res.is_duplicate
+                    se.dedup_similarity = dedup_res.similarity
+                    se.attack_candidates = [
+                        {
+                            "id": c.technique_id,
+                            "name": c.name,
+                            "description": c.description,
+                            "bi_similarity": round(c.similarity, 4),
+                        }
+                        for c in candidates
+                    ]
+                    candidate_count += len(candidates)
+                    if se.is_duplicate:
+                        duplicate_count += 1
+                        se.dedup_penalty = self.dedup_penalty_value
+                telemetry.set_span_attributes(
+                    bi_span,
                     {
-                        "id": c["id"],
-                        "name": c["name"],
-                        "description": c["description"],
-                    }
-                    for c in se.attack_candidates
-                ]
-                for se in nd_scored
-            ]
-            ce_results = self.cross_encoder.score_batch(nd_texts, candidates_per_event)
-            for se, ce_scores in zip(nd_scored, ce_results):
-                se.cross_encoder_scores = [
-                    {"id": s.technique_id, "name": s.name, "score": round(s.score, 4)}
-                    for s in ce_scores
-                ]
-                if ce_scores:
-                    se.cross_encoder_max = ce_scores[0].score
-                    se.ai_mitre_technique = ce_scores[0].technique_id
+                        "logfilter.duplicate_count": duplicate_count,
+                        "logfilter.attack_candidate_count": candidate_count,
+                    },
+                )
 
-        # ── Final score + routing ──────────────────────────────────────────────
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        for se in scored:
-            se.ai_threat_score = self._compute_score(se)
-            se.ai_priority = self._routing_label(se)
-            se.ai_confidence = self._confidence(se)
-            # Total wall-clock for the batch (per-event latency is meaningless
-            # because models batch-encode). Each event records the full batch time.
-            se.scoring_latency_ms = elapsed_ms
+            # ── Tier 3: NER + CrossEncoder (skip duplicates) ───────────────────
+            non_dup_indices = [i for i, se in enumerate(scored) if not se.is_duplicate]
+            if non_dup_indices:
+                nd_texts = [texts[i] for i in non_dup_indices]
+                nd_scored = [scored[i] for i in non_dup_indices]
 
-        logger.debug(
-            "Batch scored",
-            n=len(scored),
-            elapsed_ms=round(elapsed_ms, 1),
-        )
-        return scored
+                # NER
+                with telemetry.start_as_current_span(
+                    "scorer.ner.extract_batch",
+                    {"logfilter.batch_size": len(nd_texts)},
+                ) as ner_span:
+                    ner_results = self.ner_model.extract_batch(nd_texts)
+                    high_value_count = 0
+                    for se, ner_result in zip(nd_scored, ner_results):
+                        se.entities = ner_result.to_dict()
+                        se.ai_entities = ner_result.flat_entity_string()
+                        if ner_result.has_high_value_entities:
+                            high_value_count += 1
+                            se.entity_boost = self.entity_boost_value
+                    ner_span.set_attribute("logfilter.high_value_entity_count", high_value_count)
+
+                # CrossEncoder
+                candidates_per_event = [
+                    [
+                        {
+                            "id": c["id"],
+                            "name": c["name"],
+                            "description": c["description"],
+                        }
+                        for c in se.attack_candidates
+                    ]
+                    for se in nd_scored
+                ]
+                with telemetry.start_as_current_span(
+                    "scorer.cross_encoder.score_batch",
+                    {
+                        "logfilter.batch_size": len(nd_texts),
+                        "logfilter.attack_candidate_count": sum(
+                            len(candidates) for candidates in candidates_per_event
+                        ),
+                    },
+                ) as ce_span:
+                    ce_results = self.cross_encoder.score_batch(nd_texts, candidates_per_event)
+                    matched_count = 0
+                    for se, ce_scores in zip(nd_scored, ce_results):
+                        se.cross_encoder_scores = [
+                            {"id": s.technique_id, "name": s.name, "score": round(s.score, 4)}
+                            for s in ce_scores
+                        ]
+                        if ce_scores:
+                            matched_count += 1
+                            se.cross_encoder_max = ce_scores[0].score
+                            se.ai_mitre_technique = ce_scores[0].technique_id
+                    ce_span.set_attribute("logfilter.cross_encoder_match_count", matched_count)
+
+            # ── Final score + routing ──────────────────────────────────────────
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            high_count = 0
+            medium_count = 0
+            sigma_count = 0
+            for se in scored:
+                se.ai_threat_score = self._compute_score(se)
+                se.ai_priority = self._routing_label(se)
+                se.ai_confidence = self._confidence(se)
+                if se.ai_priority == "HIGH":
+                    high_count += 1
+                elif se.ai_priority == "MEDIUM":
+                    medium_count += 1
+                if se.sigma_matched:
+                    sigma_count += 1
+                # Total wall-clock for the batch (per-event latency is meaningless
+                # because models batch-encode). Each event records the full batch time.
+                se.scoring_latency_ms = elapsed_ms
+
+            telemetry.set_span_attributes(
+                span,
+                {
+                    "logfilter.elapsed_ms": elapsed_ms,
+                    "logfilter.high_priority_count": high_count,
+                    "logfilter.medium_priority_count": medium_count,
+                    "logfilter.sigma_match_count": sigma_count,
+                },
+            )
+            logger.debug(
+                "Batch scored",
+                n=len(scored),
+                elapsed_ms=round(elapsed_ms, 1),
+            )
+            return scored
 
     # ── internal helpers ───────────────────────────────────────────────────────
 
@@ -411,43 +486,59 @@ class LogScorer:
         Sigma rules live in config/sigma_rules/*.yml.
         If sigma-cli is not installed or no rules exist, this is a no-op.
         """
-        try:
-            sigma_collection = importlib.import_module("sigma.collection")
-            sigma_collection_cls = sigma_collection.SigmaCollection
-        except ImportError:
-            # sigma is optional; skip gracefully
-            return
+        with telemetry.start_as_current_span(
+            "scorer.sigma.apply",
+            {"logfilter.batch_size": len(events)},
+        ) as span:
+            try:
+                sigma_collection = importlib.import_module("sigma.collection")
+                sigma_collection_cls = sigma_collection.SigmaCollection
+            except ImportError:
+                # sigma is optional; skip gracefully
+                span.set_attribute("logfilter.sigma.available", False)
+                return
 
-        sigma_rules_dir = Path("config/sigma_rules")
-        if not sigma_rules_dir.exists() or not list(sigma_rules_dir.glob("*.yml")):
-            return
+            sigma_rules_dir = Path("config/sigma_rules")
+            if not sigma_rules_dir.exists() or not list(sigma_rules_dir.glob("*.yml")):
+                span.set_attribute("logfilter.sigma.rule_count", 0)
+                return
 
-        try:
-            rules = sigma_collection_cls.load_ruleset([str(sigma_rules_dir)])
-            for se, ev in zip(scored, events):
-                # Simplified: we match raw text against rule titles/descriptions
-                # In production: pipe events through a full Sigma evaluation engine
-                for rule in rules:
-                    detection = getattr(rule, "detection", {}) or {}
-                    rule_text = (
-                        (rule.title or "").lower()
-                        + " "
-                        + " ".join(str(d) for d in detection)
-                    )
-                    if any(kw in ev.text.lower() for kw in rule_text.split() if len(kw) > 4):
-                        se.sigma_matched = True
-                        se.sigma_rule_ids.append(str(rule.id or rule.title))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Sigma evaluation failed", error=str(exc))
+            try:
+                rules = sigma_collection_cls.load_ruleset([str(sigma_rules_dir)])
+                match_count = 0
+                for se, ev in zip(scored, events):
+                    # Simplified: we match raw text against rule titles/descriptions
+                    # In production: pipe events through a full Sigma evaluation engine
+                    for rule in rules:
+                        detection = getattr(rule, "detection", {}) or {}
+                        rule_text = (
+                            (rule.title or "").lower()
+                            + " "
+                            + " ".join(str(d) for d in detection)
+                        )
+                        if any(kw in ev.text.lower() for kw in rule_text.split() if len(kw) > 4):
+                            se.sigma_matched = True
+                            se.sigma_rule_ids.append(str(rule.id or rule.title))
+                            match_count += 1
+                span.set_attribute("logfilter.sigma.match_count", match_count)
+            except Exception as exc:  # noqa: BLE001
+                telemetry.record_exception(span, exc)
+                logger.warning("Sigma evaluation failed", error=str(exc))
 
     def _apply_classifier(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
         """Populate classifier_score using the trained event-count classifier."""
-        try:
-            feature_vectors = self._classifier_feature_vectors(events)
-            probabilities = self.classifier.predict_proba(feature_vectors)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
-            probabilities = np.full(len(events), 0.5, dtype=np.float32)
+        with telemetry.start_as_current_span(
+            "scorer.tier1.classifier",
+            {"logfilter.batch_size": len(events)},
+        ) as span:
+            try:
+                feature_vectors = self._classifier_feature_vectors(events)
+                span.set_attribute("logfilter.feature_count", int(feature_vectors.shape[1]))
+                probabilities = self.classifier.predict_proba(feature_vectors)
+            except Exception as exc:  # noqa: BLE001
+                telemetry.record_exception(span, exc)
+                logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
+                probabilities = np.full(len(events), 0.5, dtype=np.float32)
 
         for se, prob in zip(scored, probabilities):
             se.classifier_score = max(0.0, min(1.0, float(prob)))
@@ -457,26 +548,32 @@ class LogScorer:
             for i, se in enumerate(scored)
             if self.tier2_classifier.should_escalate(se.classifier_score)
         ]
-        if not escalation_indices:
-            return
-        if not self.tier2_classifier.is_ready():
-            logger.warning("Tier-2 classifier unavailable; keeping Tier-1 uncertain scores")
-            return
+        with telemetry.start_as_current_span(
+            "scorer.tier2.classifier",
+            {"logfilter.escalation_count": len(escalation_indices)},
+        ) as span:
+            if not escalation_indices:
+                return
+            if not self.tier2_classifier.is_ready():
+                span.set_attribute("logfilter.tier2.ready", False)
+                logger.warning("Tier-2 classifier unavailable; keeping Tier-1 uncertain scores")
+                return
 
-        tier2_texts = [events[i].raw for i in escalation_indices]
-        try:
-            tier2_probs = self.tier2_classifier.predict_proba(tier2_texts)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Tier-2 classifier scoring failed; keeping Tier-1 scores", error=str(exc)
-            )
-            return
+            tier2_texts = [events[i].raw for i in escalation_indices]
+            try:
+                tier2_probs = self.tier2_classifier.predict_proba(tier2_texts)
+            except Exception as exc:  # noqa: BLE001
+                telemetry.record_exception(span, exc)
+                logger.warning(
+                    "Tier-2 classifier scoring failed; keeping Tier-1 scores", error=str(exc)
+                )
+                return
 
-        for index, prob in zip(escalation_indices, tier2_probs):
-            score = max(0.0, min(1.0, float(prob)))
-            scored[index].classifier_score = score
-            scored[index].tier2_score = score
-            scored[index].tier2_used = True
+            for index, prob in zip(escalation_indices, tier2_probs):
+                score = max(0.0, min(1.0, float(prob)))
+                scored[index].classifier_score = score
+                scored[index].tier2_score = score
+                scored[index].tier2_used = True
 
     def _classifier_feature_vectors(self, events: list[NormalizedEvent]) -> np.ndarray:
         """

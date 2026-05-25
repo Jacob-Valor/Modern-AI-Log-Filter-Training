@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logfilter-collector
+  namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter-collector
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logfilter-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logfilter-collector
+        app.kubernetes.io/component: collector
+        app.kubernetes.io/version: "0.1.0"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: collector
+          image: logfilter-collector:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: syslog-udp
+              containerPort: 5140
+              protocol: UDP
+            - name: syslog-tcp
+              containerPort: 5140
+              protocol: TCP
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "logfilter-kafka:9092"
+            - name: SYSLOG_ALLOWED_CIDRS
+              value: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: logfilter-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logfilter-collector
+  namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter-collector
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logfilter-collector
+  ports:
+    - name: syslog-udp
+      port: 5140
+      targetPort: syslog-udp
+      protocol: UDP
+    - name: syslog-tcp
+      port: 5140
+      targetPort: syslog-tcp
+      protocol: TCP

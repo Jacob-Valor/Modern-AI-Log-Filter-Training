@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logfilter-config
+  namespace: logfilter
+data:
+  config.yaml: |
+    kafka:
+      bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:logfilter-kafka:9092}"
+      topics:
+        raw_logs: "raw-logs"
+        scored_logs: "scored-logs"
+        archived: "archived-logs"
+      consumer_group: "logfilter-scorer"
+      auto_offset_reset: "latest"
+      max_poll_records: 500
+    elasticsearch:
+      hosts: ["${ES_HOST:http://logfilter-elasticsearch:9200}"]
+      index_prefix: "raw-logs"
+      username: "${ES_USER:elastic}"
+      password: "${ES_PASSWORD:}"
+      index_shards: 1
+      index_replicas: 0
+    models:
+      classifier:
+        path: "${LOGFILTER_CLASSIFIER_PATH:models/log_classifier.onnx}"
+      ner:
+        enabled: "${LOGFILTER_NER_ENABLED:true}"
+        model_id: "cisco-ai/SecureBERT2.0-NER"
+        device: "cpu"
+        batch_size: 32
+        min_confidence: 0.80
+      biencoder:
+        enabled: "${LOGFILTER_BIENCODER_ENABLED:true}"
+        model_id: "cisco-ai/SecureBERT2.0-biencoder"
+        device: "cpu"
+        batch_size: 64
+        dedup_threshold: 0.95
+        dedup_window_minutes: 5
+        faiss_top_k: 3
+      cross_encoder:
+        enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"
+        model_id: "cisco-ai/SecureBERT2.0-cross_encoder"
+        device: "cpu"
+        batch_size: 16
+      mitre_techniques_path: "config/mitre_techniques.json"
+    scoring:
+      weights:
+        classifier: 0.30
+        entity_boost: 0.20
+        cross_encoder: 0.35
+        novelty: 0.15
+      entity_boost_value: 0.20
+      dedup_penalty: 0.30
+      routing:
+        high: "${LOGFILTER_SCORE_HIGH:0.85}"
+        medium: "${LOGFILTER_SCORE_MEDIUM:0.50}"
+        low: "${LOGFILTER_SCORE_LOW:0.20}"
+      tier2:
+        uncertainty_low: "${LOGFILTER_TIER2_UNCERTAINTY_LOW:0.10}"
+        uncertainty_high: "${LOGFILTER_TIER2_UNCERTAINTY_HIGH:0.90}"
+    qradar:
+      mode: "enrich_only"
+      syslog_host: "${QRADAR_HOST:localhost}"
+      syslog_port: 514
+      syslog_protocol: "tcp"
+      leef_vendor: "YourCo"
+      leef_product: "AIPreprocessor"
+      leef_version: "1.0"
+    api:
+      host: "0.0.0.0"
+      port: 8080
+      workers: 4
+      log_level: "info"
+      max_batch_size: 200
+      admin_token: "${LOGFILTER_ADMIN_TOKEN:}"
+      scoring_token: "${LOGFILTER_API_TOKEN:}"
+      metrics_token: "${LOGFILTER_METRICS_TOKEN:}"
+      rate_limit_per_minute: 60
+    monitoring:
+      prometheus_port: 9090
+      score_histogram_buckets: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]

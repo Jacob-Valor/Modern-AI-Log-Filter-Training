@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logfilter-archive
+  namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter-archive
+    app.kubernetes.io/component: archive
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logfilter-archive
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logfilter-archive
+        app.kubernetes.io/component: archive
+        app.kubernetes.io/version: "0.1.0"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: archive
+          image: logfilter-archive:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: ES_PASSWORD
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "logfilter-kafka:9092"
+            - name: ES_HOST
+              value: "http://logfilter-elasticsearch:9200"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: logfilter-config
