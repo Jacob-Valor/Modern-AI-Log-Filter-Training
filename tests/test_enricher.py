@@ -126,3 +126,50 @@ class TestLEEFEnricher:
         scored = _make_scored(fields={"src_ip": "192.168.1.50"})
         leef = self.enricher.enrich(scored)
         assert "src=192.168.1.50" in leef
+
+    def test_dst_ip_mapped(self):
+        scored = _make_scored(fields={"dst_ip": "192.168.1.100"})
+        leef = self.enricher.enrich(scored)
+        assert "dst=192.168.1.100" in leef
+
+    def test_src_port_mapped(self):
+        scored = _make_scored(fields={"src_port": "443"})
+        leef = self.enricher.enrich(scored)
+        assert "srcPort=443" in leef
+
+    def test_dst_port_mapped(self):
+        scored = _make_scored(fields={"dst_port": "80"})
+        leef = self.enricher.enrich(scored)
+        assert "dstPort=80" in leef
+
+    def test_protocol_mapped(self):
+        scored = _make_scored(fields={"protocol": "tcp"})
+        leef = self.enricher.enrich(scored)
+        assert "proto=tcp" in leef
+
+    def test_no_src_ip_skips_mapping(self):
+        scored = _make_scored(fields={})
+        leef = self.enricher.enrich(scored)
+        assert "src=" not in leef
+
+    def test_host_unknown_skips_timestamp(self):
+        scored = _make_scored(host="unknown")
+        leef = self.enricher.enrich(scored)
+        assert "devTime=" not in leef
+
+    def test_empty_host_skips_timestamp(self):
+        scored = _make_scored(host="")
+        leef = self.enricher.enrich(scored)
+        assert "devTime=" not in leef
+
+    def test_enrich_batch_with_doc_ids(self):
+        events = [_make_scored(), _make_scored(ai_threat_score=0.3)]
+        leefs = self.enricher.enrich_batch(events, es_doc_ids=["doc1", "doc2"])
+        assert len(leefs) == 2
+        assert "raw_log_ref=doc1" in leefs[0]
+        assert "raw_log_ref=doc2" in leefs[1]
+
+    def test_entities_none_fallback(self):
+        scored = _make_scored(entities=None)
+        leef = self.enricher.enrich(scored)
+        assert "ai_ner_confidence=0.0000" in leef

@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.venv
+venv
+*.egg
+.pytest_cache
+.mypy_cache
+
+# Large data files (build context limit)
+artifacts/
+HDFS_v3_TraceBench/preprocessed/*.csv
+HDFS_v3_TraceBench/preprocessed/*.json
+HDFS_v3_TraceBench/tracebench/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed at runtime)
+*.md
+notebooks/
+tests/
+training/
+
+# CI/ops (not needed at runtime)
+.github/
+k8s/
+scripts/
+agents/

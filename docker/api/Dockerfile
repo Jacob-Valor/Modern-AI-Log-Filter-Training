@@ -11,20 +11,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python deps first (layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-api.txt .
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.8.0
+RUN pip install --no-cache-dir -r requirements-api.txt
 
 # Copy source
 COPY src/ ./src/
 COPY config/ ./config/
-COPY models/ ./models/
 COPY pyproject.toml .
 
 # Install the logfilter package
 RUN pip install --no-cache-dir -e . --no-deps
 
 # Non-root user
-RUN useradd -m -u 1000 logfilter && chown -R logfilter:logfilter /app
+RUN useradd -m -u 1000 logfilter \
+    && mkdir -p /home/logfilter/.cache/huggingface \
+    && chown -R logfilter:logfilter /app /home/logfilter/.cache
 USER logfilter
 
 # Health check
@@ -36,5 +38,4 @@ EXPOSE 8080
 CMD ["uvicorn", "logfilter.api.app:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \
-     "--workers", "4", \
-     "--log-config", "/dev/null"]
+     "--workers", "4"]

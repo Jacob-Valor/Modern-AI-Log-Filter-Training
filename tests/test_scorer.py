@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -23,7 +25,7 @@ class FakeClassifier(LogClassifier):
 
     def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
         self.last_vectors = feature_vectors
-        return np.array([0.82], dtype=np.float32)
+        return np.full(len(feature_vectors), 0.82, dtype=np.float32)
 
     def is_ready(self) -> bool:
         return True
@@ -227,3 +229,240 @@ def test_invalid_routing_thresholds_fail_fast(
             biencoder=FakeBiEncoder(),
             cross_encoder=FakeCrossEncoder(),
         )
+
+
+def test_enabled_parses_various_truthy_strings() -> None:
+    from logfilter.pipeline.scorer import _enabled
+
+    assert _enabled("true") is True
+    assert _enabled("True") is True
+    assert _enabled("TRUE") is True
+    assert _enabled("yes") is True
+    assert _enabled("1") is True
+    assert _enabled("on") is True
+    assert _enabled("false") is False
+    assert _enabled("no") is False
+    assert _enabled("0") is False
+    assert _enabled(1) is True
+    assert _enabled(0) is False
+    assert _enabled(None, default=True) is True
+    assert _enabled(None, default=False) is False
+    assert _enabled(True) is True
+    assert _enabled(False) is False
+
+
+def test_score_batch_processes_multiple_events() -> None:
+    classifier = FakeClassifier()
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=classifier,
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    normalizer = LogNormalizer()
+    events = [
+        normalizer.normalize(
+            "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
+        ),
+        normalizer.normalize(
+            "Jan 15 11:08:00 prod sshd[124]: Accepted password for admin from 10.0.0.6"
+        ),
+    ]
+    scored = scorer.score_batch(events)
+
+    assert len(scored) == 2
+    assert all(s.classifier_score == pytest.approx(0.82) for s in scored)
+
+
+class FakeTier2ThatEscalates(Tier2Classifier):
+    def should_escalate(self, tier1_prob: float) -> bool:
+        _ = tier1_prob
+        return True
+
+    def is_ready(self) -> bool:
+        return True
+
+    def predict_proba(self, texts: list[str]) -> np.ndarray:
+        return np.array([0.95], dtype=np.float32)
+
+
+def test_tier2_escalates_when_uncertain() -> None:
+    classifier = FakeClassifier()
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.8,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=classifier,
+        tier2_classifier=FakeTier2ThatEscalates(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize(
+        "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
+    )
+    scored = scorer.score(event)
+
+    assert scored.tier2_used is True
+    assert scored.tier2_score == pytest.approx(0.95)
+
+
+def test_probability_config_validates_numeric() -> None:
+    from logfilter.pipeline.scorer import _probability_config
+
+    with pytest.raises(ValueError, match="numeric"):
+        _probability_config("abc", "test")
+
+
+def test_probability_config_validates_range() -> None:
+    from logfilter.pipeline.scorer import _probability_config
+
+    with pytest.raises(ValueError, match="between"):
+        _probability_config(1.5, "test")
+
+    with pytest.raises(ValueError, match="between"):
+        _probability_config(-0.1, "test")
+
+
+def test_routing_thresholds_validates_order() -> None:
+    from logfilter.pipeline.scorer import _routing_thresholds
+
+    with pytest.raises(ValueError, match="low < medium < high"):
+        _routing_thresholds({"high": 0.5, "medium": 0.6, "low": 0.2})
+
+
+def test_scored_event_to_dict() -> None:
+    from logfilter.pipeline.scorer import ScoredEvent
+
+    event = ScoredEvent(
+        source_type="syslog",
+        timestamp="2026-01-15T11:07:53Z",
+        host="prod-server01",
+        raw="test",
+        normalized_text="test",
+        ai_threat_score=0.5,
+        ai_priority="LOW",
+    )
+    d = event.to_dict()
+    assert d["source_type"] == "syslog"
+    assert d["ai_threat_score"] == 0.5
+
+
+def test_model_version_paths() -> None:
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        model_version="v1",
+    )
+    assert scorer._model_version == "v1"
+
+
+class FakeNERWithEntities(FakeNER):
+    def extract_batch(self, texts: list[str]) -> list[Any]:
+        result = ExtractedEntities()
+        result.indicators = ["10.0.0.5"]
+        result.confidence = 0.95
+        result.has_high_value_entities = True
+        return [result for _ in texts]
+
+
+class FakeDuplicateBiEncoder(FakeBiEncoder):
+    def check_dedup_and_retrieve_batch(
+        self, texts: list[str]
+    ) -> list[tuple[Any, list[Any]]]:
+        return [
+            (
+                DedupResult(is_duplicate=True, similarity=0.95),
+                [
+                    ATTACKCandidate(
+                        technique_id="T1110",
+                        name="Brute Force",
+                        description="Test",
+                        similarity=0.91,
+                    )
+                ],
+            )
+            for _ in texts
+        ]
+
+
+def test_duplicate_penalty_and_entity_boost() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.5,
+                    "entity_boost": 0.3,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNERWithEntities(),
+        biencoder=FakeDuplicateBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize(
+        "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
+    )
+    scored = scorer.score(event)
+
+    assert scored.is_duplicate is True
+    assert scored.dedup_similarity == pytest.approx(0.95)
+
+
+def test_entity_boost_for_non_duplicates() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.5,
+                    "entity_boost": 0.3,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "entity_boost_value": 0.3,
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNERWithEntities(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize(
+        "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
+    )
+    scored = scorer.score(event)
+
+    assert scored.is_duplicate is False
+    assert scored.entity_boost == pytest.approx(0.3)
