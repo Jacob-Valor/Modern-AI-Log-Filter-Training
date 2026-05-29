@@ -21,6 +21,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -80,9 +81,9 @@ class BiEncoderModel:
         self.faiss_top_k = faiss_top_k
         self.mitre_techniques_path = Path(mitre_techniques_path)
 
-        self._model = None
-        self._faiss_dedup = None  # rolling dedup index
-        self._faiss_attack = None  # static ATT&CK index
+        self._model: Any | None = None
+        self._faiss_dedup: Any | None = None  # rolling dedup index
+        self._faiss_attack: Any | None = None  # static ATT&CK index
         self._attack_techniques: list[dict[str, str]] = []
 
         # Rolling dedup window: deque of (timestamp, embedding)

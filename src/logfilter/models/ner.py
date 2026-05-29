@@ -84,7 +84,7 @@ class NERModel:
         self.device = device
         self.batch_size = batch_size
         self.min_confidence = min_confidence
-        self._pipeline = None
+        self._pipeline: Any | None = None
 
     def _load(self) -> None:
         """Load HuggingFace pipeline on first use."""

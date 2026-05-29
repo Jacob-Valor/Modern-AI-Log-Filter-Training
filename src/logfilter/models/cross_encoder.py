@@ -13,6 +13,7 @@ Max sequence length: 1024 tokens
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
@@ -46,7 +47,7 @@ class CrossEncoderModel:
         self.model_id = model_id
         self.device = device
         self.batch_size = batch_size
-        self._model = None
+        self._model: Any | None = None
 
     def _load(self) -> None:
         from sentence_transformers import CrossEncoder

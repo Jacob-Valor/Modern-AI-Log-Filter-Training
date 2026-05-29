@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import structlog
@@ -103,9 +104,9 @@ class LogClassifier:
         self.scaler_path = Path(scaler_path)
         self.feature_names_path = Path(feature_names_path)
 
-        self._session = None  # ONNX Runtime InferenceSession
-        self._xgb_model = None  # Fallback XGBoost model
-        self._scaler = None
+        self._session: Any | None = None  # ONNX Runtime InferenceSession
+        self._xgb_model: Any | None = None  # Fallback XGBoost model
+        self._scaler: SafeMaxAbsScaler | None = None
         self._feature_names: list[str] = []
         self._input_name: str = ""
 
