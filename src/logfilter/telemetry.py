@@ -211,6 +211,9 @@ def traced(
     return decorator
 
 
+_kafka_setter: Any = None
+_kafka_getter: Any = None
+
 if OTEL_AVAILABLE:
 
     class _KafkaHeaderSetter:
@@ -235,9 +238,6 @@ if OTEL_AVAILABLE:
 
     _kafka_setter = _KafkaHeaderSetter()
     _kafka_getter = _KafkaHeaderGetter()
-else:
-    _kafka_setter = None
-    _kafka_getter = None
 
 
 def inject_kafka_headers(
