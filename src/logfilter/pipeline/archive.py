@@ -155,7 +155,8 @@ class LogArchive:
             raise_on_exception=False,
         )
         if errors:
-            logger.error("ES bulk write had errors", error_count=len(errors))
+            error_count = len(errors) if isinstance(errors, list) else int(errors)
+            logger.error("ES bulk write had errors", error_count=error_count)
 
         # Unfortunately helpers.bulk doesn't return IDs; caller must handle
         # by querying for the written docs if IDs are needed for raw_log_ref.
