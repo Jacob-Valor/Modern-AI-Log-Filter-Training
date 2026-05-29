@@ -25,6 +25,8 @@ htmlcov/
 dist/
 build/
 .env
+.env.*
+!.env.example
 
 # HuggingFace cache
 .cache/

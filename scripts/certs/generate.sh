@@ -55,8 +55,9 @@ echo "Done. Files generated:"
 ls -la *.jks *.creds sasl_* 2>/dev/null || true
 
 echo ""
-echo "To enable SASL_SSL in clients, set:"
+echo "Generated values for future Kafka SASL_SSL client wiring:"
 echo "  KAFKA_SECURITY_PROTOCOL=SASL_SSL"
 echo "  KAFKA_SASL_MECHANISM=SCRAM-SHA-512"
 echo "  KAFKA_SASL_USERNAME=logfilter"
 echo "  KAFKA_SASL_PASSWORD=<from sasl_password>"
+echo "These variables do not secure runtime clients until Kafka client wiring is implemented."
