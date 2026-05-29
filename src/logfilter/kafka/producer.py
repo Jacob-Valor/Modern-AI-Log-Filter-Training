@@ -21,6 +21,7 @@ from kafka.errors import KafkaError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from logfilter import telemetry
+from logfilter.kafka.config import kafka_security_kwargs
 
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +51,7 @@ class LogProducer:
         batch_size_bytes: int = 65536,  # 64 KB
         linger_ms: int = 10,
         compression: str | None = "lz4",
+        kafka_config: dict[str, Any] | None = None,
     ) -> None:
         self.topic = topic
         self._producer: KafkaProducer | None = None
@@ -63,6 +65,7 @@ class LogProducer:
             "acks": "all",  # wait for full ISR acknowledgement
             "retries": 5,
             "max_in_flight_requests_per_connection": 1,
+            **kafka_security_kwargs(kafka_config),
         }
 
     def _get_producer(self) -> KafkaProducer:

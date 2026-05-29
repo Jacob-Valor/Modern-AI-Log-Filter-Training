@@ -67,6 +67,33 @@ def test_log_producer_send_builds_payload() -> None:
     assert isinstance(fake.sent[0]["headers"], list)
 
 
+def test_log_producer_passes_kafka_security_config() -> None:
+    producer = LogProducer(
+        bootstrap_servers="kafka:29092",
+        topic="raw-logs",
+        kafka_config={
+            "security": {
+                "protocol": "SASL_SSL",
+                "sasl": {
+                    "mechanism": "PLAIN",
+                    "username": "logfilter",
+                    "password": "secret",
+                },
+                "ssl": {"cafile": "/etc/kafka/ca.pem"},
+            }
+        },
+    )
+
+    producer.send("raw log", host="host")
+
+    fake = FakeKafkaProducer.instances[0]
+    assert fake.config["security_protocol"] == "SASL_SSL"
+    assert fake.config["sasl_mechanism"] == "PLAIN"
+    assert fake.config["sasl_plain_username"] == "logfilter"
+    assert fake.config["sasl_plain_password"] == "secret"
+    assert fake.config["ssl_cafile"] == "/etc/kafka/ca.pem"
+
+
 def test_log_producer_send_raises_kafka_error() -> None:
     producer = LogProducer(topic="raw-logs")
     fake = cast(Any, producer._get_producer())

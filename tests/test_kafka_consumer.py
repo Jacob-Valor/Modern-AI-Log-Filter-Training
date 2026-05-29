@@ -66,6 +66,32 @@ def test_archive_consumer_writes_bulk_and_commits() -> None:
     assert es.bulk_calls[0][1]["raw"] == "raw"
 
 
+def test_archive_consumer_passes_kafka_security_config() -> None:
+    class FakeES:
+        def bulk(self, body):
+            return {"errors": False}
+
+    consumer = ArchiveConsumer(
+        "kafka:29092",
+        "raw-logs",
+        es_client=FakeES(),
+        kafka_config={
+            "security": {
+                "protocol": "SSL",
+                "ssl": {"cafile": "/etc/kafka/ca.pem", "check_hostname": "false"},
+            }
+        },
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    fake = FakeKafkaConsumer.instances[0]
+    assert fake.kwargs["security_protocol"] == "SSL"
+    assert fake.kwargs["ssl_cafile"] == "/etc/kafka/ca.pem"
+    assert fake.kwargs["ssl_check_hostname"] is False
+
+
 def test_archive_consumer_does_not_commit_on_bulk_errors() -> None:
     class FakeES:
         def bulk(self, body):
@@ -108,6 +134,34 @@ def test_scorer_consumer_scores_publishes_and_commits() -> None:
     assert fake.closed
     assert producer.sent[0][0][0] == "scored-logs"
     assert producer.flushed
+
+
+def test_scorer_consumer_passes_kafka_security_config() -> None:
+    consumer = ScorerConsumer(
+        "kafka:29092",
+        "raw-logs",
+        "scored-logs",
+        score_fn=lambda batch: [{"host": "host", "score": 1.0}],
+        kafka_config={
+            "security": {
+                "protocol": "SASL_PLAINTEXT",
+                "sasl": {
+                    "mechanism": "SCRAM-SHA-256",
+                    "username": "logfilter",
+                    "password": "secret",
+                },
+            }
+        },
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    fake = FakeKafkaConsumer.instances[0]
+    assert fake.kwargs["security_protocol"] == "SASL_PLAINTEXT"
+    assert fake.kwargs["sasl_mechanism"] == "SCRAM-SHA-256"
+    assert fake.kwargs["sasl_plain_username"] == "logfilter"
+    assert fake.kwargs["sasl_plain_password"] == "secret"
 
 
 def test_scorer_consumer_does_not_commit_when_score_fails() -> None:

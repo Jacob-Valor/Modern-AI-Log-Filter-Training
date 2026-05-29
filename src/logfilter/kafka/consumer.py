@@ -25,6 +25,7 @@ import structlog
 from kafka import KafkaConsumer
 
 from logfilter import telemetry
+from logfilter.kafka.config import kafka_security_kwargs
 from logfilter.utils.circuit_breaker import CircuitBreaker
 
 logger = structlog.get_logger(__name__)
@@ -55,6 +56,7 @@ class ArchiveConsumer:
         batch_size: int = 100,
         poll_timeout_ms: int = 1000,
         es_breaker: CircuitBreaker | None = None,
+        kafka_config: dict[str, Any] | None = None,
     ) -> None:
         self.bootstrap_servers = bootstrap_servers
         self.raw_topic = raw_topic
@@ -64,6 +66,7 @@ class ArchiveConsumer:
         self.poll_timeout_ms = poll_timeout_ms
         self._running = False
         self._es_breaker = es_breaker or _DEFAULT_ES_BREAKER
+        self._kafka_config = kafka_config or {}
 
     def _index_name(self) -> str:
         date_str = time.strftime("%Y.%m.%d")
@@ -79,6 +82,7 @@ class ArchiveConsumer:
             enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             max_poll_records=self.batch_size,
+            **kafka_security_kwargs(self._kafka_config),
         )
 
         self._running = True
@@ -176,6 +180,7 @@ class ScorerConsumer:
         batch_size: int = 100,
         poll_timeout_ms: int = 500,
         producer: Any = None,  # KafkaProducer for scored-logs output
+        kafka_config: dict[str, Any] | None = None,
     ) -> None:
         self.bootstrap_servers = bootstrap_servers
         self.raw_topic = raw_topic
@@ -185,6 +190,7 @@ class ScorerConsumer:
         self.poll_timeout_ms = poll_timeout_ms
         self._producer = producer
         self._running = False
+        self._kafka_config = kafka_config or {}
 
     def run(self) -> None:
         """Blocking run loop."""
@@ -196,6 +202,7 @@ class ScorerConsumer:
             enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             max_poll_records=self.batch_size,
+            **kafka_security_kwargs(self._kafka_config),
         )
 
         self._running = True
