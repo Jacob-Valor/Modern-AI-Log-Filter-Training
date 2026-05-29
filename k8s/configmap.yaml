@@ -46,14 +46,14 @@ data:
       mitre_techniques_path: "config/mitre_techniques.json"
     scoring:
       weights:
-        classifier: 0.30
-        entity_boost: 0.20
-        cross_encoder: 0.35
-        novelty: 0.15
+        classifier: 0.35
+        entity_boost: 0.25
+        cross_encoder: 0.40
+        novelty: 0.0
       entity_boost_value: 0.20
       dedup_penalty: 0.30
       routing:
-        high: "${LOGFILTER_SCORE_HIGH:0.85}"
+        high: "${LOGFILTER_SCORE_HIGH:0.80}"
         medium: "${LOGFILTER_SCORE_MEDIUM:0.50}"
         low: "${LOGFILTER_SCORE_LOW:0.20}"
       tier2:
