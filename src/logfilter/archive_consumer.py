@@ -40,6 +40,7 @@ def main() -> None:
         es_client=es_client,
         index_prefix=es_cfg.get("index_prefix", "raw-logs"),
         batch_size=int(kafka_cfg.get("max_poll_records", 100)),
+        kafka_config=kafka_cfg,
     )
 
     logger.info("Archive consumer starting")

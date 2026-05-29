@@ -10,6 +10,7 @@ import signal
 import socket
 import threading
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
@@ -29,6 +30,7 @@ class CollectorSettings:
     allowed_cidrs: CIDRAllowlist
     bootstrap_servers: str | list[str]
     raw_topic: str
+    kafka_config: dict[str, Any]
 
 
 def _settings() -> CollectorSettings:
@@ -43,6 +45,7 @@ def _settings() -> CollectorSettings:
         ),
         bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
         raw_topic=topics.get("raw_logs", "raw-logs"),
+        kafka_config=kafka_cfg,
     )
 
 
@@ -55,6 +58,7 @@ class SyslogCollector:
         self.producer = LogProducer(
             bootstrap_servers=settings.bootstrap_servers,
             topic=settings.raw_topic,
+            kafka_config=settings.kafka_config,
         )
         self.stop_event = threading.Event()
 

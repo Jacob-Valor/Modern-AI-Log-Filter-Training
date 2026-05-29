@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from logfilter import collector as collector_module
 from logfilter.collector import CollectorSettings, SyslogCollector
+from logfilter.kafka.producer import LogProducer
 from logfilter.security.network import CIDRAllowlist
 
 
@@ -27,10 +30,11 @@ def _collector(allowed_cidrs: str = "10.0.0.0/24") -> tuple[SyslogCollector, Fak
             allowed_cidrs=CIDRAllowlist.from_csv(allowed_cidrs),
             bootstrap_servers="localhost:9092",
             raw_topic="raw-logs",
+            kafka_config={},
         )
     )
     producer = FakeProducer()
-    collector.producer = producer  # type: ignore[assignment]
+    collector.producer = cast(LogProducer, producer)
     return collector, producer
 
 
@@ -72,6 +76,7 @@ def test_settings_reads_environment_and_config(monkeypatch) -> None:
     assert settings.allowed_cidrs.allows("10.0.0.5")
     assert settings.bootstrap_servers == "kafka:29092"
     assert settings.raw_topic == "raw"
+    assert settings.kafka_config["bootstrap_servers"] == "kafka:29092"
 
 
 def test_publish_uses_normalized_host_when_present() -> None:

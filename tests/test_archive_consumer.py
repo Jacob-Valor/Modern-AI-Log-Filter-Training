@@ -41,6 +41,7 @@ def test_archive_consumer_main_wires_archive_consumer(monkeypatch) -> None:
                 "bootstrap_servers": "kafka:29092",
                 "topics": {"raw_logs": "raw"},
                 "max_poll_records": 33,
+                "security": {"protocol": "PLAINTEXT"},
             },
             "elasticsearch": {
                 "hosts": ["http://es:9200"],
@@ -60,4 +61,5 @@ def test_archive_consumer_main_wires_archive_consumer(monkeypatch) -> None:
     assert calls["archive_kwargs"]["password"] == "secret"
     assert calls["consumer_kwargs"]["raw_topic"] == "raw"
     assert calls["consumer_kwargs"]["batch_size"] == 33
+    assert calls["consumer_kwargs"]["kafka_config"]["security"]["protocol"] == "PLAINTEXT"
     assert calls["run"] is True
