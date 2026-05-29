@@ -39,9 +39,8 @@ real local tokens.
 - Rotate `LOGFILTER_API_TOKEN`, `LOGFILTER_ADMIN_TOKEN`, `ES_PASSWORD`, and
   `GRAFANA_ADMIN_PASSWORD` through a secret manager; never commit `.env` files.
 - Replace local plaintext Kafka with broker-side SASL/TLS before crossing trust
-  boundaries. The Kafka SASL/TLS values in `.env.example` are placeholders only;
-  runtime clients currently need explicit code wiring before those values enforce
-  encrypted or authenticated Kafka connections.
+  boundaries. Configure via KAFKA_SECURITY_PROTOCOL and related environment
+  variables; the default is PLAINTEXT for local development only.
 - Set service CPU and memory limits based on measured ingest rate, model size,
   and queue depth. The API has a conservative Compose limit; workers still need
   production sizing from load tests.
