@@ -12,7 +12,7 @@ Final score formula:
   score = w_cls  * classifier_score
         + w_ent  * entity_boost    (0.2 if high-value IOC/malware/CVE found)
         + w_ce   * cross_encoder_score  (max over top-k ATT&CK candidates)
-        + w_nov  * novelty_score   (placeholder — 0.5 default)
+        + w_nov  * novelty_score   (disabled by default until implemented)
         - dedup_penalty            (applied when is_duplicate=True)
 
 All weights are read from config.yaml.
@@ -65,7 +65,7 @@ def _probability_config(value: Any, name: str) -> float:
 
 def _routing_thresholds(routing: dict[str, Any]) -> tuple[float, float, float]:
     """Return validated low/medium/high routing thresholds."""
-    high = _probability_config(routing.get("high", 0.85), "routing.high")
+    high = _probability_config(routing.get("high", 0.80), "routing.high")
     medium = _probability_config(routing.get("medium", 0.50), "routing.medium")
     low = _probability_config(routing.get("low", 0.20), "routing.low")
     if not low < medium < high:
@@ -238,10 +238,10 @@ class LogScorer:
         scoring = config.get("scoring", {})
         weights = scoring.get("weights", {})
 
-        self.w_cls = float(weights.get("classifier", 0.30))
-        self.w_ent = float(weights.get("entity_boost", 0.20))
-        self.w_ce = float(weights.get("cross_encoder", 0.35))
-        self.w_nov = float(weights.get("novelty", 0.15))
+        self.w_cls = float(weights.get("classifier", 0.35))
+        self.w_ent = float(weights.get("entity_boost", 0.25))
+        self.w_ce = float(weights.get("cross_encoder", 0.40))
+        self.w_nov = float(weights.get("novelty", 0.0))
         self.entity_boost_value = float(scoring.get("entity_boost_value", 0.20))
         self.dedup_penalty_value = float(scoring.get("dedup_penalty", 0.30))
 
