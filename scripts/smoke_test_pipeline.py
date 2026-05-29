@@ -341,14 +341,14 @@ def test_scorer_mocked() -> bool:
         config = {
             "scoring": {
                 "weights": {
-                    "classifier": 0.30,
-                    "entity_boost": 0.20,
-                    "cross_encoder": 0.35,
-                    "novelty": 0.15,
+                    "classifier": 0.35,
+                    "entity_boost": 0.25,
+                    "cross_encoder": 0.40,
+                    "novelty": 0.0,
                 },
                 "entity_boost_value": 0.20,
                 "dedup_penalty": 0.30,
-                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+                "routing": {"high": 0.80, "medium": 0.50, "low": 0.20},
                 "tier2": {"uncertainty_low": 0.10, "uncertainty_high": 0.90},
             },
             "models": {
