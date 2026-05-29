@@ -18,6 +18,7 @@ from kafka import KafkaConsumer, KafkaProducer
 
 from logfilter import telemetry
 from logfilter.config import load_config
+from logfilter.kafka.config import kafka_security_kwargs
 from logfilter.pipeline.router import SyslogSender
 from logfilter.utils.circuit_breaker import CircuitBreaker
 
@@ -45,6 +46,7 @@ class RouterSettings:
     qradar_host: str
     qradar_port: int
     qradar_protocol: str
+    kafka_config: dict[str, Any]
 
 
 def _settings() -> RouterSettings:
@@ -71,6 +73,7 @@ def _settings() -> RouterSettings:
         qradar_host=qradar_cfg.get("syslog_host", "localhost"),
         qradar_port=int(qradar_cfg.get("syslog_port", 514)),
         qradar_protocol=qradar_cfg.get("syslog_protocol", "tcp"),
+        kafka_config=kafka_cfg,
     )
 
 
@@ -94,6 +97,7 @@ class KafkaQRadarRouter:
             enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             max_poll_records=settings.max_poll_records,
+            **kafka_security_kwargs(settings.kafka_config),
         )
         self.producer = KafkaProducer(
             bootstrap_servers=settings.bootstrap_servers,
@@ -102,6 +106,7 @@ class KafkaQRadarRouter:
             acks="all",
             retries=5,
             max_in_flight_requests_per_connection=1,
+            **kafka_security_kwargs(settings.kafka_config),
         )
         self._current_batch_context = None
 
