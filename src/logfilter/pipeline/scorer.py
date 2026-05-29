@@ -40,6 +40,14 @@ from logfilter.pipeline.normalizer import NormalizedEvent
 
 logger = structlog.get_logger(__name__)
 
+ROOT = Path(__file__).parent.parent.parent.parent
+
+
+def _resolve_path(value: str | Path) -> Path:
+    """Resolve a path against ROOT if it is relative, otherwise keep absolute."""
+    p = Path(value)
+    return ROOT / p if not p.is_absolute() else p
+
 
 def _enabled(value: Any, default: bool = True) -> bool:
     """Parse config values that may arrive as booleans or env-substituted strings."""
@@ -251,16 +259,20 @@ class LogScorer:
         )
 
         models_cfg = config.get("models", {})
-        classifier_path = models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
-        scaler_path = models_cfg.get("classifier", {}).get("scaler_path", "models/scaler.json")
-        feature_names_path = models_cfg.get("classifier", {}).get(
-            "feature_names_path", "models/feature_names.json"
+        classifier_path = _resolve_path(
+            models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
+        )
+        scaler_path = _resolve_path(
+            models_cfg.get("classifier", {}).get("scaler_path", "models/scaler.json")
+        )
+        feature_names_path = _resolve_path(
+            models_cfg.get("classifier", {}).get("feature_names_path", "models/feature_names.json")
         )
         if self._model_version:
-            version_root = Path("models") / self._model_version
-            classifier_path = str(version_root / "log_classifier.onnx")
-            scaler_path = str(version_root / "scaler.json")
-            feature_names_path = str(version_root / "feature_names.json")
+            version_root = _resolve_path(Path("models") / self._model_version)
+            classifier_path = version_root / "log_classifier.onnx"
+            scaler_path = version_root / "scaler.json"
+            feature_names_path = version_root / "feature_names.json"
 
         self.classifier = classifier or LogClassifier(
             model_path=classifier_path,
@@ -268,9 +280,9 @@ class LogScorer:
             feature_names_path=feature_names_path,
         )
         tier2_cfg = scoring.get("tier2", {})
-        tier2_model_dir = Path("models") / "tier2"
+        tier2_model_dir = _resolve_path(Path("models") / "tier2")
         if self._model_version:
-            tier2_model_dir = Path("models") / self._model_version / "tier2"
+            tier2_model_dir = _resolve_path(Path("models") / self._model_version / "tier2")
         self.tier2_classifier = tier2_classifier or Tier2Classifier(
             model_dir=tier2_model_dir,
             uncertainty_low=tier2_cfg.get("uncertainty_low", 0.10),
@@ -298,8 +310,8 @@ class LogScorer:
                 dedup_threshold=float(biencoder_cfg.get("dedup_threshold", 0.95)),
                 dedup_window_minutes=float(biencoder_cfg.get("dedup_window_minutes", 5.0)),
                 faiss_top_k=int(biencoder_cfg.get("faiss_top_k", 3)),
-                mitre_techniques_path=models_cfg.get(
-                    "mitre_techniques_path", "config/mitre_techniques.json"
+                mitre_techniques_path=_resolve_path(
+                    models_cfg.get("mitre_techniques_path", "config/mitre_techniques.json")
                 ),
             )
             if _enabled(biencoder_cfg.get("enabled", True))
