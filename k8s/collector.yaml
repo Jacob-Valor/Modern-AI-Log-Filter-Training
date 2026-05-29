@@ -42,6 +42,51 @@ spec:
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "logfilter-kafka:9092"
+            - name: KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: KAFKA_SECURITY_PROTOCOL
+            - name: KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: KAFKA_SASL_MECHANISM
+            - name: KAFKA_SASL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: KAFKA_SASL_USERNAME
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: KAFKA_SASL_PASSWORD
+            - name: KAFKA_SSL_CAFILE
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: KAFKA_SSL_CAFILE
+            - name: KAFKA_SSL_CERTFILE
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: KAFKA_SSL_CERTFILE
+            - name: KAFKA_SSL_KEYFILE
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: KAFKA_SSL_KEYFILE
+            - name: KAFKA_SSL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: KAFKA_SSL_PASSWORD
+            - name: KAFKA_SSL_CHECK_HOSTNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: KAFKA_SSL_CHECK_HOSTNAME
             - name: SYSLOG_ALLOWED_CIDRS
               value: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
           resources:
