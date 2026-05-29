@@ -161,7 +161,7 @@ environment variables:
 |---|---|---|---|
 | Tier-2 lower escalation bound | `scoring.tier2.uncertainty_low` | `LOGFILTER_TIER2_UNCERTAINTY_LOW` | `0.10` |
 | Tier-2 upper escalation bound | `scoring.tier2.uncertainty_high` | `LOGFILTER_TIER2_UNCERTAINTY_HIGH` | `0.90` |
-| HIGH priority score threshold | `scoring.routing.high` | `LOGFILTER_SCORE_HIGH` | `0.85` |
+| HIGH priority score threshold | `scoring.routing.high` | `LOGFILTER_SCORE_HIGH` | `0.80` |
 | MEDIUM priority score threshold | `scoring.routing.medium` | `LOGFILTER_SCORE_MEDIUM` | `0.50` |
 | LOW priority score threshold | `scoring.routing.low` | `LOGFILTER_SCORE_LOW` | `0.20` |
 
