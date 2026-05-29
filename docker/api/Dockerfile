@@ -12,7 +12,7 @@ WORKDIR /app
 
 # Install Python deps first (layer caching)
 COPY requirements-api.txt .
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.8.0
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
 RUN pip install --no-cache-dir -r requirements-api.txt
 
 # Copy source
