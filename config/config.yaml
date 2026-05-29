@@ -10,6 +10,18 @@ kafka:
   consumer_group: "logfilter-scorer"
   auto_offset_reset: "latest"
   max_poll_records: 500
+  security:
+    protocol: "${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}"
+    sasl:
+      mechanism: "${KAFKA_SASL_MECHANISM:}"
+      username: "${KAFKA_SASL_USERNAME:}"
+      password: "${KAFKA_SASL_PASSWORD:}"
+    ssl:
+      cafile: "${KAFKA_SSL_CAFILE:}"
+      certfile: "${KAFKA_SSL_CERTFILE:}"
+      keyfile: "${KAFKA_SSL_KEYFILE:}"
+      password: "${KAFKA_SSL_PASSWORD:}"
+      check_hostname: "${KAFKA_SSL_CHECK_HOSTNAME:true}"
 
 # ── Elasticsearch ────────────────────────────────────────────────────────────
 elasticsearch:
