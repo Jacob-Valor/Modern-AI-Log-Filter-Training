@@ -6,9 +6,9 @@ that case all helpers degrade to no-ops while preserving the same call shape.
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import importlib
+import inspect
 import os
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -105,6 +105,12 @@ def setup_tracing(service_name: str | None = None, endpoint: str | None = None) 
     if not OTEL_AVAILABLE:
         return False
 
+    resolved_endpoint = endpoint if endpoint is not None else os.environ.get(
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    if not resolved_endpoint:
+        return False
+
     if _TRACING_INITIALIZED:
         return True
 
@@ -113,14 +119,9 @@ def setup_tracing(service_name: str | None = None, endpoint: str | None = None) 
             return True
 
         resolved_service = service_name or os.environ.get("OTEL_SERVICE_NAME", "logfilter")
-        resolved_endpoint = endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
         resource = Resource.create({"service.name": resolved_service})
         provider = TracerProvider(resource=resource)
-        exporter = (
-            OTLPSpanExporter(endpoint=resolved_endpoint)
-            if resolved_endpoint
-            else OTLPSpanExporter()
-        )
+        exporter = OTLPSpanExporter(endpoint=resolved_endpoint)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         try:
             trace.set_tracer_provider(provider)
@@ -152,7 +153,8 @@ def instrument_kafka_clients() -> bool:
 def get_tracer(name: str = "logfilter") -> Any:
     if not OTEL_AVAILABLE:
         return None
-    setup_tracing()
+    if not setup_tracing():
+        return None
     return trace.get_tracer(name)
 
 
@@ -168,6 +170,9 @@ def start_as_current_span(
         return
 
     tracer = get_tracer("logfilter")
+    if tracer is None:
+        yield _NoopSpan()
+        return
     with tracer.start_as_current_span(name, context=trace_context) as span:
         set_span_attributes(span, attributes)
         try:
@@ -187,7 +192,7 @@ def traced(
         func_name = getattr(func, "__qualname__", getattr(func, "__name__", "callable"))
         span_name = name or f"{func.__module__}.{func_name}"
 
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -311,7 +316,8 @@ def instrument_fastapi_app(app: Any) -> bool:
     """Apply FastAPI auto-instrumentation once per app instance."""
     if not OTEL_AVAILABLE or FastAPIInstrumentor is None:
         return False
-    setup_tracing()
+    if not setup_tracing():
+        return False
     if getattr(app.state, _FASTAPI_INSTRUMENTED_ATTR, False):
         return True
     FastAPIInstrumentor().instrument_app(app)

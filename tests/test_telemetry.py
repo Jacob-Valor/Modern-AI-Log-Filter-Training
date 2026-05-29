@@ -70,6 +70,18 @@ def test_setup_tracing_idempotent(monkeypatch) -> None:
     assert telemetry.setup_tracing() is False
 
 
+def test_setup_tracing_requires_explicit_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_TRACING_INITIALIZED", False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
+    assert telemetry.setup_tracing() is False
+    assert telemetry.get_tracer() is None
+
+    with telemetry.start_as_current_span("test.no_endpoint") as span:
+        assert isinstance(span, telemetry._NoopSpan)
+
+
 def test_instrument_kafka_clients_returns_false_without_otel(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", False)
 
