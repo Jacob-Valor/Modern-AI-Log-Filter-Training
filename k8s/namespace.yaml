@@ -5,3 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: logfilter
     app.kubernetes.io/version: "0.1.0"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -32,6 +32,14 @@ spec:
         - name: api
           image: logfilter-api:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: http
               containerPort: 8080
@@ -81,22 +89,8 @@ spec:
               readOnly: true
             - name: hf-cache
               mountPath: /home/logfilter/.cache
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 120
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: config
           configMap:
@@ -106,6 +100,9 @@ spec:
             claimName: logfilter-models-pvc
         - name: hf-cache
           emptyDir: {}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
 ---
 apiVersion: v1
 kind: Service

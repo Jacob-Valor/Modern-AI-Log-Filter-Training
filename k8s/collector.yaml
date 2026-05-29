@@ -32,6 +32,14 @@ spec:
         - name: collector
           image: logfilter-collector:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: syslog-udp
               containerPort: 5140
@@ -100,10 +108,15 @@ spec:
             - name: config
               mountPath: /app/config
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: config
           configMap:
             name: logfilter-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
 ---
 apiVersion: v1
 kind: Service

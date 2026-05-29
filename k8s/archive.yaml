@@ -27,6 +27,14 @@ spec:
         - name: archive
           image: logfilter-archive:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: ES_PASSWORD
               valueFrom:
@@ -93,7 +101,12 @@ spec:
             - name: config
               mountPath: /app/config
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: config
           configMap:
             name: logfilter-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
