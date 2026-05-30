@@ -30,7 +30,7 @@ def test_es_index_and_search(es_client, es_host: str):
     assert search["hits"]["hits"][0]["_source"]["host"] == "test-host"
 
     # Cleanup
-    es_client.indices.delete(index=index, ignore=[404])
+    es_client.options(ignore_status=404).indices.delete(index=index)
 
 
 @pytest.mark.integration
@@ -65,4 +65,4 @@ def test_log_archive_integration(es_client, es_host: str):
 
     # Cleanup
     for idx in es_client.indices.get(index=f"{archive.index_prefix}-*").keys():
-        es_client.indices.delete(index=idx, ignore=[404])
+        es_client.options(ignore_status=404).indices.delete(index=idx)

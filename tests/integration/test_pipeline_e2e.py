@@ -34,7 +34,7 @@ def test_e2e_archive_to_es(
 
     # Cleanup
     for idx in es_client.indices.get(index=f"{archive.index_prefix}-*").keys():
-        es_client.indices.delete(index=idx, ignore=[404])
+        es_client.options(ignore_status=404).indices.delete(index=idx)
 
 
 @pytest.mark.integration
@@ -102,4 +102,4 @@ def test_e2e_full_pipeline(
 
     # Cleanup
     for idx in es_client.indices.get(index=f"{archive.index_prefix}-*").keys():
-        es_client.indices.delete(index=idx, ignore=[404])
+        es_client.options(ignore_status=404).indices.delete(index=idx)
