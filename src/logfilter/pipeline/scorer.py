@@ -292,16 +292,22 @@ class LogScorer:
         biencoder_cfg = models_cfg.get("biencoder", {})
         cross_encoder_cfg = models_cfg.get("cross_encoder", {})
 
+        ner_cache = ner_cfg.get("cache_dir", "")
+        ner_revision = ner_cfg.get("revision", "")
         self.ner_model = ner_model or (
             NERModel(
                 model_id=ner_cfg.get("model_id", NERModel.MODEL_ID),
                 device=ner_cfg.get("device", "cpu"),
                 batch_size=int(ner_cfg.get("batch_size", 32)),
                 min_confidence=float(ner_cfg.get("min_confidence", 0.80)),
+                cache_dir=ner_cache if ner_cache else None,
+                revision=ner_revision if ner_revision else None,
             )
             if _enabled(ner_cfg.get("enabled", True))
             else DisabledNERModel()
         )
+        bi_cache = biencoder_cfg.get("cache_dir", "")
+        bi_revision = biencoder_cfg.get("revision", "")
         self.biencoder = biencoder or (
             BiEncoderModel(
                 model_id=biencoder_cfg.get("model_id", BiEncoderModel.MODEL_ID),
@@ -313,15 +319,21 @@ class LogScorer:
                 mitre_techniques_path=_resolve_path(
                     models_cfg.get("mitre_techniques_path", "config/mitre_techniques.json")
                 ),
+                cache_dir=bi_cache if bi_cache else None,
+                revision=bi_revision if bi_revision else None,
             )
             if _enabled(biencoder_cfg.get("enabled", True))
             else DisabledBiEncoderModel()
         )
+        ce_cache = cross_encoder_cfg.get("cache_dir", "")
+        ce_revision = cross_encoder_cfg.get("revision", "")
         self.cross_encoder = cross_encoder or (
             CrossEncoderModel(
                 model_id=cross_encoder_cfg.get("model_id", CrossEncoderModel.MODEL_ID),
                 device=cross_encoder_cfg.get("device", "cpu"),
                 batch_size=int(cross_encoder_cfg.get("batch_size", 16)),
+                cache_dir=ce_cache if ce_cache else None,
+                revision=ce_revision if ce_revision else None,
             )
             if _enabled(cross_encoder_cfg.get("enabled", True))
             else DisabledCrossEncoderModel()

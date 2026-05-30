@@ -33,6 +33,11 @@ elasticsearch:
   index_shards: 1
   index_replicas: 0
 
+# ── HuggingFace cache ────────────────────────────────────────────────────────
+# Shared cache directory for downloaded transformer models.
+# Set HF_HOME env var to override (e.g. /app/models/hf-cache for K8s PVC).
+cache_dir: "${HF_HOME:}"
+
 # ── Models ───────────────────────────────────────────────────────────────────
 models:
   # ONNX classifier trained on HDFS TraceBench
@@ -40,12 +45,16 @@ models:
     path: "${LOGFILTER_CLASSIFIER_PATH:models/log_classifier.onnx}"
 
   # SecureBERT 2.0 family (downloaded from Hugging Face)
+  # cache_dir: shared local cache for offline/air-gapped deployments
+  # revision: exact git commit hash / tag to pin (empty = default/main)
   ner:
     enabled: "${LOGFILTER_NER_ENABLED:true}"
     model_id: "cisco-ai/SecureBERT2.0-NER"
     device: "cpu"          # or "cuda"
     batch_size: 32
     min_confidence: 0.80
+    cache_dir: "${HF_HOME:}"  # empty defaults to ~/.cache/huggingface
+    revision: "${LOGFILTER_NER_REVISION:}"
 
   biencoder:
     enabled: "${LOGFILTER_BIENCODER_ENABLED:true}"
@@ -55,12 +64,16 @@ models:
     dedup_threshold: 0.95  # cosine sim above this = duplicate
     dedup_window_minutes: 5
     faiss_top_k: 3         # ATT&CK candidate retrieval
+    cache_dir: "${HF_HOME:}"
+    revision: "${LOGFILTER_BIENCODER_REVISION:}"
 
   cross_encoder:
     enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"
     model_id: "cisco-ai/SecureBERT2.0-cross_encoder"
     device: "cpu"
     batch_size: 16
+    cache_dir: "${HF_HOME:}"
+    revision: "${LOGFILTER_CROSS_ENCODER_REVISION:}"
 
   mitre_techniques_path: "config/mitre_techniques.json"
 
