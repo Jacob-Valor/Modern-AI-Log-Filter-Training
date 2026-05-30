@@ -40,6 +40,26 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - -f
+                - python
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pgrep
+                - -f
+                - python
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
           env:
             - name: LOGFILTER_API_TOKEN
               valueFrom:

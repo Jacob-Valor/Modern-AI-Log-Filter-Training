@@ -47,6 +47,20 @@ spec:
             - name: syslog-tcp
               containerPort: 5140
               protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: syslog-tcp
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: syslog-tcp
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "logfilter-kafka:9092"
