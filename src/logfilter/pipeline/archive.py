@@ -38,11 +38,11 @@ class LogArchive:
         hosts: list[str] | None = None,
         index_prefix: str = "raw-logs",
         username: str = "elastic",
-        password: str = "",
+        password: str | None = None,
         shards: int = 1,
         replicas: int = 0,
     ) -> None:
-        if not password:
+        if password == "":
             raise ValueError(
                 "LogArchive: Elasticsearch password is required. "
                 "Set ES_PASSWORD env var or config.elasticsearch.password "
@@ -51,12 +51,14 @@ class LogArchive:
         self.index_prefix = index_prefix
         self.shards = shards
         self.replicas = replicas
-        self._es = Elasticsearch(
-            hosts=hosts or ["http://localhost:9200"],
-            basic_auth=(username, password),
-            retry_on_timeout=True,
-            max_retries=3,
-        )
+        client_kwargs: dict[str, Any] = {
+            "hosts": hosts or ["http://localhost:9200"],
+            "retry_on_timeout": True,
+            "max_retries": 3,
+        }
+        if password:
+            client_kwargs["basic_auth"] = (username, password)
+        self._es = Elasticsearch(**client_kwargs)
         self._ensure_index_template()
 
     @property
