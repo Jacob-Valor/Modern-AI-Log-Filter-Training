@@ -1,0 +1,91 @@
+groups:
+  - name: logfilter
+    interval: 30s
+    rules:
+      # ── Availability / Health ───────────────────────────────────────────
+      - alert: LogfilterAPIDown
+        expr: up{job="logfilter-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LogFilter API is down"
+          description: "The API has been unreachable for more than 1 minute."
+
+      - alert: LogfilterModelNotLoaded
+        expr: logfilter_model_loaded == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI model {{ $labels.model }} not loaded"
+          description: "Model {{ $labels.model }} has not been loaded for 2+ minutes."
+
+      # ── Latency SLO ─────────────────────────────────────────────────────────
+      - alert: LogfilterHighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            rate(logfilter_scoring_latency_ms_bucket[5m])
+          ) > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scoring p99 latency > 500 ms"
+          description: "p99 scoring latency is {{ $value }} ms over the last 5 minutes."
+
+      - alert: LogfilterHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            rate(logfilter_scoring_latency_ms_bucket[5m])
+          ) > 200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scoring p95 latency > 200 ms"
+          description: "p95 scoring latency is {{ $value }} ms over the last 5 minutes."
+
+      # ── Throughput / Errors ────────────────────────────────────────────────
+      - alert: LogfilterNoEventsScored
+        expr: |
+          rate(logfilter_events_total[5m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No events scored in the last 10 minutes"
+          description: "The scoring pipeline has not processed any events."
+
+      # ── Anomaly / Security ─────────────────────────────────────────────────
+      - alert: LogfilterHighThreatVolume
+        expr: |
+          rate(logfilter_events_total{priority="HIGH"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High volume of HIGH-priority events"
+          description: "{{ $value }} HIGH-priority events/sec detected."
+
+      - alert: LogfilterHighDuplicateRate
+        expr: |
+          rate(logfilter_events_duplicate_total[5m]) /
+          rate(logfilter_events_total[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Duplicate event rate > 50%"
+          description: "Over half of events are duplicates; check dedup window or upstream replay."
+
+      - alert: LogfilterHighSigmaMatchRate
+        expr: |
+          rate(logfilter_events_sigma_total[5m]) /
+          rate(logfilter_events_total[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Sigma match rate > 80%"
+          description: "{{ $value }} of events match Sigma rules; verify rule calibration."
