@@ -28,6 +28,38 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      initContainers:
+        - name: model-download
+          image: logfilter-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /app/scripts/download_hf_models.py
+            - --config
+            - /app/config/config.yaml
+            - --cache-dir
+            - /app/models/hf-cache
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: HF_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: hf-cache
+              mountPath: /app/models/hf-cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
       containers:
         - name: api
           image: logfilter-api:latest
@@ -73,6 +105,8 @@ spec:
               value: "0"
             - name: LOGFILTER_MODEL_VERSION
               value: ""
+            - name: HF_HOME
+              value: "/app/models/hf-cache"
           resources:
             requests:
               memory: "2Gi"
@@ -88,7 +122,7 @@ spec:
               mountPath: /app/models
               readOnly: true
             - name: hf-cache
-              mountPath: /home/logfilter/.cache
+              mountPath: /app/models/hf-cache
             - name: tmp
               mountPath: /tmp
       volumes:

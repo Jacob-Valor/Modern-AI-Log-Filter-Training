@@ -19,15 +19,30 @@ RUN pip install --no-cache-dir -r requirements-api.txt
 COPY src/ ./src/
 COPY config/ ./config/
 COPY pyproject.toml .
+COPY scripts/download_hf_models.py ./scripts/
 
 # Install the logfilter package
 RUN pip install --no-cache-dir -e . --no-deps
+
+# Pre-download HuggingFace models so the image is self-contained.
+# Set empty revisions to download the default branch; override with build args
+# to pin exact commits for reproducible builds.
+ARG HF_TOKEN=""
+ARG HF_CACHE_DIR="/app/models/hf-cache"
+RUN mkdir -p "${HF_CACHE_DIR}" \
+    && HF_HOME="${HF_CACHE_DIR}" python scripts/download_hf_models.py \
+        --config config/config.yaml \
+        --cache-dir "${HF_CACHE_DIR}" \
+        $( [ -n "${HF_TOKEN}" ] && echo "--token ${HF_TOKEN}" ) \
+    || echo "WARNING: Model download failed; will fallback to runtime fetch"
 
 # Non-root user
 RUN useradd -m -u 1000 logfilter \
     && mkdir -p /home/logfilter/.cache/huggingface \
     && chown -R logfilter:logfilter /app /home/logfilter/.cache
 USER logfilter
+
+ENV HF_HOME=/app/models/hf-cache
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
