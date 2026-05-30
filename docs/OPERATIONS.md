@@ -44,5 +44,52 @@ real local tokens.
 - Set service CPU and memory limits based on measured ingest rate, model size,
   and queue depth. The API has a conservative Compose limit; workers still need
   production sizing from load tests.
-- Pre-download or package Hugging Face model artifacts for offline and
-  repeatable production starts.
+## HuggingFace model packaging
+
+The scoring service downloads SecureBERT2.0 weights from HuggingFace Hub at
+first use. For air-gapped, reproducible, or faster cold starts, pre-download
+the models and pin exact revisions.
+
+### Pin revisions in config
+
+Set per-model revision hashes in `config/config.yaml` or via environment:
+
+```bash
+LOGFILTER_NER_REVISION=abc123def456
+LOGFILTER_BIENCODER_REVISION=abc123def456
+LOGFILTER_CROSS_ENCODER_REVISION=abc123def456
+```
+
+Leave empty to use the default branch head.
+
+### Docker image (baked models)
+
+The API Dockerfile runs `scripts/download_hf_models.py` during the build.
+Models are cached in `/app/models/hf-cache` and the image is self-contained.
+Override the target directory with the `HF_CACHE_DIR` build arg:
+
+```bash
+docker build -f docker/api/Dockerfile \
+  --build-arg HF_CACHE_DIR=/app/models/hf-cache \
+  --build-arg HF_TOKEN=$HF_TOKEN \
+  -t logfilter-api:latest .
+```
+
+### Kubernetes initContainer (runtime fetch)
+
+If you do not bake models into the image, the `api.yaml` Deployment includes an
+`initContainer` that downloads models to a shared `emptyDir` volume before the
+main container starts. Set `HF_TOKEN` in `k8s/secret.yaml` if any model is
+gated or private.
+
+### Manual pre-download
+
+```bash
+python scripts/download_hf_models.py \
+  --config config/config.yaml \
+  --cache-dir /mnt/hf-cache \
+  --model all
+```
+
+The script reads model IDs and revisions from config, so a single command
+synchronises the cache with the running configuration.
