@@ -1,0 +1,32 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: logfilter-api
+  namespace: logfilter
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logfilter-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: logfilter-collector
+  namespace: logfilter
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logfilter-collector
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: logfilter-router
+  namespace: logfilter
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logfilter-router

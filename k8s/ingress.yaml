@@ -1,0 +1,59 @@
+# Production Ingress for the LogFilter API.
+#
+# Requirements:
+#   1. Replace `api.yourdomain.com` with your real hostname.
+#   2. Ensure you have a TLS secret (e.g. from cert-manager) named
+#      `logfilter-api-tls` in the logfilter namespace.
+#   3. Verify your ingress controller (NGINX, Traefik, etc.) is running.
+#   4. The API Service type is ClusterIP — the Ingress is the only
+#      external entrypoint.
+#
+# Example cert-manager Certificate:
+#   apiVersion: cert-manager.io/v1
+#   kind: Certificate
+#   metadata:
+#     name: logfilter-api
+#     namespace: logfilter
+#   spec:
+#     secretName: logfilter-api-tls
+#     issuerRef:
+#       name: letsencrypt-prod
+#       kind: ClusterIssuer
+#     dnsNames:
+#       - api.yourdomain.com
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: logfilter-api
+  namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter-api
+    app.kubernetes.io/component: ingress
+  annotations:
+    # Adjust annotations to match your ingress controller.
+    # Examples below are for NGINX; remove or adapt for Traefik/HAProxy/etc.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # cert-manager: uncomment if you use cert-manager
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.yourdomain.com
+      secretName: logfilter-api-tls
+  rules:
+    - host: api.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: logfilter-api
+                port:
+                  number: 8080
