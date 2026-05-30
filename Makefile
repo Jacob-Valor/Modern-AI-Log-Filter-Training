@@ -72,6 +72,14 @@ test:
 test-coverage:
 	$(PYTHON) -m pytest tests/ --cov=src/logfilter --cov-report=term-missing --cov-report=xml --cov-report=html
 
+integration-test:
+	@echo "Starting integration test stack …"
+	$(COMPOSE) -f docker-compose.test.yml up -d --wait
+	@echo "Running integration tests …"
+	$(PYTHON) -m pytest tests/integration/ -v -m integration --tb=short
+	@echo "Tearing down integration stack …"
+	$(COMPOSE) -f docker-compose.test.yml down -v
+
 smoke-pipeline:
 	$(PYTHON) scripts/smoke_test_pipeline.py
 
