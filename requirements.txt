@@ -22,7 +22,7 @@ pydantic-settings>=2.2.0
 kafka-python>=2.0.2
 
 # Elasticsearch
-elasticsearch>=8.13.0
+elasticsearch>=8.13.0,<9
 
 # Monitoring
 prometheus-client>=0.20.0

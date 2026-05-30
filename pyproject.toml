@@ -25,7 +25,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.2.0",
     "kafka-python>=2.0.2",
-    "elasticsearch>=8.13.0",
+    "elasticsearch>=8.13.0,<9",
     "prometheus-client>=0.20.0",
     "sigma-cli>=1.0.0",
     "pysigma>=0.11.0",
@@ -74,6 +74,9 @@ select = ["E", "F", "I", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "integration: tests that require Docker Compose infrastructure (Kafka, ES)",
+]
 
 [tool.coverage.run]
 branch = true
