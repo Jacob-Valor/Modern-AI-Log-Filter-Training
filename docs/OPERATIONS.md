@@ -93,3 +93,50 @@ python scripts/download_hf_models.py \
 
 The script reads model IDs and revisions from config, so a single command
 synchronises the cache with the running configuration.
+
+## Monitoring runbook
+
+Prometheus rules and a Grafana dashboard ship with the repository.
+
+### Alerts
+
+| Alert | Severity | Meaning | Action |
+|---|---|---|---|
+| `LogfilterAPIDown` | critical | API unreachable | Check pod status, ingress, and API logs |
+| `LogfilterModelNotLoaded` | warning | ONNX/scaler missing | Verify `models/` PVC mount and artifact presence |
+| `LogfilterHighLatencyP99` | warning | p99 > 500 ms | Scale replicas or reduce batch size; check CPU throttling |
+| `LogfilterHighLatencyP95` | warning | p95 > 200 ms | Same as above; lower threshold for early warning |
+| `LogfilterNoEventsScored` | warning | Zero throughput | Verify collector is sending, Kafka topics exist, consumer lag |
+| `LogfilterHighDuplicateRate` | warning | >50% duplicates | Check dedup window or upstream log replay |
+| `LogfilterHighSigmaMatchRate` | info | >80% Sigma matches | Review rule calibration; may indicate noisy rules |
+| `LogfilterHighThreatVolume` | info | >10 HIGH/sec | Escalate to SOC if sustained |
+
+### Dashboard
+
+Open Grafana at `http://localhost:3000` (Docker) or your cluster ingress.
+The "LogFilter — AI Scoring Pipeline" dashboard auto-provisions on startup.
+
+Panels:
+- **API Up** — binary health indicator
+- **Scoring p99 Latency** — tail latency from `logfilter_scoring_latency_ms`
+- **Duplicate Rate** — ratio of deduplicated events
+- **Models Loaded** — green when all ONNX artifacts are ready
+- **Events Scored / sec** — throughput by priority
+- **Scoring Latency** — p50/p95/p99 timeseries
+- **Duplicate & Sigma Match Rate** — anomaly indicators
+- **Threat Score Distribution** — p99 threat score trend
+
+### Customising thresholds
+
+Edit `config/prometheus/alerts.yml` and redeploy:
+
+```bash
+# Docker Compose
+docker compose restart prometheus
+
+# Kubernetes
+kubectl create configmap logfilter-alerts \
+  --from-file=config/prometheus/alerts.yml -n logfilter --dry-run=client -o yaml | kubectl apply -f -
+# Then reload Prometheus (if your cluster exposes the reload endpoint)
+curl -X POST http://prometheus:9090/-/reload
+```
