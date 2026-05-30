@@ -9,7 +9,6 @@ import pytest
 def test_e2e_archive_to_es(
     es_client,
     es_host: str,
-    es_password: str,
 ):
     """Write to LogArchive and verify the document is searchable in ES."""
     from logfilter.pipeline.archive import LogArchive
@@ -17,8 +16,6 @@ def test_e2e_archive_to_es(
     archive = LogArchive(
         hosts=[es_host],
         index_prefix="test-e2e-archive",
-        username="elastic",
-        password=es_password,
     )
 
     doc_id = archive.write(
@@ -47,7 +44,6 @@ def test_e2e_full_pipeline(
     kafka_bootstrap: str,
     es_client,
     es_host: str,
-    es_password: str,
 ):
     """End-to-end: produce → archive → API score → router decision."""
     import os
@@ -56,8 +52,6 @@ def test_e2e_full_pipeline(
 
     os.environ["KAFKA_BOOTSTRAP_SERVERS"] = kafka_bootstrap
     os.environ["ES_HOST"] = es_host
-    os.environ["ES_USER"] = "elastic"
-    os.environ["ES_PASSWORD"] = es_password
     os.environ["LOGFILTER_ADMIN_TOKEN"] = "test-admin-token"
     os.environ["LOGFILTER_API_TOKEN"] = "test-api-token"
     os.environ["LOGFILTER_METRICS_TOKEN"] = "test-metrics-token"
@@ -75,8 +69,6 @@ def test_e2e_full_pipeline(
     archive = LogArchive(
         hosts=[es_host],
         index_prefix="test-e2e-pipeline",
-        username="elastic",
-        password=es_password,
     )
 
     doc_id = archive.write(

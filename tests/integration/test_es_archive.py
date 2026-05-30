@@ -9,7 +9,7 @@ import pytest
 
 
 @pytest.mark.integration
-def test_es_index_and_search(es_client, es_host: str, es_password: str):
+def test_es_index_and_search(es_client, es_host: str):
     """Index a document and retrieve it via search."""
     index = f"test-logs-{uuid.uuid4().hex[:8]}".lower()
     doc = {
@@ -34,15 +34,13 @@ def test_es_index_and_search(es_client, es_host: str, es_password: str):
 
 
 @pytest.mark.integration
-def test_log_archive_integration(es_client, es_host: str, es_password: str):
+def test_log_archive_integration(es_client, es_host: str):
     """Smoke-test LogArchive against the real Elasticsearch instance."""
     from logfilter.pipeline.archive import LogArchive
 
     archive = LogArchive(
         hosts=[es_host],
         index_prefix="test-raw",
-        username="elastic",
-        password=es_password,
     )
 
     # Write and retrieve (index template is created automatically on first write)

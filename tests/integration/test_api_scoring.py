@@ -7,15 +7,13 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def api_client(kafka_bootstrap: str, es_host: str, es_password: str):
+def api_client(kafka_bootstrap: str, es_host: str):
     """Build a TestClient against the real API with test-service env."""
     import os
 
     # Point the API at our integration test services
     os.environ["KAFKA_BOOTSTRAP_SERVERS"] = kafka_bootstrap
     os.environ["ES_HOST"] = es_host
-    os.environ["ES_USER"] = "elastic"
-    os.environ["ES_PASSWORD"] = es_password
     os.environ["LOGFILTER_ADMIN_TOKEN"] = "test-admin-token"
     os.environ["LOGFILTER_API_TOKEN"] = "test-api-token"
     os.environ["LOGFILTER_METRICS_TOKEN"] = "test-metrics-token"
