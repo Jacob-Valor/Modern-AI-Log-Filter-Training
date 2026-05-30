@@ -72,6 +72,8 @@ class BiEncoderModel:
         dedup_window_minutes: float = 5.0,
         faiss_top_k: int = 3,
         mitre_techniques_path: str | Path = "config/mitre_techniques.json",
+        cache_dir: str | Path | None = None,
+        revision: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
@@ -80,6 +82,8 @@ class BiEncoderModel:
         self.dedup_window_seconds = dedup_window_minutes * 60
         self.faiss_top_k = faiss_top_k
         self.mitre_techniques_path = Path(mitre_techniques_path)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.revision = revision
 
         self._model: Any | None = None
         self._faiss_dedup: Any | None = None  # rolling dedup index
@@ -95,7 +99,12 @@ class BiEncoderModel:
         from sentence_transformers import SentenceTransformer
 
         logger.info("Loading BiEncoder model", model_id=self.model_id)
-        self._model = SentenceTransformer(self.model_id, device=self.device)
+        st_kwargs: dict[str, Any] = {"device": self.device}
+        if self.cache_dir is not None:
+            st_kwargs["cache_folder"] = str(self.cache_dir)
+        if self.revision is not None:
+            st_kwargs["revision"] = self.revision
+        self._model = SentenceTransformer(self.model_id, **st_kwargs)
         self._dim = self._model.get_sentence_embedding_dimension()
 
         # FAISS index for deduplication (flat L2 — will normalise → cosine)

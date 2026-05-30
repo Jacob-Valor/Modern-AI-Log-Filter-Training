@@ -19,6 +19,7 @@ Supported entity labels:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -79,11 +80,15 @@ class NERModel:
         device: str = "cpu",
         batch_size: int = 32,
         min_confidence: float = 0.80,
+        cache_dir: str | Path | None = None,
+        revision: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
         self.batch_size = batch_size
         self.min_confidence = min_confidence
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.revision = revision
         self._pipeline: Any | None = None
 
     def _load(self) -> None:
@@ -91,12 +96,16 @@ class NERModel:
         from transformers import pipeline
 
         logger.info("Loading NER model", model_id=self.model_id, device=self.device)
-        self._pipeline = pipeline(
-            "token-classification",
-            model=self.model_id,
-            aggregation_strategy="simple",
-            device=0 if self.device == "cuda" else -1,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self.model_id,
+            "aggregation_strategy": "simple",
+            "device": 0 if self.device == "cuda" else -1,
+        }
+        if self.cache_dir is not None:
+            kwargs["cache_dir"] = str(self.cache_dir)
+        if self.revision is not None:
+            kwargs["revision"] = self.revision
+        self._pipeline = pipeline("token-classification", **kwargs)
         logger.info("NER model loaded")
 
     def extract(self, text: str) -> ExtractedEntities:

@@ -13,6 +13,7 @@ Max sequence length: 1024 tokens
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -43,21 +44,29 @@ class CrossEncoderModel:
         model_id: str = MODEL_ID,
         device: str = "cpu",
         batch_size: int = 16,
+        cache_dir: str | Path | None = None,
+        revision: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
         self.batch_size = batch_size
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.revision = revision
         self._model: Any | None = None
 
     def _load(self) -> None:
         from sentence_transformers import CrossEncoder
 
         logger.info("Loading CrossEncoder model", model_id=self.model_id)
-        self._model = CrossEncoder(
-            self.model_id,
-            device=self.device,
-            max_length=1024,
-        )
+        ce_kwargs: dict[str, Any] = {
+            "device": self.device,
+            "max_length": 1024,
+        }
+        if self.cache_dir is not None:
+            ce_kwargs["cache_folder"] = str(self.cache_dir)
+        if self.revision is not None:
+            ce_kwargs["revision"] = self.revision
+        self._model = CrossEncoder(self.model_id, **ce_kwargs)
         logger.info("CrossEncoder model loaded")
 
     def score(
