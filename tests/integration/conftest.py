@@ -46,20 +46,15 @@ def _wait_for_kafka(bootstrap: str, timeout: float = 60.0) -> None:
     raise RuntimeError(f"Kafka not ready after {timeout}s: {last_err}")
 
 
-def _wait_for_es(host: str, password: str, timeout: float = 60.0) -> None:
+def _wait_for_es(host: str, timeout: float = 60.0) -> None:
     """Poll Elasticsearch until cluster health is green/yellow."""
-    import base64
     import urllib.request
 
-    creds = base64.b64encode(f"elastic:{password}".encode()).decode()
     deadline = time.time() + timeout
     last_err = None
     while time.time() < deadline:
         try:
-            req = urllib.request.Request(
-                f"{host}/_cluster/health",
-                headers={"Authorization": f"Basic {creds}"},
-            )
+            req = urllib.request.Request(f"{host}/_cluster/health")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read())
                 if body["status"] in ("green", "yellow"):
@@ -93,17 +88,12 @@ def es_host() -> str:
 
 
 @pytest.fixture(scope="session")
-def es_password() -> str:
-    return "test-password"
+def es_client(es_host: str):
+    """Yield a connected Elasticsearch client."""
+    _wait_for_es(es_host)
+    from elasticsearch import Elasticsearch
 
-
-@pytest.fixture(scope="session")
-def kafka_admin(kafka_bootstrap: str):
-    """Yield a connected KafkaAdminClient."""
-    _wait_for_kafka(kafka_bootstrap)
-    from kafka import KafkaAdminClient
-
-    client = KafkaAdminClient(bootstrap_servers=kafka_bootstrap)
+    client = Elasticsearch([es_host])
     yield client
     client.close()
 
@@ -136,15 +126,11 @@ def kafka_consumer(kafka_bootstrap: str):
 
 
 @pytest.fixture(scope="session")
-def es_client(es_host: str, es_password: str):
-    """Yield a connected Elasticsearch client."""
-    _wait_for_es(es_host, es_password)
-    from elasticsearch import Elasticsearch
+def kafka_admin(kafka_bootstrap: str):
+    """Yield a connected KafkaAdminClient."""
+    _wait_for_kafka(kafka_bootstrap)
+    from kafka import KafkaAdminClient
 
-    client = Elasticsearch(
-        [es_host],
-        basic_auth=("elastic", es_password),
-        verify_certs=False,
-    )
+    client = KafkaAdminClient(bootstrap_servers=kafka_bootstrap)
     yield client
     client.close()
