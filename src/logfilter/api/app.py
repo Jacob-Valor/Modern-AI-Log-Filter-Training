@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -36,14 +37,21 @@ from logfilter.api.schemas import (
     ATTACKMatch,
     BatchScoreRequest,
     BatchScoreResponse,
+    DriftHealthResponse,
     EntitySummary,
     HealthResponse,
     MetricsSnapshot,
     ScoreRequest,
     ScoreResponse,
 )
-from logfilter.api.security import AccessDenied, enforce_rate_limit, require_configured_token
+from logfilter.api.security import (
+    AccessDenied,
+    RedisRateLimiter,
+    enforce_rate_limit,
+    require_configured_token,
+)
 from logfilter.config import load_config
+from logfilter.monitoring.drift_detector import DriftStatus
 from logfilter.pipeline.enricher import LEEFEnricher
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
 from logfilter.pipeline.scorer import LogScorer
@@ -74,6 +82,8 @@ _batch_size_histogram = Histogram(
     buckets=[1, 5, 10, 20, 50, 100, 200],
 )
 _model_loaded = Gauge("logfilter_model_loaded", "Whether model is loaded", ["model"])
+_drift_psi = Gauge("logfilter_drift_psi", "Population Stability Index for classifier scores")
+_drift_detected = Gauge("logfilter_drift_detected", "1 if model drift is currently detected")
 
 
 # ── Application state ──────────────────────────────────────────────────────────
@@ -84,6 +94,8 @@ class AppState:
         self.scorer: LogScorer | None = None
         self.enricher: LEEFEnricher | None = None
         self.start_time: float = time.monotonic()
+        self.redis_client: Any | None = None
+        self.rate_limiter: RedisRateLimiter | None = None
 
         # In-process counters (redundant with Prometheus but useful for /metrics/snapshot)
         self.events_scored: int = 0
@@ -96,10 +108,36 @@ class AppState:
 
 
 _state = AppState()
+_RELOAD_LOCK = threading.Lock()
 
 
 def _env_enabled(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_VALUES
+
+
+def _configure_rate_limiter() -> None:
+    redis_url = os.environ.get("REDIS_URL", "").strip()
+    if not redis_url:
+        _state.redis_client = None
+        _state.rate_limiter = None
+        return
+
+    try:
+        redis_module = importlib.import_module("redis")
+        redis_client = redis_module.Redis.from_url(redis_url, decode_responses=True)
+        redis_client.ping()
+    except (ModuleNotFoundError, OSError, Exception) as exc:
+        _state.redis_client = None
+        _state.rate_limiter = None
+        logger.warning(
+            "Redis rate limiter unavailable; falling back to in-memory",
+            error=str(exc),
+        )
+        return
+
+    _state.redis_client = redis_client
+    _state.rate_limiter = RedisRateLimiter(redis_client)
+    logger.info("Redis rate limiter enabled")
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -114,6 +152,8 @@ async def lifespan(app: FastAPI):
         _state.config = load_config(_CONFIG_PATH)
         if not _state.config:
             logger.warning("config.yaml not found or empty — using defaults")
+
+        _configure_rate_limiter()
 
         # Build scorer and enricher
         model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
@@ -253,6 +293,12 @@ def _update_metrics(scored_event) -> None:
         _state.events_high += 1
     _state.score_sum += scored_event.ai_threat_score
     _state.latency_sum += scored_event.scoring_latency_ms
+    scorer = _state.scorer
+    drift_detector = getattr(scorer, "drift_detector", None)
+    if drift_detector is not None:
+        status = drift_detector.check_drift()
+        _drift_psi.set(status.psi)
+        _drift_detected.set(1.0 if status.drift_detected else 0.0)
 
 
 async def _require_admin(x_admin_token: str | None = Header(default=None)) -> None:
@@ -297,6 +343,26 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 def _enforce_rate_limit(request: Request) -> None:
     limit = int(_state.config.get("api", {}).get("rate_limit_per_minute", 60))
     client_host = request.client.host if request.client else "unknown"
+    if _state.rate_limiter is not None:
+        try:
+            enforce_rate_limit(
+                _state.rate_limit_windows,
+                client_host,
+                limit,
+                backend=_state.rate_limiter,
+            )
+            return
+        except AccessDenied:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Redis rate limiter failed; falling back to in-memory",
+                client_id=client_host,
+                error=str(exc),
+            )
+            _state.redis_client = None
+            _state.rate_limiter = None
+
     try:
         enforce_rate_limit(_state.rate_limit_windows, client_host, limit)
     except AccessDenied as exc:
@@ -498,6 +564,11 @@ async def metrics(_: None = Depends(_require_metrics_access)) -> Response:
 async def metrics_snapshot(_: None = Depends(_require_admin)) -> MetricsSnapshot:
     """JSON snapshot of in-process metrics counters."""
     n = max(_state.events_scored, 1)
+    drift_status = DriftStatus()
+    scorer = _state.scorer
+    drift_detector = getattr(scorer, "drift_detector", None)
+    if drift_detector is not None:
+        drift_status = drift_detector.check_drift()
     return MetricsSnapshot(
         events_scored_total=_state.events_scored,
         events_high_priority_total=_state.events_high,
@@ -505,6 +576,28 @@ async def metrics_snapshot(_: None = Depends(_require_admin)) -> MetricsSnapshot
         events_sigma_matched_total=_state.events_sigma,
         avg_latency_ms=round(_state.latency_sum / n, 2),
         avg_threat_score=round(_state.score_sum / n, 4),
+        drift_detected=drift_status.drift_detected,
+        drift_psi=round(drift_status.psi, 4),
+        drift_fallback_active=drift_status.fallback_active,
+    )
+
+
+@app.get("/health/drift", response_model=DriftHealthResponse, tags=["Operations"])
+async def health_drift() -> DriftHealthResponse:
+    """Return the current model drift status for load-balancers and operators."""
+    scorer = _state.scorer
+    if scorer is None or scorer.drift_detector is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drift detector not configured",
+        )
+    drift = scorer.drift_detector.check_drift()
+    return DriftHealthResponse(
+        drift_detected=drift.drift_detected,
+        psi=round(drift.psi, 4),
+        reference_count=drift.reference_count,
+        current_count=drift.current_count,
+        fallback_active=drift.fallback_active,
     )
 
 
@@ -513,16 +606,29 @@ async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
     """
     Trigger a hot reload of the scoring pipeline.
     Useful after retraining the classifier without restarting the service.
+    The reload is atomic — concurrent score requests see either the old or
+    new scorer, never a partially initialised one.
     """
     if _state.scorer is None:
         raise HTTPException(status_code=503, detail="Scorer not initialised")
 
-    _state.config = load_config(_CONFIG_PATH)
-    if not _state.config:
-        logger.warning("config.yaml not found or empty — using defaults")
-    _state.scorer = LogScorer(config=_state.config)
-    logger.info("Models reloaded via /admin/reload")
-    return {"status": "reloaded"}
+    with _RELOAD_LOCK:
+        new_config = load_config(_CONFIG_PATH)
+        if not new_config:
+            logger.warning("config.yaml not found or empty — using defaults")
+
+        new_scorer = LogScorer(config=new_config)
+        new_enricher = LEEFEnricher(
+            vendor=new_config.get("qradar", {}).get("leef_vendor", "YourCo"),
+            product=new_config.get("qradar", {}).get("leef_product", "AIPreprocessor"),
+            version=new_config.get("qradar", {}).get("leef_version", "1.0"),
+        )
+
+        _state.config = new_config
+        _state.scorer = new_scorer
+        _state.enricher = new_enricher
+        logger.info("Models reloaded via /admin/reload")
+        return {"status": "reloaded"}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

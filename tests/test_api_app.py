@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
@@ -36,14 +37,19 @@ def reset_app_state(monkeypatch):
     original_scorer = api_app._state.scorer
     original_enricher = api_app._state.enricher
     original_windows = api_app._state.rate_limit_windows
+    original_redis_client = api_app._state.redis_client
+    original_rate_limiter = api_app._state.rate_limiter
 
     monkeypatch.delenv("LOGFILTER_ADMIN_TOKEN", raising=False)
     monkeypatch.delenv("LOGFILTER_API_TOKEN", raising=False)
     monkeypatch.delenv("LOGFILTER_METRICS_TOKEN", raising=False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
     api_app._state.config = {"api": {}}
     api_app._state.scorer = None
     api_app._state.enricher = None
     api_app._state.rate_limit_windows = {}
+    api_app._state.redis_client = None
+    api_app._state.rate_limiter = None
 
     yield
 
@@ -51,6 +57,8 @@ def reset_app_state(monkeypatch):
     api_app._state.scorer = original_scorer
     api_app._state.enricher = original_enricher
     api_app._state.rate_limit_windows = original_windows
+    api_app._state.redis_client = original_redis_client
+    api_app._state.rate_limiter = original_rate_limiter
 
 
 def test_source_hint_handles_valid_invalid_and_missing_values() -> None:
@@ -113,6 +121,32 @@ def test_scoring_access_rate_limit() -> None:
     assert limited.value.status_code == 429
 
 
+def test_configure_rate_limiter_enables_redis_backend(monkeypatch) -> None:
+    client = Mock()
+    client.ping.return_value = True
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    fake_module = Mock()
+    fake_module.Redis.from_url.return_value = client
+    monkeypatch.setattr(api_app.importlib, "import_module", Mock(return_value=fake_module))
+
+    api_app._configure_rate_limiter()
+
+    assert api_app._state.redis_client is client
+    assert api_app._state.rate_limiter is not None
+
+
+def test_configure_rate_limiter_falls_back_when_redis_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    fake_module = Mock()
+    fake_module.Redis.from_url.side_effect = ConnectionError("boom")
+    monkeypatch.setattr(api_app.importlib, "import_module", Mock(return_value=fake_module))
+
+    api_app._configure_rate_limiter()
+
+    assert api_app._state.redis_client is None
+    assert api_app._state.rate_limiter is None
+
+
 def test_health_reports_degraded_without_scorer() -> None:
     response = asyncio.run(api_app.health())
 
@@ -135,6 +169,54 @@ def test_health_reports_classifier_state_when_ready() -> None:
 
     assert response.status == "healthy"
     assert response.models_loaded["classifier"] is True
+
+
+def test_health_drift_returns_503_when_detector_not_configured() -> None:
+    api_app._state.scorer = None
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app.health_drift())
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Drift detector not configured"
+
+
+def test_health_drift_returns_503_when_scorer_has_no_detector() -> None:
+    class FakeScorer:
+        drift_detector = None
+
+    api_app._state.scorer = cast(Any, FakeScorer())
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app.health_drift())
+
+    assert exc_info.value.status_code == 503
+
+
+def test_health_drift_reports_status_when_configured() -> None:
+    class FakeStatus:
+        drift_detected = True
+        psi = 0.123456
+        reference_count = 1000
+        current_count = 250
+        fallback_active = True
+
+    class FakeDetector:
+        def check_drift(self) -> FakeStatus:
+            return FakeStatus()
+
+    class FakeScorer:
+        drift_detector = FakeDetector()
+
+    api_app._state.scorer = cast(Any, FakeScorer())
+
+    response = asyncio.run(api_app.health_drift())
+
+    assert response.drift_detected is True
+    assert response.psi == 0.1235
+    assert response.reference_count == 1000
+    assert response.current_count == 250
+    assert response.fallback_active is True
 
 
 def test_metrics_snapshot_uses_counters() -> None:
@@ -314,3 +396,148 @@ def test_lifespan_initializes_scorer_and_enricher(monkeypatch) -> None:
             assert cast(tuple[Any, dict[str, str]], api_app._state.enricher)[0] == "enricher"
 
     asyncio.run(run_lifespan())
+
+
+def test_env_enabled_with_default() -> None:
+    assert api_app._env_enabled("MISSING_VAR", default="0") is False
+    assert api_app._env_enabled("MISSING_VAR", default="1") is True
+
+
+def test_score_event_with_none_scorer() -> None:
+    api_app._state.scorer = None
+    api_app._state.enricher = cast(Any, FakeEnricher())
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app.score_event(ScoreRequest(raw="test")))
+    assert exc_info.value.status_code == 503
+
+
+def test_score_event_exception_handling() -> None:
+    class BrokenScorer:
+        class Classifier:
+            def is_ready(self) -> bool:
+                return True
+
+        classifier = Classifier()
+
+        def score(self, normalized):
+            raise ValueError("bad input")
+
+    api_app._state.scorer = cast(Any, BrokenScorer())
+    api_app._state.enricher = cast(Any, FakeEnricher())
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app.score_event(ScoreRequest(raw="test")))
+    assert exc_info.value.status_code == 400
+
+
+def test_score_batch_empty_events() -> None:
+    api_app._state.scorer = cast(Any, FakeScorer())
+    api_app._state.enricher = cast(Any, FakeEnricher())
+
+    class FakeEmptyBatch:
+        events = []
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app.score_batch(FakeEmptyBatch()))  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 400
+
+
+def test_score_batch_exception_handling() -> None:
+    class BrokenScorer:
+        class Classifier:
+            def is_ready(self) -> bool:
+                return True
+
+        classifier = Classifier()
+
+        def score_batch(self, normalized_events):
+            raise ValueError("bad batch")
+
+    api_app._state.scorer = cast(Any, BrokenScorer())
+    api_app._state.enricher = cast(Any, FakeEnricher())
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_app.score_batch(
+                BatchScoreRequest(events=[ScoreRequest(raw="test")])
+            )
+        )
+    assert exc_info.value.status_code == 400
+
+
+def test_health_with_tier2_classifier(monkeypatch) -> None:
+    class FakeTier2:
+        def is_ready(self) -> bool:
+            return True
+
+    class FakeScorerWithTier2:
+        class Classifier:
+            def is_ready(self) -> bool:
+                return True
+
+        classifier = Classifier()
+        tier2_classifier = FakeTier2()
+
+    api_app._state.scorer = cast(Any, FakeScorerWithTier2())
+    api_app._state.enricher = cast(Any, object())
+
+    response = asyncio.run(api_app.health())
+    assert response.models_loaded["tier2_classifier"] is True
+
+
+def test_reload_models_with_empty_config(monkeypatch) -> None:
+    api_app._state.scorer = cast(Any, FakeScorer())
+    monkeypatch.setattr(api_app, "load_config", lambda path: {})
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "new-scorer")
+
+    response = asyncio.run(api_app.reload_models())
+    assert response == {"status": "reloaded"}
+
+
+def test_metrics_snapshot_with_zero_events() -> None:
+    api_app._state.events_scored = 0
+    api_app._state.events_high = 0
+    api_app._state.events_duplicate = 0
+    api_app._state.events_sigma = 0
+    api_app._state.latency_sum = 0.0
+    api_app._state.score_sum = 0.0
+
+    snapshot = asyncio.run(api_app.metrics_snapshot())
+    assert snapshot.events_scored_total == 0
+    assert snapshot.avg_latency_ms == 0.0
+    assert snapshot.avg_threat_score == 0.0
+
+
+def test_lifespan_with_empty_config(monkeypatch) -> None:
+    monkeypatch.setattr(api_app, "load_config", lambda path: {})
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "scorer")
+    monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
+
+    async def run_lifespan() -> None:
+        async with api_app.lifespan(api_app.app):
+            assert api_app._state.config == {}
+
+    asyncio.run(run_lifespan())
+
+
+def test_require_metrics_access_with_env_token(monkeypatch) -> None:
+    monkeypatch.setenv("LOGFILTER_METRICS_TOKEN", "metrics-secret")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app._require_metrics_access(x_metrics_token="wrong"))
+    assert exc_info.value.status_code == 401
+
+    asyncio.run(api_app._require_metrics_access(x_metrics_token="metrics-secret"))
+
+
+def test_require_scoring_access_with_env_token(monkeypatch) -> None:
+    monkeypatch.setenv("LOGFILTER_API_TOKEN", "api-secret")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_app._require_scoring_access(_request(), x_api_token="wrong")
+        )
+    assert exc_info.value.status_code == 401
+
+    asyncio.run(api_app._require_scoring_access(_request(), x_api_token="api-secret"))

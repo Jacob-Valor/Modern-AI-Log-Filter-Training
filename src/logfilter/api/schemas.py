@@ -160,6 +160,14 @@ class HealthResponse(BaseModel):
     uptime_seconds: float
 
 
+class DriftHealthResponse(BaseModel):
+    drift_detected: bool
+    psi: float
+    reference_count: int
+    current_count: int
+    fallback_active: bool
+
+
 class MetricsSnapshot(BaseModel):
     """Lightweight in-process metrics snapshot (complements /metrics Prometheus endpoint)."""
 
@@ -169,3 +177,6 @@ class MetricsSnapshot(BaseModel):
     events_sigma_matched_total: int
     avg_latency_ms: float
     avg_threat_score: float
+    drift_detected: bool
+    drift_psi: float
+    drift_fallback_active: bool

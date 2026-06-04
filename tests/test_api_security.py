@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from collections import deque
+from unittest.mock import Mock
 
 import pytest
 
-from logfilter.api.security import AccessDenied, enforce_rate_limit, require_configured_token
+from logfilter.api.security import (
+    AccessDenied,
+    RedisRateLimiter,
+    enforce_rate_limit,
+    require_configured_token,
+)
 
 
 def test_token_check_fails_closed_when_token_not_configured() -> None:
@@ -67,3 +73,32 @@ def test_rate_limit_can_be_disabled() -> None:
     enforce_rate_limit(windows, "198.51.100.10", 0, now=100.0)
 
     assert windows == {}
+
+
+def test_redis_rate_limit_uses_atomic_lua_script() -> None:
+    client = Mock()
+    script = Mock(return_value=[1, 1])
+    client.register_script.return_value = script
+    limiter = RedisRateLimiter(client)
+
+    enforce_rate_limit({}, "198.51.100.10", 2, backend=limiter, now=123.456)
+
+    client.register_script.assert_called_once()
+    script.assert_called_once_with(
+        keys=[
+            "logfilter:rate-limit:198.51.100.10",
+            "logfilter:rate-limit:198.51.100.10:seq",
+        ],
+        args=[2, 60.0, 123.456],
+    )
+
+
+def test_redis_rate_limit_raises_when_window_is_full() -> None:
+    client = Mock()
+    client.register_script.return_value = Mock(return_value=[0, 2])
+    limiter = RedisRateLimiter(client)
+
+    with pytest.raises(AccessDenied) as exc_info:
+        enforce_rate_limit({}, "198.51.100.10", 2, backend=limiter)
+
+    assert exc_info.value.status_code == 429
