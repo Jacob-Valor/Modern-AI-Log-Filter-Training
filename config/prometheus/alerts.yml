@@ -21,7 +21,12 @@ groups:
           summary: "AI model {{ $labels.model }} not loaded"
           description: "Model {{ $labels.model }} has not been loaded for 2+ minutes."
 
-      # ── Latency SLO ─────────────────────────────────────────────────────────
+      # ── SLO Definitions ──────────────────────────────────────────────────────
+      # Latency SLO: 99% of requests complete within 500 ms.
+      # Error budget: 1% of requests may exceed 500 ms in any 30-day window.
+      # Burn-rate alert: fast burn (14.4x) → page within 2 hours of budget exhaustion.
+      # Burn-rate alert: slow burn (2x) → ticket within 3 days of budget exhaustion.
+
       - alert: LogfilterHighLatencyP99
         expr: |
           histogram_quantile(0.99,
@@ -30,9 +35,10 @@ groups:
         for: 5m
         labels:
           severity: warning
+          slo: "latency_p99_500ms"
         annotations:
-          summary: "Scoring p99 latency > 500 ms"
-          description: "p99 scoring latency is {{ $value }} ms over the last 5 minutes."
+          summary: "Scoring p99 latency > 500 ms (SLO breach)"
+          description: "p99 scoring latency is {{ $value }} ms over the last 5 minutes. SLO: 99% < 500ms."
 
       - alert: LogfilterHighLatencyP95
         expr: |
@@ -42,9 +48,41 @@ groups:
         for: 5m
         labels:
           severity: warning
+          slo: "latency_p95_200ms"
         annotations:
           summary: "Scoring p95 latency > 200 ms"
           description: "p95 scoring latency is {{ $value }} ms over the last 5 minutes."
+
+      # ── Error-budget / burn-rate alerts ────────────────────────────────────
+      - alert: LogfilterLatencyBudgetBurnFast
+        expr: |
+          (
+            sum(rate(logfilter_scoring_latency_ms_bucket{le="500"}[1h]))
+            /
+            sum(rate(logfilter_scoring_latency_ms_bucket[1h]))
+          ) < 0.99
+        for: 10m
+        labels:
+          severity: critical
+          slo: "latency_p99_500ms"
+        annotations:
+          summary: "Latency error budget burning fast (>14x)"
+          description: "Less than 99% of requests are under 500ms in the last hour."
+
+      - alert: LogfilterLatencyBudgetBurnSlow
+        expr: |
+          (
+            sum(rate(logfilter_scoring_latency_ms_bucket{le="500"}[6h]))
+            /
+            sum(rate(logfilter_scoring_latency_ms_bucket[6h]))
+          ) < 0.99
+        for: 30m
+        labels:
+          severity: warning
+          slo: "latency_p99_500ms"
+        annotations:
+          summary: "Latency error budget burning slow (>2x)"
+          description: "Less than 99% of requests are under 500ms over the last 6 hours."
 
       # ── Throughput / Errors ────────────────────────────────────────────────
       - alert: LogfilterNoEventsScored

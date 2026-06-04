@@ -44,7 +44,10 @@ logger = logging.getLogger("train_transformer")
 
 LABEL_MAP = {"0": "normal", "1": "failure"}
 DEFAULT_MODEL_ID = "cisco-ai/SecureBERT2.0-base"
-# Override option for experiments: answerdotai/ModernBERT-base
+# Pinned revision for reproducible training. The default is the latest verified
+# commit on the main branch at the time of this release (2025-10-30).
+# Override via --model-id or --revision CLI flags for experiments.
+DEFAULT_MODEL_REVISION = "b42d43a"
 
 
 @runtime_checkable
@@ -89,6 +92,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_MODEL_ID,
         help=f"HuggingFace model id (default {DEFAULT_MODEL_ID})",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=DEFAULT_MODEL_REVISION,
+        help=f"HuggingFace model revision (default {DEFAULT_MODEL_REVISION})",
     )
     parser.add_argument(
         "--sample-normal",
@@ -309,10 +318,13 @@ def main() -> None:
         X, y, random_state=args.seed
     )
 
-    logger.info("Loading tokenizer/model: %s", args.model_id)
-    tokenizer = require_train_tokenizer(auto_tokenizer.from_pretrained(args.model_id))
+    logger.info("Loading tokenizer/model: %s  revision=%s", args.model_id, args.revision)
+    tokenizer = require_train_tokenizer(
+        auto_tokenizer.from_pretrained(args.model_id, revision=args.revision)
+    )
     model = auto_model.from_pretrained(
         args.model_id,
+        revision=args.revision,
         num_labels=2,
         id2label={0: "normal", 1: "failure"},
         label2id={"normal": 0, "failure": 1},

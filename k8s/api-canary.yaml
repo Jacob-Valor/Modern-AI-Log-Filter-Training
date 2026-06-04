@@ -1,0 +1,222 @@
+# Canary Deployment for the LogFilter API
+#
+# This manifest creates a canary Deployment that receives a small percentage
+# of production traffic. Use it to validate new releases before full rollout.
+#
+# Requirements:
+#   1. An ingress controller that supports traffic splitting
+#      (NGINX with canary annotations, Traefik with WeightedRoundRobin, etc.)
+#   2. The main api.yaml Deployment must already be deployed.
+#
+# Usage:
+#   kubectl apply -f k8s/api-canary.yaml
+#   # Monitor error rates and latency on the canary pods
+#   # When confident, promote the canary image to the stable Deployment
+#   kubectl set image deployment/logfilter-api api=logfilter-api:v1.2.3 -n logfilter
+#   kubectl delete -f k8s/api-canary.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logfilter-api-canary
+  namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/version: "canary"
+    canary: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logfilter-api
+      canary: "true"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logfilter-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/version: "canary"
+        canary: "true"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: model-download
+          image: logfilter-api:canary
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /app/scripts/download_hf_models.py
+            - --config
+            - /app/config/config.yaml
+            - --cache-dir
+            - /app/models/hf-cache
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: HF_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: hf-cache
+              mountPath: /app/models/hf-cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: api
+          image: logfilter-api:canary
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          env:
+            - name: LOGFILTER_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: LOGFILTER_ADMIN_TOKEN
+            - name: LOGFILTER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: LOGFILTER_API_TOKEN
+            - name: LOGFILTER_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: LOGFILTER_METRICS_TOKEN
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: ES_PASSWORD
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "logfilter-kafka:9092"
+            - name: ES_HOST
+              value: "http://logfilter-elasticsearch:9200"
+            - name: LOGFILTER_ENABLE_DOCS
+              value: "0"
+            - name: LOGFILTER_MODEL_VERSION
+              value: "canary"
+            - name: HF_HOME
+              value: "/app/models/hf-cache"
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: models
+              mountPath: /app/models
+              readOnly: true
+            - name: hf-cache
+              mountPath: /app/models/hf-cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: logfilter-config
+        - name: models
+          persistentVolumeClaim:
+            claimName: logfilter-models-pvc
+        - name: hf-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logfilter-api-canary
+  namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter-api
+    app.kubernetes.io/component: api-canary
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logfilter-api
+    canary: "true"
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+# Example NGINX canary ingress annotations.
+# Uncomment and adapt the annotations block below after deploying this file.
+# The stable ingress in ingress.yaml remains unchanged.
+#
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: logfilter-api-canary
+#   namespace: logfilter
+#   annotations:
+#     nginx.ingress.kubernetes.io/canary: "true"
+#     nginx.ingress.kubernetes.io/canary-weight: "10"
+#     nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
+#     nginx.ingress.kubernetes.io/canary-by-header-value: "always"
+# spec:
+#   ingressClassName: nginx
+#   rules:
+#     - host: api.yourdomain.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: logfilter-api-canary
+#                 port:
+#                   number: 8080

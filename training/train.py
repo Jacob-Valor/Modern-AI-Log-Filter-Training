@@ -204,6 +204,26 @@ def main() -> None:
     metrics_path.write_text(json.dumps({"val": val_metrics, "test": test_metrics}, indent=2))
     logger.info("Metrics saved to %s", metrics_path)
 
+    try:
+        from logfilter.monitoring.model_registry import ModelRegistry
+
+        registry = ModelRegistry()
+        run = registry.register_run(
+            model_type="tier1",
+            artifact_dir=args.output_dir,
+            metrics={"val": val_metrics, "test": test_metrics},
+            hyperparameters={
+                "n_estimators": args.n_estimators,
+                "max_depth": args.max_depth,
+                "learning_rate": args.learning_rate,
+                "sample_normal": args.sample_normal,
+                "sample_failure": args.sample_failure,
+            },
+        )
+        logger.info("Registered run %s in model registry", run.run_id)
+    except Exception as exc:
+        logger.warning("Failed to register run in model registry: %s", exc)
+
     logger.info("Training complete.")
 
 

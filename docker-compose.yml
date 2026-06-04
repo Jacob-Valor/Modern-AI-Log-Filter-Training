@@ -136,6 +136,10 @@ services:
           --bootstrap-server kafka:29092 \
           --replication-factor 1 --partitions 4 \
           --topic archived-logs
+        kafka-topics --create --if-not-exists \
+          --bootstrap-server kafka:29092 \
+          --replication-factor 1 --partitions 4 \
+          --topic logfilter-dlq
         echo "Kafka topics created."
     restart: "no"
 
@@ -300,6 +304,21 @@ services:
       - "--rules.alert.resend-delay=1m"
     restart: unless-stopped
 
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    container_name: logfilter-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
   # ── Grafana ────────────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.4.0
@@ -337,3 +356,4 @@ volumes:
   prometheus-data:
   grafana-data:
   hf-cache:   # persist HuggingFace model downloads across container restarts
+  redis-data:

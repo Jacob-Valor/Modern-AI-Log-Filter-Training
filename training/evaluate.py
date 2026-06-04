@@ -129,6 +129,27 @@ def main() -> None:
         args.threshold_report.write_text(json.dumps(payload, indent=2))
         print(f"\nThreshold report saved to {args.threshold_report}")
 
+    try:
+        from logfilter.monitoring.model_registry import ModelRegistry
+
+        registry = ModelRegistry()
+        run = registry.find_run_by_artifact_dir(args.model_dir)
+        if run is not None:
+            registry.update_metrics(
+                run.run_id,
+                {
+                    "eval_threshold": round(float(args.threshold), 4),
+                    "eval_precision": round(float(precision_score(y_test, y_pred)), 4),
+                    "eval_recall": round(float(recall_score(y_test, y_pred)), 4),
+                    "eval_f1": round(float(f1_score(y_test, y_pred)), 4),
+                    "eval_roc_auc": round(float(roc_auc_score(y_test, y_prob)), 4),
+                    "eval_fn_rate": round(float(fn / max(fn + tp, 1)), 4),
+                },
+            )
+            print(f"\nUpdated metrics in registry for run {run.run_id}")
+    except Exception as exc:
+        logger.warning("Failed to update registry metrics: %s", exc)
+
 
 if __name__ == "__main__":
     main()

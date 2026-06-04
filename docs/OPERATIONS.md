@@ -31,6 +31,66 @@ python scripts/verify_tier2_artifact.py
 Run `make smoke-test` only after the API stack is running and `.env` contains
 real local tokens.
 
+## Rollback procedure
+
+If a deployment causes degraded service (high latency, model load failures,
+or incorrect scoring), roll back using the procedure below.
+
+### Docker Compose (single host)
+
+```bash
+# 1. Identify the last known good image tag
+export LAST_GOOD_TAG=$(docker images logfilter-api --format '{{.Tag}}' | head -n 2 | tail -n 1)
+
+# 2. Stop the failing service
+docker compose stop logfilter-api
+
+# 3. Revert to the last known good image
+docker compose up -d logfilter-api --no-deps --force-recreate
+
+# 4. Verify health
+curl -fsS http://localhost:8080/health
+```
+
+### Kubernetes (cluster)
+
+```bash
+# 1. Roll back the API deployment to the previous revision
+kubectl rollout undo deployment/logfilter-api -n logfilter
+
+# 2. Monitor rollout status
+kubectl rollout status deployment/logfilter-api -n logfilter
+
+# 3. Verify pods are healthy
+kubectl get pods -n logfilter -l app.kubernetes.io/name=logfilter-api
+
+# 4. Verify service health via ingress
+curl -fsS https://api.yourdomain.com/health
+```
+
+### Model artifact rollback
+
+If the issue is a bad model artifact (ONNX/scaler) rather than code:
+
+```bash
+# 1. Restore previous model PVC snapshot or re-run training
+make train
+
+# 2. Restart the API to pick up the restored artifacts
+kubectl rollout restart deployment/logfilter-api -n logfilter
+```
+
+### Emergency circuit breaker
+
+If the scorer is failing but you need to preserve log flow:
+
+```bash
+# Scale the router to zero to stop consuming from Kafka
+kubectl scale deployment/logfilter-router --replicas=0 -n logfilter
+
+# Events remain in Kafka raw-logs until the issue is resolved
+```
+
 ## Production boundaries
 
 - Terminate API TLS at a trusted ingress, load balancer, or service mesh.
@@ -125,6 +185,89 @@ Panels:
 - **Scoring Latency** — p50/p95/p99 timeseries
 - **Duplicate & Sigma Match Rate** — anomaly indicators
 - **Threat Score Distribution** — p99 threat score trend
+
+## Service Level Objectives
+
+The table below defines formal SLOs, SLIs, and error budgets for the LogFilter
+scoring pipeline.
+
+| SLO | SLI | Target | Error Budget | Measurement Window |
+|---|---|---|---|---|
+| Latency | p99 scoring latency | < 500 ms | 1% of requests may exceed | 30 days |
+| Latency | p95 scoring latency | < 200 ms | 5% of requests may exceed | 30 days |
+| Availability | API health endpoint success rate | > 99.9% | 0.1% downtime | 30 days |
+| Throughput | Events scored per second | > 1000 rps | < 10% degradation | 30 days |
+| Model Freshness | Time since last model reload | < 7 days | N/A | Continuous |
+
+### Alert severity and burn rate
+
+Prometheus burn-rate alerts fire when error budgets are consumed faster than
+expected:
+
+- **Fast burn (14.4x)**: page on-call within 2 hours of budget exhaustion.
+  Fires when < 99% of requests are under 500ms over a 1-hour window.
+- **Slow burn (2x)**: create ticket within 3 days of budget exhaustion.
+  Fires when < 99% of requests are under 500ms over a 6-hour window.
+
+### Dashboard panels for SLO tracking
+
+- **Scoring p99 Latency** — tracks against 500ms SLO line
+- **Error Budget Remaining** — visualises remaining budget for the current window
+- **API Availability** — binary up/down indicator with 99.9% target
+- **Burn Rate** — rate of budget consumption over 1h and 6h windows
+
+## Disaster recovery
+
+### Complete cluster loss
+
+If the entire K8s cluster or Docker host is lost:
+
+```bash
+# 1. Restore Elasticsearch data from snapshot
+# Ensure your ES cluster has snapshot repositories configured.
+# See: https://www.elastic.co/guide/en/elasticsearch/reference/current/snapshots.html
+
+# 2. Redeploy the stack from a clean checkout
+git clone <repo> /opt/logfilter
+cd /opt/logfilter
+make verify
+kubectl apply -f k8s/
+
+# 3. Re-download HuggingFace models
+kubectl exec deployment/logfilter-api -n logfilter -- \
+  python scripts/download_hf_models.py --config config/config.yaml
+
+# 4. Verify all pods are healthy
+kubectl get pods -n logfilter
+kubectl rollout status deployment/logfilter-api -n logfilter
+```
+
+### Kafka data loss
+
+If Kafka logs are lost (e.g. volume corruption):
+
+```bash
+# Events are already archived to Elasticsearch before scoring.
+# Rebuild the Kafka topic and the archive consumer will backfill
+# from the beginning of the retained ES index.
+# No event data is permanently lost.
+```
+
+### Model artifact corruption
+
+If ONNX/scaler artifacts are corrupted:
+
+```bash
+# Re-train from the latest validated dataset
+make train
+make evaluate
+
+# Verify the new artifacts
+python scripts/verify_tier2_artifact.py
+
+# Promote to production
+kubectl rollout restart deployment/logfilter-api -n logfilter
+```
 
 ### Customising thresholds
 
