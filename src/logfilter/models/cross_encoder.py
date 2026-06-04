@@ -111,9 +111,6 @@ class CrossEncoderModel:
         -------
         list[list[CrossEncoderScore]] — outer list matches log_texts order.
         """
-        if self._model is None:
-            self._load()
-
         # Flatten into (text, description) pairs with bookkeeping
         all_pairs: list[tuple[str, str]] = []
         lengths: list[int] = []
@@ -123,8 +120,13 @@ class CrossEncoderModel:
             all_pairs.extend(pairs)
             lengths.append(len(pairs))
 
+        # Nothing to score — return empty results without loading the model.
+        # (Loading eagerly here would hit the network even for empty input.)
         if not all_pairs:
             return [[] for _ in log_texts]
+
+        if self._model is None:
+            self._load()
 
         # Batch prediction
         raw_scores = self._model.predict(  # type: ignore[union-attr]
