@@ -130,7 +130,7 @@ class SyslogSender:
             try:
                 self.send(msg, prio)
                 sent += 1
-            except Exception as exc:  # noqa: BLE001
+            except (OSError, BrokenPipeError) as exc:
                 logger.error("Failed to send syslog message", error=str(exc))
         return sent
 
@@ -212,7 +212,7 @@ class LogRouter:
                     score=round(scored.ai_threat_score, 3),
                     mitre=scored.ai_mitre_technique,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except (OSError, BrokenPipeError) as exc:
                 logger.error("Failed to route event to QRadar", error=str(exc))
         else:
             logger.debug(

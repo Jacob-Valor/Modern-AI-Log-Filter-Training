@@ -42,7 +42,7 @@ class LogArchive:
         shards: int = 1,
         replicas: int = 0,
     ) -> None:
-        if password == "":
+        if not password:
             raise ValueError(
                 "LogArchive: Elasticsearch password is required. "
                 "Set ES_PASSWORD env var or config.elasticsearch.password "

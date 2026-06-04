@@ -36,6 +36,7 @@ from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
 from logfilter.models.ner import NERModel
 from logfilter.models.tier2_classifier import Tier2Classifier
+from logfilter.monitoring.drift_detector import DriftDetector
 from logfilter.pipeline.normalizer import NormalizedEvent
 
 logger = structlog.get_logger(__name__)
@@ -240,6 +241,7 @@ class LogScorer:
         biencoder: BiEncoderModel | None = None,
         cross_encoder: CrossEncoderModel | None = None,
         model_version: str = "",
+        drift_detector: DriftDetector | None = None,
     ) -> None:
         self._cfg = config
         self._model_version = model_version
@@ -338,6 +340,20 @@ class LogScorer:
             if _enabled(cross_encoder_cfg.get("enabled", True))
             else DisabledCrossEncoderModel()
         )
+        drift_cfg = config.get("monitoring", {}).get("drift", {})
+        self.drift_detector: DriftDetector | None
+        if drift_detector is not None:
+            self.drift_detector = drift_detector
+        elif _enabled(drift_cfg.get("enabled", False)):
+            self.drift_detector = DriftDetector(
+                window_size=int(drift_cfg.get("window_size", 1000)),
+                psi_threshold=float(drift_cfg.get("psi_threshold", 0.25)),
+                check_interval=int(drift_cfg.get("check_interval", 100)),
+                auto_fallback=_enabled(drift_cfg.get("auto_fallback", True)),
+            )
+        else:
+            self.drift_detector = None
+
         self._feature_cache_names: tuple[str, ...] = ()
         self._feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
 
@@ -368,6 +384,9 @@ class LogScorer:
 
             # ── Tier 1b: trained classifier ────────────────────────────────────
             self._apply_classifier(scored, events)
+            if self.drift_detector is not None:
+                for se in scored:
+                    self.drift_detector.record_score(se.classifier_score)
 
             # ── Tier 2: BiEncoder dedup + ATT&CK candidate retrieval ──────────
             with telemetry.start_as_current_span(
@@ -505,10 +524,18 @@ class LogScorer:
 
     def _apply_sigma(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
         """
-        Apply Sigma rules via sigma-cli / pySigma.
+        Lightweight Sigma rule matching for syslog events.
 
-        Sigma rules live in config/sigma_rules/*.yml.
-        If sigma-cli is not installed or no rules exist, this is a no-op.
+        Sigma rules are loaded with pySigma and evaluated against the raw
+        normalized log text.  This is a simplified, text-only matcher: it
+        honours ``contains`` modifiers by doing substring searches in the
+        log text, but it does not perform structured field extraction (e.g.
+        ``Image``, ``ParentImage``) because syslog events lack those fields.
+        Rules that reference un-mappable fields are skipped with a debug log.
+
+        For full fidelity Sigma evaluation, pipe the enriched event to a
+        dedicated Sigma backend (Splunk, Elastic, or a field-extracted
+        normaliser) rather than relying on this in-process matcher.
         """
         with telemetry.start_as_current_span(
             "scorer.sigma.apply",
@@ -518,7 +545,6 @@ class LogScorer:
                 sigma_collection = importlib.import_module("sigma.collection")
                 sigma_collection_cls = sigma_collection.SigmaCollection
             except ImportError:
-                # sigma is optional; skip gracefully
                 span.set_attribute("logfilter.sigma.available", False)
                 return
 
@@ -531,23 +557,87 @@ class LogScorer:
                 rules = sigma_collection_cls.load_ruleset([str(sigma_rules_dir)])
                 match_count = 0
                 for se, ev in zip(scored, events):
-                    # Simplified: we match raw text against rule titles/descriptions
-                    # In production: pipe events through a full Sigma evaluation engine
                     for rule in rules:
-                        detection = getattr(rule, "detection", {}) or {}
-                        rule_text = (
-                            (rule.title or "").lower()
-                            + " "
-                            + " ".join(str(d) for d in detection)
-                        )
-                        if any(kw in ev.text.lower() for kw in rule_text.split() if len(kw) > 4):
+                        if self._sigma_rule_matches(rule, ev.text):
                             se.sigma_matched = True
                             se.sigma_rule_ids.append(str(rule.id or rule.title))
                             match_count += 1
                 span.set_attribute("logfilter.sigma.match_count", match_count)
-            except Exception as exc:  # noqa: BLE001
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 telemetry.record_exception(span, exc)
                 logger.warning("Sigma evaluation failed", error=str(exc))
+
+    def _sigma_rule_matches(self, rule: Any, event_text: str) -> bool:
+        """
+        Evaluate a single SigmaRule against a raw log text.
+
+        Returns ``True`` if any mappable ``contains`` detection item
+        matches the event text.
+        """
+        detection = getattr(rule, "detection", None)
+        if detection is None:
+            return False
+
+        text_lower = event_text.lower()
+
+        for name, det in detection.detections.items():
+            for item in det.detection_items:
+                field = getattr(item, "field", None)
+                if field is None:
+                    continue
+
+                # Syslog text fields we can reasonably map to raw log text
+                mappable_fields = {
+                    "CommandLine",
+                    "ServiceName",
+                    "TargetObject",
+                    "Details",
+                    "QueryName",
+                    "QueryResults",
+                    "Path",
+                    "LogonType",
+                    "TargetUserName",
+                    "SubjectUserName",
+                    "ObjectName",
+                    "ProcessName",
+                    "ParentCommandLine",
+                    "TargetFilename",
+                }
+                if field not in mappable_fields:
+                    continue
+
+                modifiers = getattr(item, "modifiers", [])
+                modifier_names = {
+                    m.__name__ if hasattr(m, "__name__") else str(m) for m in modifiers
+                }
+
+                for val in item.value:
+                    # Extract plain string tokens from SigmaString
+                    plain_parts = [
+                        str(part)
+                        for part in val.s
+                        if not hasattr(part, "name")  # skip SpecialChars enum members
+                    ]
+                    search_text = " ".join(plain_parts).strip().lower()
+
+                    if not search_text:
+                        continue
+
+                    if "SigmaContainsModifier" in modifier_names:
+                        if search_text in text_lower:
+                            return True
+                    elif "SigmaEndswithModifier" in modifier_names:
+                        if text_lower.endswith(search_text):
+                            return True
+                    elif "SigmaStartswithModifier" in modifier_names:
+                        if text_lower.startswith(search_text):
+                            return True
+                    elif not modifiers:
+                        # No modifier = exact match on a word boundary
+                        for word in text_lower.split():
+                            if word.strip(".,;:!?") == search_text:
+                                return True
+        return False
 
     def _apply_classifier(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
         """Populate classifier_score using the trained event-count classifier."""
@@ -559,7 +649,7 @@ class LogScorer:
                 feature_vectors = self._classifier_feature_vectors(events)
                 span.set_attribute("logfilter.feature_count", int(feature_vectors.shape[1]))
                 probabilities = self.classifier.predict_proba(feature_vectors)
-            except Exception as exc:  # noqa: BLE001
+            except (ValueError, IndexError, TypeError, RuntimeError) as exc:
                 telemetry.record_exception(span, exc)
                 logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
                 probabilities = np.full(len(events), 0.5, dtype=np.float32)
@@ -578,6 +668,13 @@ class LogScorer:
         ) as span:
             if not escalation_indices:
                 return
+            if self.drift_detector is not None and self.drift_detector.is_fallback_active():
+                span.set_attribute("logfilter.tier2.fallback_active", True)
+                logger.warning(
+                    "Tier-2 fallback active due to model drift; keeping Tier-1 scores",
+                    drift_psi=round(self.drift_detector.check_drift().psi, 4),
+                )
+                return
             if not self.tier2_classifier.is_ready():
                 span.set_attribute("logfilter.tier2.ready", False)
                 logger.warning("Tier-2 classifier unavailable; keeping Tier-1 uncertain scores")
@@ -586,7 +683,7 @@ class LogScorer:
             tier2_texts = [events[i].raw for i in escalation_indices]
             try:
                 tier2_probs = self.tier2_classifier.predict_proba(tier2_texts)
-            except Exception as exc:  # noqa: BLE001
+            except (ValueError, IndexError, TypeError, RuntimeError) as exc:
                 telemetry.record_exception(span, exc)
                 logger.warning(
                     "Tier-2 classifier scoring failed; keeping Tier-1 scores", error=str(exc)

@@ -168,3 +168,91 @@ def test_syslog_sender_send_batch_counts_successes(monkeypatch) -> None:
 
     assert sent == 1
     assert calls == [("ok", "HIGH"), ("bad", "LOW")]
+
+
+def test_syslog_sender_tls_protocol_creates_context(monkeypatch) -> None:
+    FakeSocket.instances = []
+    monkeypatch.setattr(router_module.socket, "socket", FakeSocket)
+
+    sender = SyslogSender("qradar", port=1514, protocol="tls")
+    assert sender._tls_context is not None
+
+
+def test_syslog_sender_tls_wraps_socket(monkeypatch) -> None:
+    FakeSocket.instances = []
+    monkeypatch.setattr(router_module.socket, "socket", FakeSocket)
+
+    class FakeTLSContext:
+        def wrap_socket(self, sock, server_hostname=None):
+            wrapped = FakeSocket()
+            wrapped.wrapped = True
+            return wrapped
+
+    sender = SyslogSender("qradar", port=1514, protocol="tls")
+    sender._tls_context = FakeTLSContext()
+    sender.send("message", "HIGH")
+
+    assert FakeSocket.instances[1].wrapped is True
+
+
+def test_syslog_sender_tcp_exception_triggers_retry(monkeypatch) -> None:
+    FakeSocket.instances = []
+    monkeypatch.setattr(router_module.socket, "socket", FakeSocket)
+
+    sender = SyslogSender("qradar", port=1514, protocol="tcp")
+    sender._sock = FakeSocket()
+
+    class BrokenSocket:
+        def sendall(self, payload):
+            raise BrokenPipeError("connection lost")
+
+        def close(self):
+            pass
+
+    sender._sock = BrokenSocket()
+
+    sender.send("message", "HIGH")
+    assert len(FakeSocket.instances) == 2
+
+
+def test_syslog_sender_udp_exception_triggers_retry(monkeypatch) -> None:
+    FakeSocket.instances = []
+    monkeypatch.setattr(router_module.socket, "socket", FakeSocket)
+
+    sender = SyslogSender("qradar", port=1514, protocol="udp")
+
+    class BrokenSocket:
+        def sendto(self, payload, address):
+            raise OSError("network down")
+
+        def close(self):
+            pass
+
+    sender._sock = BrokenSocket()
+
+    sender.send("message", "HIGH")
+    assert len(FakeSocket.instances) == 1
+
+
+def test_router_decide_suppress_low_non_info() -> None:
+    sender = FakeSender()
+    router = LogRouter({"qradar": {"mode": "suppress_low"}}, sender=sender)
+
+    decision = router.decide(_scored("LOW", 0.3))
+    assert decision.forward_to_qradar is True
+
+    decision = router.decide(_scored("MEDIUM", 0.6))
+    assert decision.forward_to_qradar is True
+
+
+def test_router_route_batch_no_forward_events() -> None:
+    sender = FakeSender()
+    router = LogRouter({"qradar": {"mode": "suppress_low"}}, sender=sender)
+
+    decisions = router.route_batch(
+        ["info1", "info2"],
+        [_scored("INFO", 0.01), _scored("INFO", 0.01)],
+    )
+
+    assert all(not d.forward_to_qradar for d in decisions)
+    assert sender.sent == []

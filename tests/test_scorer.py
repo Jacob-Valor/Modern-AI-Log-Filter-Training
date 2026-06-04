@@ -466,3 +466,395 @@ def test_entity_boost_for_non_duplicates() -> None:
 
     assert scored.is_duplicate is False
     assert scored.entity_boost == pytest.approx(0.3)
+
+
+def test_sigma_no_rules_dir_is_noop(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("logfilter.pipeline.scorer.Path", lambda p: tmp_path / "nonexistent")
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    assert scored.sigma_matched is False
+
+
+def test_classifier_exception_uses_neutral_scores(monkeypatch) -> None:
+    class BrokenClassifier(FakeClassifier):
+        def predict_proba(self, feature_vectors):
+            raise RuntimeError("model broken")
+
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=BrokenClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    assert scored.classifier_score == pytest.approx(0.5)
+
+
+def test_tier2_not_ready_keeps_tier1_scores() -> None:
+    class Tier2NotReady(Tier2Classifier):
+        def should_escalate(self, tier1_prob: float) -> bool:
+            return True
+
+        def is_ready(self) -> bool:
+            return False
+
+        def predict_proba(self, texts: list[str]) -> np.ndarray:
+            raise AssertionError("should not be called")
+
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=Tier2NotReady(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    assert scored.tier2_used is False
+
+
+def test_tier2_exception_keeps_tier1_scores() -> None:
+    class Tier2Broken(Tier2Classifier):
+        def should_escalate(self, tier1_prob: float) -> bool:
+            return True
+
+        def is_ready(self) -> bool:
+            return True
+
+        def predict_proba(self, texts: list[str]) -> np.ndarray:
+            raise RuntimeError("tier2 broken")
+
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=Tier2Broken(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    assert scored.tier2_used is False
+
+
+def test_feature_vector_matching_branches() -> None:
+    class FeatureClassifier(FakeClassifier):
+        feature_names = ["exact.match", "partial token"]
+        expected_feature_count = 2
+
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FeatureClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("exact.match event with partial token here")
+    scored = scorer.score(event)
+    assert scored.classifier_score == pytest.approx(0.82)
+
+
+def test_feature_cache_is_reused() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scorer.score(event)
+    cached = scorer._feature_cache_names
+    scorer.score(event)
+    assert scorer._feature_cache_names is cached
+
+
+def test_compute_score_with_sigma_match() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    scored.sigma_matched = True
+    score = scorer._compute_score(scored)
+    assert score >= 0.90
+
+
+def test_routing_label_info() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    scored.ai_threat_score = 0.01
+    label = scorer._routing_label(scored)
+    assert label == "INFO"
+
+
+def test_confidence_with_no_signals() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    scored.classifier_score = 0.0
+    scored.entities = {}
+    scored.cross_encoder_max = 0.0
+    conf = scorer._confidence(scored)
+    assert conf == 0.0
+
+
+def test_sigma_rule_matches_contains() -> None:
+    from sigma.rule import SigmaRule
+
+    rule = SigmaRule.from_yaml("""
+title: SSH Brute Force
+id: 12345678-1234-1234-1234-123456789abc
+logsource:
+    category: process_creation
+    product: linux
+detection:
+    sel:
+        CommandLine|contains:
+            - 'failed password'
+    condition: sel
+level: high
+""")
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+    )
+    assert scorer._sigma_rule_matches(rule, "user failed password from 10.0.0.5")
+    assert not scorer._sigma_rule_matches(rule, "accepted password")
+
+
+def test_sigma_rule_matches_startswith() -> None:
+    from sigma.rule import SigmaRule
+
+    rule = SigmaRule.from_yaml("""
+title: SSH Start
+logsource:
+    category: process_creation
+    product: linux
+detection:
+    sel:
+        CommandLine|startswith: 'ssh '
+    condition: sel
+level: low
+""")
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+    )
+    assert scorer._sigma_rule_matches(rule, "ssh user@host")
+    assert not scorer._sigma_rule_matches(rule, "sudo ssh user@host")
+
+
+def test_sigma_rule_matches_endswith() -> None:
+    from sigma.rule import SigmaRule
+
+    rule = SigmaRule.from_yaml("""
+title: SSH End
+logsource:
+    category: process_creation
+    product: linux
+detection:
+    sel:
+        CommandLine|endswith: '.exe'
+    condition: sel
+level: low
+""")
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+    )
+    assert scorer._sigma_rule_matches(rule, "malware.exe")
+    assert not scorer._sigma_rule_matches(rule, "malware.bin")
+
+
+def test_sigma_rule_matches_exact() -> None:
+    from sigma.rule import SigmaRule
+
+    rule = SigmaRule.from_yaml("""
+title: Exact Match
+logsource:
+    category: process_creation
+    product: linux
+detection:
+    sel:
+        CommandLine: 'exact'
+    condition: sel
+level: low
+""")
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+    )
+    assert scorer._sigma_rule_matches(rule, "the exact command")
+    assert not scorer._sigma_rule_matches(rule, "inexact")
+
+
+def test_sigma_rule_skips_unmappable_field() -> None:
+    from sigma.rule import SigmaRule
+
+    rule = SigmaRule.from_yaml("""
+title: Windows Image
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    sel:
+        Image|contains: 'cmd.exe'
+    condition: sel
+level: low
+""")
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+    )
+    assert not scorer._sigma_rule_matches(rule, "cmd.exe running")
+
+
+def test_sigma_rule_no_detection_returns_false() -> None:
+    scorer = LogScorer(
+        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+    )
+    class FakeRule:
+        detection = None
+
+    assert not scorer._sigma_rule_matches(FakeRule(), "any text")

@@ -108,3 +108,53 @@ def test_archive_health_handles_success_and_failure(fake_archive) -> None:
 
     fake_archive.client.raise_health = True
     assert fake_archive.health()["status"] == "unavailable"
+
+
+def test_archive_password_none_raises() -> None:
+    with pytest.raises(ValueError, match="password is required"):
+        LogArchive(password=None)
+
+
+def test_archive_index_template_exception(monkeypatch) -> None:
+    class FailingES:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        class indices:
+            @staticmethod
+            def put_index_template(**kwargs):
+                raise RuntimeError("template fail")
+
+    monkeypatch.setattr(archive_module, "Elasticsearch", FailingES)
+    archive = LogArchive(hosts=["http://es:9200"], password="secret")
+    assert archive.client is not None
+
+
+def test_archive_write_bulk_with_errors(monkeypatch, fake_archive) -> None:
+    def fake_bulk(es_client, actions, **kwargs):
+        return 1, [{"error": "bad"}]
+
+    monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
+
+    ids = fake_archive.write_bulk([{"raw": "a"}])
+    assert ids == []
+
+
+def test_archive_write_bulk_error_count_as_int(monkeypatch, fake_archive) -> None:
+    def fake_bulk(es_client, actions, **kwargs):
+        return 1, 5
+
+    monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
+
+    ids = fake_archive.write_bulk([{"raw": "a"}])
+    assert ids == []
+
+
+def test_archive_search_recent_with_filters(fake_archive) -> None:
+    results = fake_archive.search_recent(host="host1", source_type="syslog", minutes=30, size=50)
+    assert len(results) == 2
+
+
+def test_archive_search_recent_without_filters(fake_archive) -> None:
+    results = fake_archive.search_recent()
+    assert len(results) == 2
