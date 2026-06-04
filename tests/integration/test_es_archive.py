@@ -41,6 +41,9 @@ def test_log_archive_integration(es_client, es_host: str):
     archive = LogArchive(
         hosts=[es_host],
         index_prefix="test-raw",
+        # The test ES runs with xpack.security disabled, but LogArchive requires
+        # a non-empty password (no insecure default); the value is ignored here.
+        password="test",
     )
 
     # Write and retrieve (index template is created automatically on first write)

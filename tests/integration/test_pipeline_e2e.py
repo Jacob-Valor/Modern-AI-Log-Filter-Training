@@ -16,6 +16,7 @@ def test_e2e_archive_to_es(
     archive = LogArchive(
         hosts=[es_host],
         index_prefix="test-e2e-archive",
+        password="test",  # test ES has xpack.security disabled; value ignored
     )
 
     doc_id = archive.write(
@@ -69,6 +70,7 @@ def test_e2e_full_pipeline(
     archive = LogArchive(
         hosts=[es_host],
         index_prefix="test-e2e-pipeline",
+        password="test",  # test ES has xpack.security disabled; value ignored
     )
 
     doc_id = archive.write(
