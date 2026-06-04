@@ -24,7 +24,7 @@ from typing import Any
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from logfilter.pipeline.scorer import ScoredEvent
+from logfilter.pipeline.events import ScoredEvent
 
 logger = structlog.get_logger(__name__)
 

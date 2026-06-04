@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from logfilter.pipeline.scorer import ScoredEvent
+from logfilter.pipeline.events import ScoredEvent
 
 logger = structlog.get_logger(__name__)
 
