@@ -32,3 +32,14 @@ build/
 .cache/
 .omo/
 .sisyphus/
+.commandcode/
+
+
+# Generated Kafka TLS/SASL secrets — regenerate locally via scripts/certs/generate.sh
+scripts/certs/*
+!scripts/certs/generate.sh
+!scripts/certs/README.md
+!scripts/certs/.gitkeep
+
+# remote scripts
+scripts/remote/
