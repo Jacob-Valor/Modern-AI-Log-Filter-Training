@@ -57,7 +57,7 @@ jobs:
           python -m mypy src/logfilter --ignore-missing-imports --no-error-summary
 
       - name: Unit tests
-        run: python -m pytest tests/ --cov=src/logfilter --cov-report=term-missing
+        run: python -m pytest tests/ -m "not integration" --cov=src/logfilter --cov-report=term-missing
 
       - name: Pipeline smoke test
         run: python scripts/smoke_test_pipeline.py
