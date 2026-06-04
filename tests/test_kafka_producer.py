@@ -129,3 +129,95 @@ def test_log_producer_close_flushes_and_closes() -> None:
     assert fake.flushed
     assert fake.closed
     assert producer._producer is None
+
+
+def test_log_producer_send_dlq_builds_payload() -> None:
+    producer = LogProducer(
+        bootstrap_servers="kafka:29092",
+        topic="raw-logs",
+        dlq_topic="logfilter-dlq",
+    )
+
+    producer.send_dlq(
+        original_message={"raw": "failed log", "host": "host1"},
+        error="ES bulk failed",
+        original_topic="raw-logs",
+        retry_count=2,
+    )
+
+    fake = FakeKafkaProducer.instances[0]
+    assert fake.sent[0]["topic"] == "logfilter-dlq"
+    assert fake.sent[0]["value"]["original"]["raw"] == "failed log"
+    assert fake.sent[0]["value"]["error"] == "ES bulk failed"
+    assert fake.sent[0]["value"]["original_topic"] == "raw-logs"
+    assert fake.sent[0]["value"]["retry_count"] == 2
+    assert "timestamp" in fake.sent[0]["value"]
+    assert fake.sent[0]["key"] == "host1"
+
+
+def test_log_producer_send_dlq_skips_when_not_configured() -> None:
+    producer = LogProducer(topic="raw-logs")
+
+    producer.send_dlq(
+        original_message={"raw": "failed log"},
+        error="ES bulk failed",
+        original_topic="raw-logs",
+    )
+
+    assert len(FakeKafkaProducer.instances) == 0
+
+
+def test_log_producer_send_dlq_raises_on_kafka_error() -> None:
+    producer = LogProducer(topic="raw-logs", dlq_topic="logfilter-dlq")
+    fake = cast(Any, producer._get_producer())
+    fake.fail_next = True
+
+    with pytest.raises(producer_module.KafkaError):
+        cast(Any, producer.send_dlq).retry.statistics.clear()
+        producer.send_dlq(
+            original_message={"raw": "failed log"},
+            error="ES bulk failed",
+            original_topic="raw-logs",
+        )
+
+
+def test_log_producer_send_dlq_no_topic_warns() -> None:
+    producer = LogProducer(topic="raw-logs")
+    producer.send_dlq(
+        original_message={"raw": "failed log"},
+        error="ES bulk failed",
+        original_topic="raw-logs",
+    )
+
+    assert len(FakeKafkaProducer.instances) == 0
+
+
+def test_log_producer_send_retry_exit_branch() -> None:
+    producer = LogProducer(topic="raw-logs")
+    fake = cast(Any, producer._get_producer())
+    fake.fail_next = True
+
+    with pytest.raises(producer_module.KafkaError):
+        cast(Any, producer.send).retry.statistics.clear()
+        producer.send("raw log", host="host")
+
+
+def test_log_producer_send_batch_exception_handling() -> None:
+    class ExceptionProducer:
+        def __init__(self) -> None:
+            self.sent = []
+            self.flushed = False
+
+        def send(self, *args, **kwargs):
+            from kafka.errors import KafkaError
+
+            raise KafkaError("batch fail")
+
+        def flush(self, timeout: int) -> None:
+            self.flushed = True
+
+    producer = LogProducer(topic="raw-logs")
+    producer._producer = ExceptionProducer()
+
+    count = producer.send_batch([{"raw": "a", "host": "h1"}])
+    assert count == 0

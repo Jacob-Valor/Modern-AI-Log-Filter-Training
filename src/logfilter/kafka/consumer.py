@@ -26,6 +26,7 @@ from kafka import KafkaConsumer
 
 from logfilter import telemetry
 from logfilter.kafka.config import kafka_security_kwargs
+from logfilter.kafka.producer import LogProducer
 from logfilter.utils.circuit_breaker import CircuitBreaker
 
 logger = structlog.get_logger(__name__)
@@ -56,6 +57,7 @@ class ArchiveConsumer:
         batch_size: int = 100,
         poll_timeout_ms: int = 1000,
         es_breaker: CircuitBreaker | None = None,
+        dlq_producer: LogProducer | None = None,
         kafka_config: dict[str, Any] | None = None,
     ) -> None:
         self.bootstrap_servers = bootstrap_servers
@@ -66,6 +68,7 @@ class ArchiveConsumer:
         self.poll_timeout_ms = poll_timeout_ms
         self._running = False
         self._es_breaker = es_breaker or _DEFAULT_ES_BREAKER
+        self._dlq_producer = dlq_producer
         self._kafka_config = kafka_config or {}
 
     def _index_name(self) -> str:
@@ -99,6 +102,7 @@ class ArchiveConsumer:
             while self._running:
                 records = consumer.poll(timeout_ms=self.poll_timeout_ms)
                 bulk_body: list[dict] = []
+                original_messages: list[dict[str, Any]] = []
 
                 for tp, messages in records.items():
                     for msg in messages:
@@ -116,6 +120,7 @@ class ArchiveConsumer:
                             token = telemetry.attach_span_context(span, extracted)
                             try:
                                 payload = msg.value
+                                original_messages.append(payload)
                                 bulk_body.append({"index": {"_index": self._index_name()}})
                                 bulk_body.append(
                                     {
@@ -151,8 +156,23 @@ class ArchiveConsumer:
                         except Exception as exc:  # noqa: BLE001
                             telemetry.record_exception(span, exc)
                             logger.error(
-                                "ES bulk write failed; offsets not committed", error=str(exc)
+                                "ES bulk write failed; sending to DLQ", error=str(exc)
                             )
+                            if self._dlq_producer:
+                                for original in original_messages:
+                                    retry_count = original.get("_dlq_retry_count", 0) + 1
+                                    self._dlq_producer.send_dlq(
+                                        original_message=original,
+                                        error=str(exc),
+                                        original_topic=self.raw_topic,
+                                        retry_count=retry_count,
+                                    )
+                                consumer.commit()
+                            else:
+                                logger.error(
+                                    "ES bulk write failed; offsets not committed",
+                                    error=str(exc),
+                                )
 
         finally:
             consumer.close()
@@ -180,6 +200,7 @@ class ScorerConsumer:
         batch_size: int = 100,
         poll_timeout_ms: int = 500,
         producer: Any = None,  # KafkaProducer for scored-logs output
+        dlq_producer: LogProducer | None = None,
         kafka_config: dict[str, Any] | None = None,
     ) -> None:
         self.bootstrap_servers = bootstrap_servers
@@ -189,6 +210,7 @@ class ScorerConsumer:
         self.batch_size = batch_size
         self.poll_timeout_ms = poll_timeout_ms
         self._producer = producer
+        self._dlq_producer = dlq_producer
         self._running = False
         self._kafka_config = kafka_config or {}
 
@@ -267,10 +289,26 @@ class ScorerConsumer:
                     except Exception as exc:  # noqa: BLE001
                         telemetry.record_exception(span, exc)
                         logger.error(
-                            "Scoring batch failed; offsets not committed",
+                            "Scoring batch failed; sending to DLQ",
                             error=str(exc),
                             batch_size=len(batch),
                         )
+                        if self._dlq_producer:
+                            for event in batch:
+                                retry_count = event.get("_dlq_retry_count", 0) + 1
+                                self._dlq_producer.send_dlq(
+                                    original_message=event,
+                                    error=str(exc),
+                                    original_topic=self.raw_topic,
+                                    retry_count=retry_count,
+                                )
+                            consumer.commit()
+                        else:
+                            logger.error(
+                                "Scoring batch failed; offsets not committed",
+                                error=str(exc),
+                                batch_size=len(batch),
+                            )
                     finally:
                         telemetry.detach_context(token)
 

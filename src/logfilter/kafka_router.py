@@ -19,6 +19,7 @@ from kafka import KafkaConsumer, KafkaProducer
 from logfilter import telemetry
 from logfilter.config import load_config
 from logfilter.kafka.config import kafka_security_kwargs
+from logfilter.kafka.producer import LogProducer
 from logfilter.pipeline.router import SyslogSender
 from logfilter.utils.circuit_breaker import CircuitBreaker
 
@@ -38,6 +39,7 @@ class RouterSettings:
     bootstrap_servers: str | list[str]
     raw_topic: str
     scored_topic: str
+    dlq_topic: str | None
     consumer_group: str
     max_poll_records: int
     poll_timeout_ms: int
@@ -62,6 +64,7 @@ def _settings() -> RouterSettings:
         bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
         raw_topic=topics.get("raw_logs", "raw-logs"),
         scored_topic=topics.get("scored_logs", "scored-logs"),
+        dlq_topic=topics.get("dlq"),
         consumer_group=os.environ.get(
             "ROUTER_CONSUMER_GROUP",
             kafka_cfg.get("consumer_group", "logfilter-scorer"),
@@ -108,6 +111,14 @@ class KafkaQRadarRouter:
             max_in_flight_requests_per_connection=1,
             **kafka_security_kwargs(settings.kafka_config),
         )
+        self.dlq_producer: LogProducer | None = None
+        if settings.dlq_topic:
+            self.dlq_producer = LogProducer(
+                bootstrap_servers=settings.bootstrap_servers,
+                topic=settings.dlq_topic,
+                dlq_topic=settings.dlq_topic,
+                kafka_config=settings.kafka_config,
+            )
         self._current_batch_context = None
 
     def _score_batch(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -243,12 +254,28 @@ class KafkaQRadarRouter:
                         logger.info("Batch routed", count=len(scored))
                     except Exception as exc:  # noqa: BLE001
                         telemetry.record_exception(span, exc)
-                        logger.error("Batch routing failed; offsets not committed", error=str(exc))
+                        logger.error("Batch routing failed; sending to DLQ", error=str(exc))
+                        if self.dlq_producer:
+                            for event in batch:
+                                retry_count = event.get("_dlq_retry_count", 0) + 1
+                                self.dlq_producer.send_dlq(
+                                    original_message=event,
+                                    error=str(exc),
+                                    original_topic=self.settings.raw_topic,
+                                    retry_count=retry_count,
+                                )
+                            self.consumer.commit()
+                        else:
+                            logger.error(
+                                "Batch routing failed; offsets not committed", error=str(exc)
+                            )
                     finally:
                         telemetry.detach_context(token)
         finally:
             self.consumer.close()
             self.producer.close()
+            if self.dlq_producer:
+                self.dlq_producer.close()
             self.sender.close()
             self.http.close()
             logger.info("Kafka QRadar router stopped")

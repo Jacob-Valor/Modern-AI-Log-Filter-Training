@@ -48,12 +48,14 @@ class LogProducer:
         self,
         bootstrap_servers: str | list[str] = "localhost:9092",
         topic: str = "raw-logs",
+        dlq_topic: str | None = None,
         batch_size_bytes: int = 65536,  # 64 KB
         linger_ms: int = 10,
         compression: str | None = "lz4",
         kafka_config: dict[str, Any] | None = None,
     ) -> None:
         self.topic = topic
+        self.dlq_topic = dlq_topic
         self._producer: KafkaProducer | None = None
         self._config = {
             "bootstrap_servers": bootstrap_servers,
@@ -135,6 +137,73 @@ class LogProducer:
             except KafkaError as exc:
                 telemetry.record_exception(span, exc)
                 logger.error("Failed to send message to Kafka", error=str(exc))
+                raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, max=5),
+        reraise=True,
+    )
+    def send_dlq(
+        self,
+        original_message: dict[str, Any],
+        error: str,
+        original_topic: str,
+        retry_count: int = 0,
+    ) -> None:
+        """
+        Send a failed message to the dead-letter queue with failure metadata.
+
+        The DLQ payload preserves the original message and adds context
+        about the failure so it can be reprocessed or audited later.
+        """
+        if not self.dlq_topic:
+            logger.warning("DLQ topic not configured; dropping failed message")
+            return
+
+        with telemetry.start_as_current_span(
+            "kafka.producer.send_dlq",
+            {
+                "messaging.system": "kafka",
+                "messaging.destination.name": self.dlq_topic,
+                "logfilter.original_topic": original_topic,
+                "logfilter.retry_count": retry_count,
+            },
+        ) as span:
+            dlq_payload = {
+                "original": original_message,
+                "error": error,
+                "original_topic": original_topic,
+                "timestamp": time.time(),
+                "retry_count": retry_count,
+            }
+            producer = self._get_producer()
+            headers = telemetry.inject_kafka_headers(span=span)
+            future = producer.send(
+                self.dlq_topic,
+                value=dlq_payload,
+                key=original_message.get("host", "unknown"),
+                headers=headers,
+            )
+            try:
+                record_metadata = future.get(timeout=10)
+                telemetry.set_span_attributes(
+                    span,
+                    {
+                        "messaging.kafka.partition": record_metadata.partition,
+                        "messaging.kafka.offset": record_metadata.offset,
+                    },
+                )
+                logger.debug(
+                    "Message sent to DLQ",
+                    topic=record_metadata.topic,
+                    partition=record_metadata.partition,
+                    offset=record_metadata.offset,
+                    retry_count=retry_count,
+                )
+            except KafkaError as exc:
+                telemetry.record_exception(span, exc)
+                logger.error("Failed to send message to DLQ", error=str(exc))
                 raise
 
     def send_batch(

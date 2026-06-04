@@ -14,6 +14,7 @@ def _settings() -> kafka_router.RouterSettings:
         bootstrap_servers="kafka:29092",
         raw_topic="raw-logs",
         scored_topic="scored-logs",
+        dlq_topic=None,
         consumer_group="router",
         max_poll_records=10,
         poll_timeout_ms=100,

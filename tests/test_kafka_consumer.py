@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from logfilter.kafka import consumer as consumer_module
 from logfilter.kafka.consumer import ArchiveConsumer, ScorerConsumer
+from logfilter.kafka.producer import LogProducer
 
 
 class FakeKafkaConsumer:
@@ -169,6 +171,229 @@ def test_scorer_consumer_does_not_commit_when_score_fails() -> None:
         raise RuntimeError("score failed")
 
     consumer = ScorerConsumer("kafka:29092", "raw-logs", "scored-logs", score_fn=fail)
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert FakeKafkaConsumer.instances[0].commits == 0
+
+
+def test_archive_consumer_sends_to_dlq_on_bulk_failure() -> None:
+    class FakeES:
+        def bulk(self, body):
+            return {"errors": True}
+
+    class FakeDLQProducer:
+        def __init__(self) -> None:
+            self.dlq_sent: list[dict] = []
+
+        def send_dlq(self, original_message, error, original_topic, retry_count=0):
+            self.dlq_sent.append({
+                "original_message": original_message,
+                "error": error,
+                "original_topic": original_topic,
+                "retry_count": retry_count,
+            })
+
+    dlq = FakeDLQProducer()
+    consumer = ArchiveConsumer(
+        "kafka:29092", "raw-logs", es_client=FakeES(), dlq_producer=cast(LogProducer, dlq)
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    fake = FakeKafkaConsumer.instances[0]
+    assert fake.commits == 1
+    assert len(dlq.dlq_sent) == 1
+    assert dlq.dlq_sent[0]["original_topic"] == "raw-logs"
+    assert dlq.dlq_sent[0]["error"] == "Elasticsearch bulk response contained errors"
+    assert dlq.dlq_sent[0]["retry_count"] == 1
+
+
+def test_archive_consumer_increments_retry_count() -> None:
+    class FakeES:
+        def bulk(self, body):
+            return {"errors": True}
+
+    class FakeDLQProducer:
+        def __init__(self) -> None:
+            self.dlq_sent: list[dict] = []
+
+        def send_dlq(self, original_message, error, original_topic, retry_count=0):
+            self.dlq_sent.append({"retry_count": retry_count})
+
+    dlq = FakeDLQProducer()
+    consumer = ArchiveConsumer(
+        "kafka:29092", "raw-logs", es_client=FakeES(), dlq_producer=cast(LogProducer, dlq)
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert dlq.dlq_sent[0]["retry_count"] == 1
+
+
+def test_scorer_consumer_sends_to_dlq_on_score_failure() -> None:
+    class FakeDLQProducer:
+        def __init__(self) -> None:
+            self.dlq_sent: list[dict] = []
+
+        def send_dlq(self, original_message, error, original_topic, retry_count=0):
+            self.dlq_sent.append({
+                "original_message": original_message,
+                "error": error,
+                "original_topic": original_topic,
+                "retry_count": retry_count,
+            })
+
+    dlq = FakeDLQProducer()
+    consumer = ScorerConsumer(
+        "kafka:29092",
+        "raw-logs",
+        "scored-logs",
+        score_fn=lambda batch: (_ for _ in ()).throw(RuntimeError("score failed")),
+        dlq_producer=cast(LogProducer, dlq),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    fake = FakeKafkaConsumer.instances[0]
+    assert fake.commits == 1
+    assert len(dlq.dlq_sent) == 1
+    assert dlq.dlq_sent[0]["original_topic"] == "raw-logs"
+    assert "score failed" in dlq.dlq_sent[0]["error"]
+    assert dlq.dlq_sent[0]["retry_count"] == 1
+
+
+def test_archive_consumer_empty_poll(monkeypatch) -> None:
+    class EmptyPollConsumer:
+        instances: list = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.commits = 0
+            self.closed = False
+            self.poll_calls = 0
+            EmptyPollConsumer.instances.append(self)
+
+        def poll(self, timeout_ms: int):
+            self.poll_calls += 1
+            if self.poll_calls > 1:
+                raise KeyboardInterrupt
+            return {}
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    EmptyPollConsumer.instances = []
+    monkeypatch.setattr(consumer_module, "KafkaConsumer", EmptyPollConsumer)
+
+    class FakeES:
+        def bulk(self, body):
+            return {"errors": False}
+
+    consumer = ArchiveConsumer("kafka:29092", "raw-logs", es_client=FakeES())
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert EmptyPollConsumer.instances[0].commits == 0
+
+
+def test_scorer_consumer_empty_batch_continue(monkeypatch) -> None:
+    class EmptyPollConsumer:
+        instances: list = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.commits = 0
+            self.closed = False
+            self.poll_calls = 0
+            EmptyPollConsumer.instances.append(self)
+
+        def poll(self, timeout_ms: int):
+            self.poll_calls += 1
+            if self.poll_calls > 1:
+                raise KeyboardInterrupt
+            return {}
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    EmptyPollConsumer.instances = []
+    monkeypatch.setattr(consumer_module, "KafkaConsumer", EmptyPollConsumer)
+
+    consumer = ScorerConsumer(
+        "kafka:29092",
+        "raw-logs",
+        "scored-logs",
+        score_fn=lambda batch: batch,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert EmptyPollConsumer.instances[0].commits == 0
+
+
+def test_scorer_consumer_no_flush_without_producer(monkeypatch) -> None:
+    class NoFlushConsumer:
+        instances: list = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.commits = 0
+            self.closed = False
+            self.poll_calls = 0
+            NoFlushConsumer.instances.append(self)
+
+        def poll(self, timeout_ms: int):
+            self.poll_calls += 1
+            if self.poll_calls > 1:
+                raise KeyboardInterrupt
+            msg = SimpleNamespace(
+                value={"raw": "raw", "source_type": "syslog", "host": "host"},
+                offset=1,
+                partition=0,
+            )
+            return {"tp": [msg]}
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    NoFlushConsumer.instances = []
+    monkeypatch.setattr(consumer_module, "KafkaConsumer", NoFlushConsumer)
+
+    consumer = ScorerConsumer(
+        "kafka:29092",
+        "raw-logs",
+        "scored-logs",
+        score_fn=lambda batch: [{"host": "host"}],
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert NoFlushConsumer.instances[0].commits == 1
+
+
+def test_archive_consumer_bulk_error_without_dlq(monkeypatch) -> None:
+    class FakeES:
+        def bulk(self, body):
+            return {"errors": True}
+
+    monkeypatch.setattr(consumer_module, "KafkaConsumer", FakeKafkaConsumer)
+    FakeKafkaConsumer.instances = []
+
+    consumer = ArchiveConsumer("kafka:29092", "raw-logs", es_client=FakeES())
 
     with pytest.raises(KeyboardInterrupt):
         consumer.run()
