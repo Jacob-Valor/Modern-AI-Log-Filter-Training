@@ -103,24 +103,28 @@ def evaluate(model: xgb.XGBClassifier, X: np.ndarray, y: np.ndarray, split: str)
 
 
 def export_onnx(model: xgb.XGBClassifier, n_features: int, output_path: Path) -> None:
-    """Export trained XGBoost model to ONNX format via onnxmltools."""
+    """Export trained XGBoost model to ONNX format via onnxmltools.
+
+    ONNX export is mandatory for production inference (AGENTS.md: "every trained
+    model must export to ONNX"). A missing onnxmltools is a hard failure, not a
+    silent fallback — otherwise training would ship a model the API cannot load
+    via ONNX Runtime.
+    """
     try:
         from onnxmltools import convert_xgboost
         from onnxmltools.convert.common.data_types import FloatTensorType
+    except ImportError as exc:
+        raise RuntimeError(
+            "onnxmltools is required for production ONNX export but is not installed. "
+            "Install it (pip install onnxmltools skl2onnx) and re-run training."
+        ) from exc
 
-        initial_type = [("float_input", FloatTensorType([None, n_features]))]
-        onnx_model = convert_xgboost(model, initial_types=initial_type)
+    initial_type = [("float_input", FloatTensorType([None, n_features]))]
+    onnx_model = convert_xgboost(model, initial_types=initial_type)
 
-        with open(output_path, "wb") as f:
-            f.write(onnx_model.SerializeToString())
-        logger.info("ONNX model saved to %s", output_path)
-    except ImportError:
-        logger.warning(
-            "onnxmltools not installed — skipping ONNX export. "
-            "Install with: pip install onnxmltools skl2onnx"
-        )
-        # Fallback: save native XGBoost model only
-        model.save_model(str(output_path).replace(".onnx", ".json"))
+    with open(output_path, "wb") as f:
+        f.write(onnx_model.SerializeToString())
+    logger.info("ONNX model saved to %s", output_path)
 
 
 def main() -> None:

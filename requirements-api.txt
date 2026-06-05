@@ -6,6 +6,8 @@ pandas>=2.2.0
 onnxruntime>=1.18.0
 onnx>=1.21.0
 faiss-cpu>=1.8.0
+# Required by the classifier ONNX-fallback path (models/classifier.py)
+xgboost>=2.0.0
 
 # API framework
 fastapi>=0.111.0

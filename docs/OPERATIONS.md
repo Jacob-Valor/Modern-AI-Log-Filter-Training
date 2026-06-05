@@ -131,16 +131,28 @@ Override the target directory with the `HF_CACHE_DIR` build arg:
 ```bash
 docker build -f docker/api/Dockerfile \
   --build-arg HF_CACHE_DIR=/app/hf-cache \
+  -t logfilter-api:latest .
+```
+
+For private or gated models, set the `HF_TOKEN` build arg:
+
+```bash
+docker build -f docker/api/Dockerfile \
+  --build-arg HF_CACHE_DIR=/app/hf-cache \
   --build-arg HF_TOKEN=$HF_TOKEN \
   -t logfilter-api:latest .
 ```
 
-### Kubernetes initContainer (runtime fetch)
+### Kubernetes (models mounted from PVC)
 
-If you do not bake models into the image, the `api.yaml` Deployment includes an
-`initContainer` that downloads models to a shared `emptyDir` volume before the
-main container starts. Set `HF_TOKEN` in `k8s/secret.yaml` if any model is
-gated or private.
+Models are baked into the Docker image at build time, so the `api.yaml`
+Deployment has no `initContainer` for model download. The image must
+include the models (build with `make build` or the snippet above); the
+container starts self-contained.
+
+If you do not bake models into the image, mount a shared PVC pre-populated
+with `scripts/download_hf_models.py --cache-dir /app/hf-cache --model all`
+and set `HF_HOME=/app/hf-cache` on the Deployment.
 
 ### Manual pre-download
 
@@ -246,12 +258,21 @@ kubectl rollout status deployment/logfilter-api -n logfilter
 
 If Kafka logs are lost (e.g. volume corruption):
 
-```bash
-# Events are already archived to Elasticsearch before scoring.
-# Rebuild the Kafka topic and the archive consumer will backfill
-# from the beginning of the retained ES index.
-# No event data is permanently lost.
-```
+- **Raw events are still archived** in Elasticsearch (see
+  `docs/OPERATIONS.md` chain-of-custody section; daily indices under
+  `raw-logs-*`).
+- **No automated backfill tool exists** between Elasticsearch and Kafka.
+  Replay must be scripted per deployment using the `scripts/` utilities
+  (`replay_archive_to_kafka.py` is a TODO; track via the project issue
+  tracker).
+- **Forensic recovery** is unaffected: the `raw_log_ref` in any LEEF
+  payload still resolves to the original raw event via ES `get_by_id`.
+- **Forwarded events to QRadar** (the LEEF stream) are NOT recoverable
+  from Kafka once the topic is gone. To re-emit to QRadar, query
+  Elasticsearch for the original raw logs, re-score them through the API
+  (`POST /score`), and forward the resulting LEEF payload via the router.
+
+This is a known gap; do not rely on Kafka as the system-of-record.
 
 ### Model artifact corruption
 

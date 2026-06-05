@@ -68,6 +68,34 @@ def test_archive_consumer_writes_bulk_and_commits() -> None:
     assert es.bulk_calls[0][1]["raw"] == "raw"
 
 
+def test_archive_consumer_defaults_to_earliest_offsets() -> None:
+    class FakeES:
+        def bulk(self, body):
+            return {"errors": False}
+
+    consumer = ArchiveConsumer("kafka:29092", "raw-logs", es_client=FakeES())
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert FakeKafkaConsumer.instances[0].kwargs["auto_offset_reset"] == "earliest"
+
+
+def test_scorer_consumer_uses_configured_offset_reset() -> None:
+    consumer = ScorerConsumer(
+        "kafka:29092",
+        "raw-logs",
+        "scored-logs",
+        score_fn=lambda batch: [{"host": "host", "score": 1.0}],
+        kafka_config={"auto_offset_reset": "none"},
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert FakeKafkaConsumer.instances[0].kwargs["auto_offset_reset"] == "none"
+
+
 def test_archive_consumer_passes_kafka_security_config() -> None:
     class FakeES:
         def bulk(self, body):

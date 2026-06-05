@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ def _settings() -> kafka_router.RouterSettings:
         scored_topic="scored-logs",
         dlq_topic=None,
         consumer_group="router",
+        auto_offset_reset="earliest",
         max_poll_records=10,
         poll_timeout_ms=100,
         api_url="http://api",
@@ -98,6 +100,30 @@ class FakeKafkaConsumer:
         self.closed = True
 
 
+class FakeDLQConsumer:
+    instances: list[FakeDLQConsumer] = []
+    messages: list[dict] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.closed = False
+        self.commits = 0
+        self.poll_calls = 0
+        FakeDLQConsumer.instances.append(self)
+
+    def poll(self, timeout_ms: int = 0):
+        self.poll_calls += 1
+        if self.poll_calls == 1 and self.messages:
+            return {"tp": [SimpleNamespace(value=m) for m in self.messages]}
+        return {}
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def fake_router(monkeypatch):
     FakeKafkaProducer.instances = []
@@ -138,7 +164,32 @@ def test_settings_reads_config_and_environment(monkeypatch) -> None:
     assert settings.api_token == "env-token"
     assert settings.api_url == "http://api"
     assert settings.qradar_port == 1514
+    assert settings.consumer_group == "logfilter-router"
+    assert settings.auto_offset_reset == "earliest"
     assert settings.kafka_config["security"]["protocol"] == "SSL"
+
+
+def test_settings_accepts_router_group_and_offset_override(monkeypatch) -> None:
+    monkeypatch.setenv("LOGFILTER_API_TOKEN", "env-token")
+    monkeypatch.setattr(
+        kafka_router,
+        "load_config",
+        lambda: {
+            "kafka": {
+                "router_consumer_group": "custom-router",
+                "auto_offset_reset": "none",
+            }
+        },
+    )
+
+    settings = kafka_router._settings()
+
+    assert settings.consumer_group == "custom-router"
+    assert settings.auto_offset_reset == "none"
+
+
+def test_router_consumer_uses_settings_offset_reset(fake_router) -> None:
+    assert FakeKafkaConsumer.instances[0].kwargs["auto_offset_reset"] == "earliest"
 
 
 def test_router_passes_kafka_security_config(monkeypatch) -> None:
@@ -209,3 +260,55 @@ def test_route_scored_sends_leef_and_publishes(fake_router) -> None:
 def test_route_scored_requires_leef_payload(fake_router) -> None:
     with pytest.raises(RuntimeError, match="missing leef_payload"):
         fake_router._route_scored([{"ai_priority": "HIGH"}])
+
+
+def test_dlq_replay_replays_to_original_topic(monkeypatch) -> None:
+    FakeKafkaProducer.instances = []
+    FakeDLQConsumer.instances = []
+    FakeDLQConsumer.messages = [
+        {
+            "original": {"raw": "raw", "source_type": "syslog", "host": "host"},
+            "original_topic": "raw-logs",
+            "error": "test",
+        }
+    ]
+    monkeypatch.setattr(kafka_router, "KafkaConsumer", FakeDLQConsumer)
+    monkeypatch.setattr(kafka_router, "KafkaProducer", FakeKafkaProducer)
+    settings = replace(_settings(), dlq_topic="dlq")
+    replay = kafka_router.DLQReplay(settings)
+    replay.run(max_messages=1, max_empty_polls=1)
+
+    assert FakeKafkaProducer.instances[0].sent[0][0][0] == "raw-logs"
+    assert FakeDLQConsumer.instances[0].commits == 1
+    assert FakeDLQConsumer.instances[0].closed is True
+
+
+def test_dlq_replay_skips_invalid_records(monkeypatch) -> None:
+    FakeKafkaProducer.instances = []
+    FakeDLQConsumer.instances = []
+    FakeDLQConsumer.messages = [{"original": "not-a-dict"}]
+    monkeypatch.setattr(kafka_router, "KafkaConsumer", FakeDLQConsumer)
+    monkeypatch.setattr(kafka_router, "KafkaProducer", FakeKafkaProducer)
+    settings = replace(_settings(), dlq_topic="dlq")
+    replay = kafka_router.DLQReplay(settings)
+    replay.run(max_messages=1, max_empty_polls=1)
+
+    assert FakeKafkaProducer.instances[0].sent == []
+
+
+def test_dlq_replay_caps_replay_count(monkeypatch) -> None:
+    FakeKafkaProducer.instances = []
+    FakeDLQConsumer.instances = []
+    FakeDLQConsumer.messages = [
+        {
+            "original": {"raw": "raw", "_dlq_replay_count": 3},
+            "original_topic": "raw-logs",
+        }
+    ]
+    monkeypatch.setattr(kafka_router, "KafkaConsumer", FakeDLQConsumer)
+    monkeypatch.setattr(kafka_router, "KafkaProducer", FakeKafkaProducer)
+    settings = replace(_settings(), dlq_topic="dlq")
+    replay = kafka_router.DLQReplay(settings)
+    replay.run(max_messages=1, max_empty_polls=1)
+
+    assert FakeKafkaProducer.instances[0].sent == []

@@ -143,6 +143,51 @@ def _configure_rate_limiter() -> None:
     logger.info("Redis rate limiter enabled")
 
 
+def _configure_archiver() -> None:
+    """
+    Initialise the Elasticsearch archiver so the API writes raw logs to ES
+    with the same ID embedded in LEEF as ``raw_log_ref`` (B8 chain-of-custody).
+
+    Reads ``ES_HOST`` / ``ES_USER`` / ``ES_PASSWORD`` from the loaded config
+    (which already performs ``${ENV_VAR:default}`` resolution). If the password
+    is missing, the archiver stays ``None`` and ``_archive_then_score`` falls
+    back to a local-only ``raw_log_ref``. A clear warning is logged so the
+    gap is visible in startup logs (the API still scores, but raw logs are
+    not retained for forensic lookup).
+    """
+    es_cfg = _state.config.get("elasticsearch") or {}
+    password = (es_cfg.get("password") or "").strip()
+    if not password:
+        logger.warning(
+            "ES archiver NOT configured — raw logs will not be retained. "
+            "Set ES_PASSWORD (and optionally ES_HOST/ES_USER) to enable "
+            "chain-of-custody archive. LEEF raw_log_ref will be a local-only "
+            "deterministic hash that does not resolve to a retrievable document."
+        )
+        _state.archiver = None
+        return
+    try:
+        _state.archiver = LogArchive(
+            hosts=es_cfg.get("hosts") or ["http://localhost:9200"],
+            index_prefix=es_cfg.get("index_prefix", "raw-logs"),
+            username=es_cfg.get("username", "elastic"),
+            password=password,
+            shards=int(es_cfg.get("index_shards", 1)),
+            replicas=int(es_cfg.get("index_replicas", 0)),
+        )
+        logger.info(
+            "ES archiver configured",
+            hosts=es_cfg.get("hosts"),
+            index_prefix=es_cfg.get("index_prefix", "raw-logs"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ES archiver init failed; raw logs will not be retained",
+            error=str(exc),
+        )
+        _state.archiver = None
+
+
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -157,6 +202,7 @@ async def lifespan(app: FastAPI):
             logger.warning("config.yaml not found or empty — using defaults")
 
         _configure_rate_limiter()
+        _configure_archiver()
 
         # Build scorer and enricher
         model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
@@ -268,9 +314,14 @@ def _archive_then_score(normalized, caller_ref: str | None) -> str:
     by this ref.
     """
     ingest_ts = _ingest_ts(normalized.timestamp)
+    source_type = (
+        normalized.source_type.value
+        if hasattr(normalized.source_type, "value")
+        else str(normalized.source_type)
+    )
     raw_log_ref = caller_ref or compute_raw_log_ref(
         normalized.raw,
-        normalized.source_type.value if hasattr(normalized.source_type, "value") else str(normalized.source_type),
+        source_type,
         normalized.host,
         ingest_ts,
     )
@@ -279,9 +330,7 @@ def _archive_then_score(normalized, caller_ref: str | None) -> str:
             _state.archiver.write_with_id(
                 raw_log_ref=raw_log_ref,
                 raw=normalized.raw,
-                source_type=normalized.source_type.value
-                if hasattr(normalized.source_type, "value")
-                else str(normalized.source_type),
+                source_type=source_type,
                 host=normalized.host,
                 ingest_ts=ingest_ts,
             )
@@ -303,10 +352,13 @@ def _do_score_sync(raw: str, source_type: str | None, raw_log_ref: str | None):
     write do not stall the FastAPI event loop (AGENTS.md: never block
     the loop with sync CPU or I/O).
     """
+    if _state.scorer is None or _state.enricher is None:
+        raise RuntimeError("Scoring service not initialised")
+
     normalized = _state.normalizer.normalize(raw, source_type_hint=_source_hint(source_type))
     es_doc_id = _archive_then_score(normalized, raw_log_ref)
-    scored = _state.scorer.score(normalized) if _state.scorer is not None else None
-    leef = _state.enricher.enrich(scored, es_doc_id=es_doc_id) if _state.enricher is not None else None
+    scored = _state.scorer.score(normalized)
+    leef = _state.enricher.enrich(scored, es_doc_id=es_doc_id)
     return scored, leef
 
 
@@ -318,6 +370,9 @@ def _do_score_batch_sync(
     """
     Synchronous batch helper. Mirrors ``_do_score_sync`` for the batch endpoint.
     """
+    if _state.scorer is None or _state.enricher is None:
+        raise RuntimeError("Scoring service not initialised")
+
     normalized_events = [
         _state.normalizer.normalize(r, source_type_hint=_source_hint(st))
         for r, st in zip(raws, source_types)
@@ -326,12 +381,8 @@ def _do_score_batch_sync(
         _archive_then_score(norm, ref)
         for norm, ref in zip(normalized_events, raw_log_refs)
     ]
-    scored_events = _state.scorer.score_batch(normalized_events) if _state.scorer is not None else None
-    leef_payloads = (
-        _state.enricher.enrich_batch(scored_events, es_doc_ids=es_doc_ids)
-        if _state.enricher is not None
-        else None
-    )
+    scored_events = _state.scorer.score_batch(normalized_events)
+    leef_payloads = _state.enricher.enrich_batch(scored_events, es_doc_ids=es_doc_ids)
     return scored_events, leef_payloads
 
 
@@ -375,6 +426,7 @@ def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
         timestamp=scored_event.timestamp,
         normalized_text=scored_event.normalized_text,
         scoring_latency_ms=scored_event.scoring_latency_ms,
+        score_degraded=scored_event.score_degraded,
         leef_payload=leef_payload,
     )
 
@@ -530,7 +582,6 @@ async def score_event(
                 detail="Scoring service not initialised",
             )
 
-        hint = _source_hint(payload.source_type)
         try:
             scored, leef = await run_in_threadpool(
                 _do_score_sync, payload.raw, payload.source_type, payload.raw_log_ref
@@ -629,8 +680,13 @@ async def score_batch(
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Operations"])
-async def health() -> HealthResponse:
-    """Liveness and readiness check."""
+async def health(response: Response) -> HealthResponse:
+    """Liveness and readiness check.
+
+    Returns HTTP 503 when the service is degraded (scorer not loaded) so that
+    load-balancers and orchestration probes treat the pod as not-ready instead
+    of routing traffic to a node that cannot score.
+    """
     with telemetry.start_as_current_span("api.health") as span:
         scorer_ready = _state.scorer is not None
 
@@ -646,6 +702,8 @@ async def health() -> HealthResponse:
 
         overall_status = "healthy" if scorer_ready else "degraded"
         span.set_attribute("logfilter.health.status", overall_status)
+        if overall_status != "healthy":
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
         return HealthResponse(
             status=overall_status,
@@ -718,7 +776,8 @@ async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
         if not new_config:
             logger.warning("config.yaml not found or empty — using defaults")
 
-        new_scorer = LogScorer(config=new_config)
+        model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
+        new_scorer = LogScorer(config=new_config, model_version=model_version)
         new_enricher = LEEFEnricher(
             vendor=new_config.get("qradar", {}).get("leef_vendor", "YourCo"),
             product=new_config.get("qradar", {}).get("leef_product", "AIPreprocessor"),

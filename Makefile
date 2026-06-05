@@ -86,7 +86,15 @@ smoke-pipeline:
 verify: lint test-coverage smoke-pipeline
 
 audit:
-	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off
+	# CVE-2025-69872 (diskcache): vulnerability exception — see SECURITY.md.
+	# diskcache is a transitive dep of pysigma. pysigma is used ONLY for
+	# Sigma rule loading (sigma.collection). The vulnerable code path
+	# (sigma.data.mitre_attack) is never imported in this project — MITRE
+	# data comes from config/mitre_techniques.json. No upstream fix exists
+	# (Snyk: "no fixed version" as of audit date). Re-review when diskcache
+	# ships a patched release.
+	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off \
+		--ignore-vuln CVE-2025-69872
 
 security-check: verify audit
 
@@ -137,9 +145,15 @@ logs-router:
 
 smoke-test:
 	@echo "Smoke-testing API …"
-	curl -s http://localhost:8080/health | python3 -m json.tool
+	@if [ ! -f .env ]; then \
+		echo "ERROR: .env missing. Copy .env.example to .env and set required values."; \
+		exit 1; \
+	fi
+	@set -a; . ./.env; set +a; \
+	curl -fsS http://localhost:8080/health | python3 -m json.tool
 	@echo ""
-	curl -s -X POST http://localhost:8080/score \
+	@set -a; . ./.env; set +a; \
+	curl -fsS -X POST http://localhost:8080/score \
 	  -H "Content-Type: application/json" \
 	  -H "X-API-Token: $$LOGFILTER_API_TOKEN" \
 	  -d '{"raw": "Jan 15 11:07:53 prod-srv01 sshd[123]: Failed password for root from 10.0.0.5 port 44382 ssh2", "source_type": "syslog"}' \
@@ -151,20 +165,21 @@ benchmark:
 # ── Kubernetes ─────────────────────────────────────────────────────────────────
 
 k8s-secrets:
-	kubectl create secret generic logfilter-secrets \
-	  --from-literal=LOGFILTER_ADMIN_TOKEN="$${LOGFILTER_ADMIN_TOKEN:?required}" \
-	  --from-literal=LOGFILTER_API_TOKEN="$${LOGFILTER_API_TOKEN:?required}" \
-	  --from-literal=ES_PASSWORD="$${ES_PASSWORD:?required}" \
-	  -n logfilter --dry-run=client -o yaml | kubectl apply -f -
-
-k8s-apply: k8s-secrets
 	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/secret.yaml
+
+k8s-apply:
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/secret.yaml
 	kubectl apply -f k8s/configmap.yaml
 	kubectl apply -f k8s/pvc.yaml
+	kubectl apply -f k8s/network-policies.yaml
+	kubectl apply -f k8s/pdb.yaml
 	kubectl apply -f k8s/api.yaml
 	kubectl apply -f k8s/router.yaml
 	kubectl apply -f k8s/collector.yaml
 	kubectl apply -f k8s/archive.yaml
+	kubectl apply -f k8s/ingress.yaml
 
 k8s-delete:
 	kubectl delete -f k8s/ --ignore-not-found=true

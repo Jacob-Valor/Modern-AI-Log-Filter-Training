@@ -573,10 +573,15 @@ class LogScorer:
                 feature_vectors = self._classifier_feature_vectors(events)
                 span.set_attribute("logfilter.feature_count", int(feature_vectors.shape[1]))
                 probabilities = self.classifier.predict_proba(feature_vectors)
+                if not self.classifier.is_ready():
+                    for se in scored:
+                        se.score_degraded = True
             except (ValueError, IndexError, TypeError, RuntimeError) as exc:
                 telemetry.record_exception(span, exc)
                 logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
                 probabilities = np.full(len(events), 0.5, dtype=np.float32)
+                for se in scored:
+                    se.score_degraded = True
 
         for se, prob in zip(scored, probabilities):
             se.classifier_score = max(0.0, min(1.0, float(prob)))

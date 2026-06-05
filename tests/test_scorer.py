@@ -521,6 +521,65 @@ def test_classifier_exception_uses_neutral_scores(monkeypatch) -> None:
     event = LogNormalizer().normalize("test event")
     scored = scorer.score(event)
     assert scored.classifier_score == pytest.approx(0.5)
+    assert scored.score_degraded is True
+
+
+def test_no_model_loaded_marks_degraded() -> None:
+    class NotReadyClassifier(FakeClassifier):
+        def is_ready(self) -> bool:
+            return False
+
+        def predict_proba(self, feature_vectors):
+            return np.full(len(feature_vectors), 0.5, dtype=np.float32)
+
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=NotReadyClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    assert scored.classifier_score == pytest.approx(0.5)
+    assert scored.score_degraded is True
+
+
+def test_healthy_classifier_not_degraded() -> None:
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    event = LogNormalizer().normalize("test event")
+    scored = scorer.score(event)
+    assert scored.score_degraded is False
 
 
 def test_tier2_not_ready_keeps_tier1_scores() -> None:

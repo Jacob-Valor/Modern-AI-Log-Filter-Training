@@ -39,17 +39,20 @@ def reset_app_state(monkeypatch):
     original_windows = api_app._state.rate_limit_windows
     original_redis_client = api_app._state.redis_client
     original_rate_limiter = api_app._state.rate_limiter
+    original_archiver = api_app._state.archiver
 
     monkeypatch.delenv("LOGFILTER_ADMIN_TOKEN", raising=False)
     monkeypatch.delenv("LOGFILTER_API_TOKEN", raising=False)
     monkeypatch.delenv("LOGFILTER_METRICS_TOKEN", raising=False)
     monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("ES_PASSWORD", raising=False)
     api_app._state.config = {"api": {}}
     api_app._state.scorer = None
     api_app._state.enricher = None
     api_app._state.rate_limit_windows = {}
     api_app._state.redis_client = None
     api_app._state.rate_limiter = None
+    api_app._state.archiver = None
 
     yield
 
@@ -59,6 +62,7 @@ def reset_app_state(monkeypatch):
     api_app._state.rate_limit_windows = original_windows
     api_app._state.redis_client = original_redis_client
     api_app._state.rate_limiter = original_rate_limiter
+    api_app._state.archiver = original_archiver
 
 
 def test_source_hint_handles_valid_invalid_and_missing_values() -> None:
@@ -147,11 +151,70 @@ def test_configure_rate_limiter_falls_back_when_redis_is_unavailable(monkeypatch
     assert api_app._state.rate_limiter is None
 
 
+def test_configure_archiver_enables_es_when_password_set(monkeypatch) -> None:
+    api_app._state.config = {
+        "elasticsearch": {
+            "hosts": ["http://es:9200"],
+            "username": "elastic",
+            "password": "real-password",
+            "index_prefix": "raw-logs",
+            "index_shards": 1,
+            "index_replicas": 0,
+        }
+    }
+    fake_archive_cls = Mock()
+    fake_archive_instance = Mock()
+    fake_archive_cls.return_value = fake_archive_instance
+    monkeypatch.setattr(api_app, "LogArchive", fake_archive_cls)
+
+    api_app._configure_archiver()
+
+    assert api_app._state.archiver is fake_archive_instance
+    fake_archive_cls.assert_called_once_with(
+        hosts=["http://es:9200"],
+        index_prefix="raw-logs",
+        username="elastic",
+        password="real-password",
+        shards=1,
+        replicas=0,
+    )
+
+
+def test_configure_archiver_stays_none_when_password_missing(monkeypatch) -> None:
+    api_app._state.config = {"elasticsearch": {"hosts": ["http://es:9200"]}}
+    fake_archive_cls = Mock()
+    monkeypatch.setattr(api_app, "LogArchive", fake_archive_cls)
+
+    api_app._configure_archiver()
+
+    assert api_app._state.archiver is None
+    fake_archive_cls.assert_not_called()
+
+
+def test_configure_archiver_degrades_gracefully_on_es_init_failure(monkeypatch) -> None:
+    api_app._state.config = {
+        "elasticsearch": {
+            "hosts": ["http://es:9200"],
+            "password": "real-password",
+        }
+    }
+    fake_archive_cls = Mock(side_effect=RuntimeError("connection refused"))
+    monkeypatch.setattr(api_app, "LogArchive", fake_archive_cls)
+
+    api_app._configure_archiver()
+
+    fake_archive_cls.assert_called_once()
+    assert api_app._state.archiver is None
+
+
 def test_health_reports_degraded_without_scorer() -> None:
-    response = asyncio.run(api_app.health())
+    api_app._state.scorer = None
+    http_response = Response()
+    response = asyncio.run(api_app.health(http_response))
 
     assert response.status == "degraded"
     assert response.models_loaded["scorer"] is False
+    assert http_response.status_code == 503
 
 
 def test_health_reports_classifier_state_when_ready() -> None:
@@ -165,10 +228,12 @@ def test_health_reports_classifier_state_when_ready() -> None:
     api_app._state.scorer = cast(Any, FakeScorer())
     api_app._state.enricher = cast(Any, object())
 
-    response = asyncio.run(api_app.health())
+    http_response = Response()
+    response = asyncio.run(api_app.health(http_response))
 
     assert response.status == "healthy"
     assert response.models_loaded["classifier"] is True
+    assert http_response.status_code == 200
 
 
 def test_health_drift_returns_503_when_detector_not_configured() -> None:
@@ -368,13 +433,31 @@ def test_reload_models_requires_scorer_and_replaces_it(monkeypatch) -> None:
         "load_config",
         lambda path: {"scoring": {"routing": {"high": "0.90"}}},
     )
-    monkeypatch.setattr(api_app, "LogScorer", lambda config: "new-scorer")
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "new-scorer")
 
     response = asyncio.run(api_app.reload_models())
 
     assert response == {"status": "reloaded"}
     assert api_app._state.config == {"scoring": {"routing": {"high": "0.90"}}}
     assert api_app._state.scorer == "new-scorer"
+
+
+def test_reload_models_preserves_model_version(monkeypatch) -> None:
+    api_app._state.scorer = cast(Any, FakeScorer())
+    monkeypatch.setenv("LOGFILTER_MODEL_VERSION", "v9.9.9")
+    monkeypatch.setattr(api_app, "load_config", lambda path: {})
+
+    captured: dict[str, str] = {}
+
+    def _fake_logscorer(config, model_version=""):
+        captured["model_version"] = model_version
+        return "new-scorer"
+
+    monkeypatch.setattr(api_app, "LogScorer", _fake_logscorer)
+
+    asyncio.run(api_app.reload_models())
+
+    assert captured["model_version"] == "v9.9.9"
 
 
 def test_metrics_endpoint_returns_prometheus_payload() -> None:
@@ -438,8 +521,10 @@ def test_score_batch_empty_events() -> None:
     class FakeEmptyBatch:
         events = []
 
+    payload = cast(BatchScoreRequest, FakeEmptyBatch())
+
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(api_app.score_batch(FakeEmptyBatch()))  # type: ignore[arg-type]
+        asyncio.run(api_app.score_batch(payload))
     assert exc_info.value.status_code == 400
 
 
@@ -482,7 +567,9 @@ def test_health_with_tier2_classifier(monkeypatch) -> None:
     api_app._state.scorer = cast(Any, FakeScorerWithTier2())
     api_app._state.enricher = cast(Any, object())
 
-    response = asyncio.run(api_app.health())
+    http_response = Response()
+    response = asyncio.run(api_app.health(http_response))
+
     assert response.models_loaded["tier2_classifier"] is True
 
 

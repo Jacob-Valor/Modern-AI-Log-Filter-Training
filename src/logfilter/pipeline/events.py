@@ -57,6 +57,9 @@ class ScoredEvent:
     ai_confidence: float = 0.0  # Average model confidence
     ai_entities: str = ""  # Comma-separated entity string
 
+    # Degraded scoring flag
+    score_degraded: bool = False
+
     # Timing
     scoring_latency_ms: float = 0.0
 

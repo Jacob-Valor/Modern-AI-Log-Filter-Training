@@ -153,6 +153,7 @@ class LEEFEnricher:
         attrs["ai_sigma_rules"] = _sanitise(",".join(scored.sigma_rule_ids))
         attrs["ai_source_type"] = _sanitise(scored.source_type)
         attrs["ai_scoring_latency_ms"] = f"{scored.scoring_latency_ms:.1f}"
+        attrs["degraded"] = "1" if scored.score_degraded else "0"
 
         attrs["raw_log_ref"] = _sanitise(es_doc_id)
 

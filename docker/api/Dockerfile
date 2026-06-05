@@ -33,8 +33,7 @@ RUN mkdir -p "${HF_CACHE_DIR}" \
     && HF_HOME="${HF_CACHE_DIR}" python scripts/download_hf_models.py \
         --config config/config.yaml \
         --cache-dir "${HF_CACHE_DIR}" \
-        $( [ -n "${HF_TOKEN}" ] && echo "--token ${HF_TOKEN}" ) \
-    || echo "WARNING: Model download failed; will fallback to runtime fetch"
+        $( [ -n "${HF_TOKEN}" ] && echo "--token ${HF_TOKEN}" )
 
 # Non-root user
 RUN useradd -m -u 1000 logfilter \

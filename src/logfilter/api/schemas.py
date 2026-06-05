@@ -101,6 +101,14 @@ class ScoreResponse(BaseModel):
     entity_boost: float
     cross_encoder_max: float
 
+    # Degraded scoring
+    score_degraded: bool = Field(
+        description=(
+            "True when classifier failed or no model was loaded, "
+            "so the score is a best-effort degraded placeholder"
+        )
+    )
+
     # Metadata
     source_type: str
     host: str

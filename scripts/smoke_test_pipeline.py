@@ -200,7 +200,16 @@ def test_leef_enricher() -> bool:
         ("raw_log_ref", "raw_log_ref=es-doc-abc123" in leef),
         ("src field mapped", "src=10.0.0.5" in leef),
         ("usrName mapped", "usrName=root" in leef),
-        ("tab-delimited attrs", "\t" in leef.split("|^|")[1]),
+        (
+            "tab-delimited attrs",
+            # B19: LEEF header declares \t as the delimiter (|\t|) and the
+            # attribute section is joined with \t. A correctly formatted LEEF
+            # with N attrs has N+1 tab characters (1 in the header, 1 per attr
+            # boundary). The previous check used "|^|" which is no longer in
+            # the format — LEEF now uses \t for both header delimiter and
+            # attribute separator to avoid parser ambiguity.
+            leef.count("\t") > 1,
+        ),
     ]
 
     for name, result in checks:
@@ -390,7 +399,9 @@ def test_scorer_mocked() -> bool:
         )
         normalized = normalizer.normalize(raw)
         scored = scorer.score(normalized)
-        leef = enricher.enrich(scored)
+        # B8: enrich() now requires es_doc_id for chain-of-custody. The smoke
+        # test runs with mocked models, so the archive ref is synthetic.
+        leef = enricher.enrich(scored, es_doc_id="es-doc-smoke-test")
 
         checks = [
             ("score > 0", scored.ai_threat_score > 0),

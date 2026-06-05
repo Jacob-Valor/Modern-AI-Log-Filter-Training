@@ -217,6 +217,12 @@ class LogClassifier:
             return int(self._xgb_model.n_features_in_)
         return 0
 
+    def is_loaded(self) -> bool:
+        """Return True if the model has been loaded successfully."""
+        if self._session is None and self._xgb_model is None:
+            self._load()
+        return self._session is not None or self._xgb_model is not None
+
     def is_ready(self) -> bool:
         """Return True if the model has been loaded successfully."""
         return self._session is not None or self._xgb_model is not None

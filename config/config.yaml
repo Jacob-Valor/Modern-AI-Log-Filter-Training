@@ -9,7 +9,7 @@ kafka:
     archived: "archived-logs"
     dlq: "logfilter-dlq"
   consumer_group: "logfilter-scorer"
-  auto_offset_reset: "latest"
+  auto_offset_reset: "earliest"
   max_poll_records: 500
   security:
     protocol: "${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}"

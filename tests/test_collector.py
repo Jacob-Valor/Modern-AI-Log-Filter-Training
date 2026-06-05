@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import socket
 from typing import cast
+
+import pytest
 
 from logfilter import collector as collector_module
 from logfilter.collector import CollectorSettings, SyslogCollector
@@ -31,6 +35,8 @@ def _collector(allowed_cidrs: str = "10.0.0.0/24") -> tuple[SyslogCollector, Fak
             bootstrap_servers="localhost:9092",
             raw_topic="raw-logs",
             kafka_config={},
+            max_tcp_line_bytes=16,
+            max_tcp_connections=2,
         )
     )
     producer = FakeProducer()
@@ -110,3 +116,175 @@ def test_publish_ignores_empty_messages() -> None:
     collector.publish("  ", peer_host="10.0.0.5", protocol="udp")
 
     assert producer.sent == []
+
+
+class FakeTCPConnection:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.closed = False
+        self.timeout = 0.0
+
+    def __enter__(self) -> FakeTCPConnection:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def recv(self, size: int) -> bytes:
+        if self.chunks:
+            return self.chunks.pop(0)
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_tcp_client_drops_oversized_unterminated_buffer() -> None:
+    collector, producer = _collector("10.0.0.0/24")
+    connection = FakeTCPConnection([b"x" * 17])
+
+    collector.serve_tcp_client(cast(socket.socket, connection), "10.0.0.5")
+
+    assert producer.sent == []
+    assert connection.closed is True
+
+
+def test_tcp_client_drops_oversized_line() -> None:
+    collector, producer = _collector("10.0.0.0/24")
+    connection = FakeTCPConnection([b"x" * 17 + b"\n"])
+
+    collector.serve_tcp_client(cast(socket.socket, connection), "10.0.0.5")
+
+    assert producer.sent == []
+
+
+def test_tcp_connection_slots_reject_when_full() -> None:
+    collector, _producer = _collector("10.0.0.0/24")
+    assert collector._tcp_slots.acquire(blocking=False)
+    assert collector._tcp_slots.acquire(blocking=False)
+
+    connection = FakeTCPConnection([])
+
+    assert collector._start_tcp_client_if_slot_available(
+        cast(socket.socket, connection), "10.0.0.5"
+    ) is None
+    assert connection.closed is True
+
+
+class BrokenProducer:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.closed = False
+
+    def send(self, **kwargs) -> None:
+        raise RuntimeError("kafka down")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_publish_spools_on_producer_failure(tmp_path) -> None:
+    spool_path = tmp_path / "spool.ndjson"
+    collector = SyslogCollector(
+        CollectorSettings(
+            listen_host="127.0.0.1",
+            listen_port=5140,
+            allowed_cidrs=CIDRAllowlist.from_csv("10.0.0.0/24"),
+            bootstrap_servers="localhost:9092",
+            raw_topic="raw-logs",
+            kafka_config={},
+            spool_path=spool_path,
+            max_spool_bytes=1_000_000,
+        )
+    )
+    producer = BrokenProducer()
+    collector.producer = cast(LogProducer, producer)
+
+    collector.publish("test event", peer_host="10.0.0.5", protocol="udp")
+
+    assert producer.sent == []
+    assert spool_path.exists()
+    lines = spool_path.read_text().strip().split("\n")
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["raw"] == "test event"
+    assert record["host"] == "10.0.0.5"
+
+
+def test_publish_raises_when_no_spool_and_producer_fails() -> None:
+    collector = SyslogCollector(
+        CollectorSettings(
+            listen_host="127.0.0.1",
+            listen_port=5140,
+            allowed_cidrs=CIDRAllowlist.from_csv("10.0.0.0/24"),
+            bootstrap_servers="localhost:9092",
+            raw_topic="raw-logs",
+            kafka_config={},
+        )
+    )
+    producer = BrokenProducer()
+    collector.producer = cast(LogProducer, producer)
+
+    with pytest.raises(RuntimeError, match="kafka down"):
+        collector.publish("test event", peer_host="10.0.0.5", protocol="udp")
+
+
+def test_bounded_spool_enforces_max_bytes(tmp_path) -> None:
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=25)
+
+    spool.write({"n": 1})
+    spool.write({"n": 2})
+    spool.write({"n": 3})
+
+    lines = spool_path.read_text().strip().split("\n")
+    assert len(lines) < 3
+    records = [json.loads(line) for line in lines]
+    assert records[-1]["n"] == 3
+
+
+def test_drain_replays_and_removes_successful_records(tmp_path) -> None:
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+
+    spool.write({"raw": "event1", "host": "h1"})
+    spool.write({"raw": "event2", "host": "h2"})
+
+    replayed: list[dict] = []
+
+    def callback(record: dict) -> None:
+        replayed.append(record)
+
+    count = spool.drain(callback)
+    assert count == 2
+    assert len(replayed) == 2
+    assert replayed[0]["raw"] == "event1"
+    assert replayed[1]["raw"] == "event2"
+    assert spool_path.read_text().strip() == ""
+
+
+def test_drain_keeps_records_that_raise(tmp_path) -> None:
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+
+    spool.write({"raw": "event1", "host": "h1"})
+    spool.write({"raw": "event2", "host": "h2"})
+
+    def callback(record: dict) -> None:
+        if record["raw"] == "event1":
+            raise RuntimeError("boom")
+
+    count = spool.drain(callback)
+    assert count == 1
+    lines = spool_path.read_text().strip().split("\n")
+    assert len(lines) == 1
+    assert json.loads(lines[0])["raw"] == "event1"

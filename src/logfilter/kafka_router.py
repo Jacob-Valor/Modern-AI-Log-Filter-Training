@@ -41,6 +41,7 @@ class RouterSettings:
     scored_topic: str
     dlq_topic: str | None
     consumer_group: str
+    auto_offset_reset: str
     max_poll_records: int
     poll_timeout_ms: int
     api_url: str
@@ -67,8 +68,9 @@ def _settings() -> RouterSettings:
         dlq_topic=topics.get("dlq"),
         consumer_group=os.environ.get(
             "ROUTER_CONSUMER_GROUP",
-            kafka_cfg.get("consumer_group", "logfilter-scorer"),
+            kafka_cfg.get("router_consumer_group", "logfilter-router"),
         ),
+        auto_offset_reset=kafka_cfg.get("auto_offset_reset", "earliest"),
         max_poll_records=int(kafka_cfg.get("max_poll_records", 100)),
         poll_timeout_ms=int(os.environ.get("ROUTER_POLL_TIMEOUT_MS", "1000")),
         api_url=os.environ.get("LOGFILTER_API_URL", "http://logfilter-api:8080").rstrip("/"),
@@ -96,7 +98,7 @@ class KafkaQRadarRouter:
             settings.raw_topic,
             bootstrap_servers=settings.bootstrap_servers,
             group_id=settings.consumer_group,
-            auto_offset_reset="latest",
+            auto_offset_reset=settings.auto_offset_reset,
             enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             max_poll_records=settings.max_poll_records,
@@ -279,6 +281,94 @@ class KafkaQRadarRouter:
             self.sender.close()
             self.http.close()
             logger.info("Kafka QRadar router stopped")
+
+
+class DLQReplay:
+    """Replay dead-lettered messages back to their original topic.
+
+    Consumes from the DLQ topic, extracts the original payload, and
+    re-publishes it to ``original_topic`` with a replay counter so the
+    router can apply a replay-specific consumer group.
+    """
+
+    def __init__(self, settings: RouterSettings) -> None:
+        self.settings = settings
+        self.producer = KafkaProducer(
+            bootstrap_servers=settings.bootstrap_servers,
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            key_serializer=lambda k: k.encode("utf-8") if k else None,
+            acks="all",
+            retries=5,
+            max_in_flight_requests_per_connection=1,
+            **kafka_security_kwargs(settings.kafka_config),
+        )
+        self.consumer = KafkaConsumer(
+            settings.dlq_topic,
+            bootstrap_servers=settings.bootstrap_servers,
+            group_id=f"{settings.consumer_group}-dlq-replay",
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            max_poll_records=settings.max_poll_records,
+            **kafka_security_kwargs(settings.kafka_config),
+        )
+        self.running = True
+
+    def _replay(self, dlq_record: dict[str, Any]) -> dict[str, Any] | None:
+        original = dlq_record.get("original")
+        if not isinstance(original, dict):
+            return None
+        original_topic = dlq_record.get("original_topic", self.settings.raw_topic)
+        replay_count = original.get("_dlq_replay_count", 0) + 1
+        if replay_count > 3:
+            return None
+        original["_dlq_replay_count"] = replay_count
+        return {"original": original, "original_topic": original_topic}
+
+    def _publish(self, replay: dict[str, Any]) -> None:
+        self.producer.send(
+            replay["original_topic"],
+            value=replay["original"],
+            key=replay["original"].get("host", "unknown"),
+        )
+        self.producer.flush(timeout=10)
+
+    def run(
+        self, max_messages: int | None = None, max_empty_polls: int = 3
+    ) -> None:  # pragma: no cover
+        logger.info("DLQ replay started", dlq_topic=self.settings.dlq_topic)
+        processed = 0
+        empty_polls = 0
+        try:
+            while self.running:
+                records = self.consumer.poll(timeout_ms=self.settings.poll_timeout_ms)
+                if not records:
+                    empty_polls += 1
+                    if empty_polls >= max_empty_polls:
+                        break
+                    continue
+                empty_polls = 0
+                for messages in records.values():
+                    for msg in messages:
+                        if max_messages is not None and processed >= max_messages:
+                            self.running = False
+                            break
+                        replay = self._replay(msg.value)
+                        if replay is None:
+                            continue
+                        self._publish(replay)
+                        processed += 1
+                    if not self.running:
+                        break
+                if max_messages is not None and processed >= max_messages:
+                    self.running = False
+                self.consumer.commit()
+                if not self.running:
+                    break
+        finally:
+            self.consumer.close()
+            self.producer.close()
+            logger.info("DLQ replay stopped")
 
 
 def main() -> None:  # pragma: no cover
