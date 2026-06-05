@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir -e . --no-deps
 # Set empty revisions to download the default branch; override with build args
 # to pin exact commits for reproducible builds.
 ARG HF_TOKEN=""
-ARG HF_CACHE_DIR="/app/models/hf-cache"
+ARG HF_CACHE_DIR="/app/hf-cache"
 RUN mkdir -p "${HF_CACHE_DIR}" \
     && HF_HOME="${HF_CACHE_DIR}" python scripts/download_hf_models.py \
         --config config/config.yaml \
@@ -42,7 +42,7 @@ RUN useradd -m -u 1000 logfilter \
     && chown -R logfilter:logfilter /app /home/logfilter/.cache
 USER logfilter
 
-ENV HF_HOME=/app/models/hf-cache
+ENV HF_HOME=/app/hf-cache
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

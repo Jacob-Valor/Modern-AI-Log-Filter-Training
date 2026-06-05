@@ -222,7 +222,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./models:/app/models:ro          # trained ONNX + scaler
-      - hf-cache:/home/logfilter/.cache  # HuggingFace model cache
+      - hf-cache:/app/hf-cache:rw        # HuggingFace model cache (matches HF_HOME in Dockerfile)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s

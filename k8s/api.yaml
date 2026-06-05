@@ -37,8 +37,8 @@ spec:
             - /app/scripts/download_hf_models.py
             - --config
             - /app/config/config.yaml
-            - --cache-dir
-            - /app/models/hf-cache
+              - --cache-dir
+              - /app/hf-cache
           env:
             - name: HF_TOKEN
               valueFrom:
@@ -51,7 +51,7 @@ spec:
               mountPath: /app/config
               readOnly: true
             - name: hf-cache
-              mountPath: /app/models/hf-cache
+              mountPath: /app/hf-cache
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -120,9 +120,9 @@ spec:
             - name: LOGFILTER_ENABLE_DOCS
               value: "0"
             - name: LOGFILTER_MODEL_VERSION
-              value: ""
+              value: "0.1.0"
             - name: HF_HOME
-              value: "/app/models/hf-cache"
+              value: "/app/hf-cache"
           resources:
             requests:
               memory: "2Gi"
@@ -138,7 +138,7 @@ spec:
               mountPath: /app/models
               readOnly: true
             - name: hf-cache
-              mountPath: /app/models/hf-cache
+              mountPath: /app/hf-cache
             - name: tmp
               mountPath: /tmp
       volumes:

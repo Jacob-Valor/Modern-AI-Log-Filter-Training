@@ -38,5 +38,7 @@ training/
 # CI/ops (not needed at runtime)
 .github/
 k8s/
-scripts/
+# scripts/ excluded EXCEPT download_hf_models.py (required by docker/api/Dockerfile:22)
+scripts/*
+!scripts/download_hf_models.py
 agents/

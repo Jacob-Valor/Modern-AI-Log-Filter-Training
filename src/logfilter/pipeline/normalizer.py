@@ -88,6 +88,8 @@ class NormalizedEvent:
     text        : Human-readable text fed to SecureBERT2.0 models
     raw         : Original raw log string (preserved for forensic replay)
     fields      : Parsed key-value pairs (for LEEF enrichment and ES archiving)
+    raw_log_ref : sha256 hex chain-of-custody ref (B8); set by the caller
+                  after normalise() (we don't have ingest_ts in the parser).
     """
 
     source_type: LogSourceType
@@ -96,6 +98,7 @@ class NormalizedEvent:
     text: str
     raw: str
     fields: dict[str, Any] = field(default_factory=dict)
+    raw_log_ref: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +108,7 @@ class NormalizedEvent:
             "text": self.text,
             "raw": self.raw,
             "fields": self.fields,
+            "raw_log_ref": self.raw_log_ref,
         }
 
 

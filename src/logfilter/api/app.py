@@ -23,6 +23,7 @@ from typing import Any
 
 import structlog
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -52,6 +53,7 @@ from logfilter.api.security import (
 )
 from logfilter.config import load_config
 from logfilter.monitoring.drift_detector import DriftStatus
+from logfilter.pipeline.archive import LogArchive, compute_raw_log_ref
 from logfilter.pipeline.enricher import LEEFEnricher
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
 from logfilter.pipeline.scorer import LogScorer
@@ -93,6 +95,7 @@ class AppState:
         self.normalizer: LogNormalizer = LogNormalizer()
         self.scorer: LogScorer | None = None
         self.enricher: LEEFEnricher | None = None
+        self.archiver: LogArchive | None = None
         self.start_time: float = time.monotonic()
         self.redis_client: Any | None = None
         self.rate_limiter: RedisRateLimiter | None = None
@@ -232,6 +235,104 @@ def _source_hint(source_type_str: str | None) -> LogSourceType | None:
         return LogSourceType(source_type_str.lower())
     except ValueError:
         return None
+
+
+def _ingest_ts(normalized_timestamp: str) -> float:
+    """Parse a NormalizedEvent.timestamp into epoch seconds; fallback to now()."""
+    if not normalized_timestamp:
+        return time.time()
+    from datetime import datetime, timezone
+
+    try:
+        normalised = normalized_timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalised)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return time.time()
+
+
+def _archive_then_score(normalized, caller_ref: str | None) -> str:
+    """
+    Resolve the chain-of-custody ref and best-effort archive to ES (B8).
+
+    Resolution order:
+      1. caller-supplied ref (e.g. already-archived upstream)
+      2. local sha256 of (raw + source + host + ingest_ts)
+      3. attempt ES ``write_with_id`` if archiver is configured
+
+    If archiver is None or ES write fails, we still return a deterministic
+    ref so the LEEF payload carries valid chain-of-custody — but the caller
+    is responsible for ensuring the raw log is archived somewhere reachable
+    by this ref.
+    """
+    ingest_ts = _ingest_ts(normalized.timestamp)
+    raw_log_ref = caller_ref or compute_raw_log_ref(
+        normalized.raw,
+        normalized.source_type.value if hasattr(normalized.source_type, "value") else str(normalized.source_type),
+        normalized.host,
+        ingest_ts,
+    )
+    if _state.archiver is not None:
+        try:
+            _state.archiver.write_with_id(
+                raw_log_ref=raw_log_ref,
+                raw=normalized.raw,
+                source_type=normalized.source_type.value
+                if hasattr(normalized.source_type, "value")
+                else str(normalized.source_type),
+                host=normalized.host,
+                ingest_ts=ingest_ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ES archive failed; raw_log_ref is local-only",
+                raw_log_ref=raw_log_ref,
+                error=str(exc),
+            )
+    return raw_log_ref
+
+
+def _do_score_sync(raw: str, source_type: str | None, raw_log_ref: str | None):
+    """
+    Synchronous helper: normalize → archive → score → enrich.
+
+    Returns ``(scored, leef)`` and is invoked from async handlers via
+    ``run_in_threadpool`` so the CPU-bound scorer and the blocking ES
+    write do not stall the FastAPI event loop (AGENTS.md: never block
+    the loop with sync CPU or I/O).
+    """
+    normalized = _state.normalizer.normalize(raw, source_type_hint=_source_hint(source_type))
+    es_doc_id = _archive_then_score(normalized, raw_log_ref)
+    scored = _state.scorer.score(normalized) if _state.scorer is not None else None
+    leef = _state.enricher.enrich(scored, es_doc_id=es_doc_id) if _state.enricher is not None else None
+    return scored, leef
+
+
+def _do_score_batch_sync(
+    raws: list[str],
+    source_types: list[str | None],
+    raw_log_refs: list[str | None],
+):
+    """
+    Synchronous batch helper. Mirrors ``_do_score_sync`` for the batch endpoint.
+    """
+    normalized_events = [
+        _state.normalizer.normalize(r, source_type_hint=_source_hint(st))
+        for r, st in zip(raws, source_types)
+    ]
+    es_doc_ids = [
+        _archive_then_score(norm, ref)
+        for norm, ref in zip(normalized_events, raw_log_refs)
+    ]
+    scored_events = _state.scorer.score_batch(normalized_events) if _state.scorer is not None else None
+    leef_payloads = (
+        _state.enricher.enrich_batch(scored_events, es_doc_ids=es_doc_ids)
+        if _state.enricher is not None
+        else None
+    )
+    return scored_events, leef_payloads
 
 
 def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
@@ -431,9 +532,9 @@ async def score_event(
 
         hint = _source_hint(payload.source_type)
         try:
-            normalized = _state.normalizer.normalize(payload.raw, source_type_hint=hint)
-            scored = _state.scorer.score(normalized)
-            leef = _state.enricher.enrich(scored)
+            scored, leef = await run_in_threadpool(
+                _do_score_sync, payload.raw, payload.source_type, payload.raw_log_ref
+            )
         except (ValueError, TypeError, KeyError) as exc:
             telemetry.record_exception(span, exc)
             logger.warning("Score request rejected", error=str(exc))
@@ -487,12 +588,12 @@ async def score_batch(
         _batch_size_histogram.observe(len(payload.events))
 
         try:
-            normalized_events = [
-                _state.normalizer.normalize(ev.raw, source_type_hint=_source_hint(ev.source_type))
-                for ev in payload.events
-            ]
-            scored_events = _state.scorer.score_batch(normalized_events)
-            leef_payloads = _state.enricher.enrich_batch(scored_events)
+            scored_events, leef_payloads = await run_in_threadpool(
+                _do_score_batch_sync,
+                [ev.raw for ev in payload.events],
+                [ev.source_type for ev in payload.events],
+                [ev.raw_log_ref for ev in payload.events],
+            )
         except (ValueError, TypeError, KeyError) as exc:
             telemetry.record_exception(span, exc)
             logger.warning("Batch score request rejected", error=str(exc))

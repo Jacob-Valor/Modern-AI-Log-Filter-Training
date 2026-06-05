@@ -69,6 +69,17 @@ class LogArchive:
     def _today_index(self) -> str:
         return f"{self.index_prefix}-{time.strftime('%Y.%m.%d')}"
 
+    def _index_for_ts(self, ingest_ts: float) -> str:
+        """
+        Resolve the daily index name for a given ingest timestamp (epoch seconds).
+
+        This is the canonical way to derive the index from an envelope timestamp
+        (see B8 acceptance condition): we MUST use the event's ingest time, not
+        ``time.time()`` at write time, so the index name reflects when the event
+        actually happened (matters for late-arriving events crossing midnight UTC).
+        """
+        return f"{self.index_prefix}-{time.strftime('%Y.%m.%d', time.gmtime(ingest_ts))}"
+
     def _ensure_index_template(self) -> None:
         """Create an index template so daily indices inherit correct mappings."""
         template = {
@@ -105,6 +116,7 @@ class LogArchive:
         source_type: str = "generic",
         host: str = "unknown",
         extra: dict[str, Any] | None = None,
+        ingest_ts: float | None = None,
     ) -> str:
         """
         Write a single raw log event and return its Elasticsearch document ID.
@@ -115,19 +127,61 @@ class LogArchive:
         source_type : str
         host : str
         extra : dict  Additional metadata fields.
+        ingest_ts : float | None
+            Epoch seconds. When provided, the index name is derived from this
+            timestamp (B8); defaults to ``time.time()`` at write time.
 
         Returns
         -------
         str — The assigned document ID (used as raw_log_ref in LEEF).
         """
+        if ingest_ts is None:
+            ingest_ts = time.time()
         doc = {
             "raw": raw,
             "source_type": source_type,
             "host": host,
-            "ingest_ts": time.time(),
+            "ingest_ts": ingest_ts,
             **(extra or {}),
         }
-        result = self._es.index(index=self._today_index(), body=doc)
+        result = self._es.index(index=self._index_for_ts(ingest_ts), body=doc)
+        return result["_id"]
+
+    def write_with_id(
+        self,
+        raw_log_ref: str,
+        raw: str,
+        source_type: str = "generic",
+        host: str = "unknown",
+        ingest_ts: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> str:
+        """
+        Write a raw log to ES with a caller-supplied document ID (B8).
+
+        This is the chain-of-custody primitive: the caller computes
+        ``raw_log_ref`` (sha256 of raw+source+host+ingest_ts) and we attach the
+        event with ``op_type=create`` so re-using a ref fails fast. The
+        enrichment stage then embeds the SAME ref as ``raw_log_ref`` in LEEF,
+        giving SIEM operators a single click to retrieve the original log.
+
+        Raises ``elasticsearch.ConflictError`` if the ref already exists.
+        """
+        if ingest_ts is None:
+            ingest_ts = time.time()
+        doc = {
+            "raw": raw,
+            "source_type": source_type,
+            "host": host,
+            "ingest_ts": ingest_ts,
+            **(extra or {}),
+        }
+        result = self._es.index(
+            index=self._index_for_ts(ingest_ts),
+            id=raw_log_ref,
+            op_type="create",
+            body=doc,
+        )
         return result["_id"]
 
     def write_bulk(self, events: list[dict[str, Any]]) -> list[str]:
@@ -202,3 +256,35 @@ class LogArchive:
             return dict(self._es.cluster.health())
         except Exception as exc:  # noqa: BLE001
             return {"status": "unavailable", "error": str(exc)}
+
+
+def compute_raw_log_ref(
+    raw: str,
+    source_type: str,
+    host: str,
+    ingest_ts: float,
+) -> str:
+    """
+    Deterministic chain-of-custody reference for a raw log event.
+
+    Hash inputs include the raw payload, source type, host, and ingest
+    timestamp so an identical re-ingest of the same event produces the same
+    ref (idempotent) but two different hosts or timestamps produce different
+    refs (collision-resistant for the same payload arriving twice).
+
+    Returns 64-char lowercase hex (sha256).
+    """
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        {
+            "raw": raw,
+            "source_type": source_type,
+            "host": host,
+            "ingest_ts": round(float(ingest_ts), 6),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

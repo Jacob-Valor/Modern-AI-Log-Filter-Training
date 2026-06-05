@@ -36,7 +36,7 @@ elasticsearch:
 
 # ── HuggingFace cache ────────────────────────────────────────────────────────
 # Shared cache directory for downloaded transformer models.
-# Set HF_HOME env var to override (e.g. /app/models/hf-cache for K8s PVC).
+# Set HF_HOME env var to override (e.g. /app/hf-cache for K8s PVC).
 cache_dir: "${HF_HOME:}"
 
 # ── Models ───────────────────────────────────────────────────────────────────

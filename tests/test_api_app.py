@@ -294,10 +294,10 @@ class FakeScorer:
 
 
 class FakeEnricher:
-    def enrich(self, scored):
+    def enrich(self, scored, es_doc_id: str = "fake-doc-id"):
         return "leef"
 
-    def enrich_batch(self, scored_events):
+    def enrich_batch(self, scored_events, es_doc_ids=None):
         return [f"leef-{i}" for i, _ in enumerate(scored_events)]
 
 

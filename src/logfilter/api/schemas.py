@@ -20,6 +20,17 @@ class ScoreRequest(BaseModel):
         None,
         description=("Optional hint: syslog | winevent | firewall | endpoint | cloudtrail | web"),
     )
+    raw_log_ref: str | None = Field(
+        None,
+        description=(
+            "Optional caller-supplied chain-of-custody ref (64-char sha256 hex). "
+            "If provided, the API uses this ref in the LEEF ``raw_log_ref`` field "
+            "instead of computing one locally — use this when the caller has "
+            "already archived the raw event elsewhere."
+        ),
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -137,7 +148,7 @@ class ScoreResponse(BaseModel):
                 ),
                 "scoring_latency_ms": 45.3,
                 "leef_payload": (
-                    "LEEF:2.0|YourCo|AIPreprocessor|1.0|LOG_EVENT|^|"
+                    "LEEF:2.0|YourCo|AIPreprocessor|1.0|LOG_EVENT|\t|"
                     "ai_threat_score=0.8700\t..."
                 ),
             }

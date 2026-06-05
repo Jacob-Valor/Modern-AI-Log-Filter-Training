@@ -125,12 +125,12 @@ Leave empty to use the default branch head.
 ### Docker image (baked models)
 
 The API Dockerfile runs `scripts/download_hf_models.py` during the build.
-Models are cached in `/app/models/hf-cache` and the image is self-contained.
+Models are cached in `/app/hf-cache` and the image is self-contained.
 Override the target directory with the `HF_CACHE_DIR` build arg:
 
 ```bash
 docker build -f docker/api/Dockerfile \
-  --build-arg HF_CACHE_DIR=/app/models/hf-cache \
+  --build-arg HF_CACHE_DIR=/app/hf-cache \
   --build-arg HF_TOKEN=$HF_TOKEN \
   -t logfilter-api:latest .
 ```
@@ -147,7 +147,7 @@ gated or private.
 ```bash
 python scripts/download_hf_models.py \
   --config config/config.yaml \
-  --cache-dir /mnt/hf-cache \
+  --cache-dir /app/hf-cache \
   --model all
 ```
 

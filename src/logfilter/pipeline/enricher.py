@@ -22,7 +22,6 @@ QRadar-compatible custom properties added:
 
 from __future__ import annotations
 
-import base64
 import re
 from datetime import datetime, timezone
 
@@ -33,12 +32,16 @@ from logfilter.pipeline.events import ScoredEvent
 logger = structlog.get_logger(__name__)
 
 # LEEF 2.0 allows a custom delimiter character declared in the header.
-# We use ^ (caret) as delimiter inside the attribute section.
-_LEEF_DELIMITER = "^"
+# B19: tab is the QRadar-default attribute delimiter; declare the same char in
+# the header (after the EventID) so consumers know the split. We previously
+# declared "^" as header delimiter while using "\t" as attr separator — that
+# ambiguity broke parsers. Now BOTH use "\t".
+_LEEF_DELIMITER = "\t"  # declared in the LEEF header
 _LEEF_ATTR_SEP = "\t"  # tab separates key=value pairs
 
-# Fields that may contain the ^ delimiter — sanitise before embedding
-_SANITISE_PATTERN = re.compile(r"[|\^\t\r\n]")
+# Sanitise LEEF-unsafe characters from values: | ends the header, tab is the
+# delimiter/separator (B19), and \r\n would break single-line framing.
+_SANITISE_PATTERN = re.compile(r"[|\t\r\n]")
 
 
 def _sanitise(value: str) -> str:
@@ -70,7 +73,7 @@ class LEEFEnricher:
         self.product = product
         self.version = version
 
-    def enrich(self, scored: ScoredEvent, es_doc_id: str = "") -> str:
+    def enrich(self, scored: ScoredEvent, es_doc_id: str) -> str:
         """
         Build a LEEF 2.0 string from a scored event.
 
@@ -79,14 +82,21 @@ class LEEFEnricher:
         scored : ScoredEvent
             Output of LogScorer.score() or score_batch().
         es_doc_id : str
-            Elasticsearch document ID of the archived raw log. If empty,
-            the raw log is base64-encoded inline as raw_log_b64.
+            Elasticsearch document ID of the archived raw log. **Required**:
+            the chain-of-custody reference. Callers must archive the raw event
+            FIRST (via ``LogArchive.write_with_id``) and pass the same ID.
 
         Returns
         -------
         str
             Ready-to-send LEEF 2.0 formatted string (single line, tab-delimited attrs).
         """
+        if not es_doc_id:
+            raise ValueError(
+                "es_doc_id is required for chain-of-custody. Archive the raw event "
+                "first via LogArchive.write_with_id() and pass the returned ref."
+            )
+
         # ── Determine source event ID ─────────────────────────────────────────
         # Use the original EventID if present in parsed fields, else generate one
         event_id = str(
@@ -109,8 +119,10 @@ class LEEFEnricher:
         if "src_ip" in scored.fields:
             attrs["src"] = _sanitise(scored.fields["src_ip"])
         if scored.host and scored.host != "unknown":
-            attrs["devTime"] = _sanitise(scored.timestamp or _utcnow())
-            attrs["devTimeFormat"] = "MMM dd yyyy HH:mm:ss"
+            # B15: emit epoch milliseconds (13-digit) which QRadar accepts as
+            # an unambiguous timestamp; we no longer declare a devTimeFormat
+            # because the value is already a numeric epoch.
+            attrs["devTime"] = _epoch_millis(scored.timestamp)
         if "dst" in scored.fields or "dst_ip" in scored.fields:
             attrs["dst"] = _sanitise(scored.fields.get("dst", scored.fields.get("dst_ip", "")))
         if "user" in scored.fields:
@@ -142,26 +154,34 @@ class LEEFEnricher:
         attrs["ai_source_type"] = _sanitise(scored.source_type)
         attrs["ai_scoring_latency_ms"] = f"{scored.scoring_latency_ms:.1f}"
 
-        # ── Forensic chain-of-custody ──────────────────────────────────────────
-        if es_doc_id:
-            attrs["raw_log_ref"] = _sanitise(es_doc_id)
-        else:
-            # Embed raw log as base64 when no ES reference is available
-            raw_b64 = base64.b64encode(scored.raw.encode("utf-8", errors="replace")).decode()
-            attrs["raw_log_b64"] = raw_b64[:4096]  # cap at 4KB
+        attrs["raw_log_ref"] = _sanitise(es_doc_id)
 
         # ── Assemble final LEEF string ─────────────────────────────────────────
         attr_string = _LEEF_ATTR_SEP.join(f"{k}={v}" for k, v in attrs.items() if v)
         return header + attr_string
 
     def enrich_batch(
-        self, scored_events: list[ScoredEvent], es_doc_ids: list[str] | None = None
+        self, scored_events: list[ScoredEvent], es_doc_ids: list[str]
     ) -> list[str]:
-        """Enrich a batch of events. es_doc_ids must match scored_events length."""
-        if es_doc_ids is None:
-            es_doc_ids = [""] * len(scored_events)
+        """Enrich a batch of events. es_doc_ids must match scored_events length (B8)."""
+        if len(es_doc_ids) != len(scored_events):
+            raise ValueError(
+                f"enrich_batch: es_doc_ids length {len(es_doc_ids)} != "
+                f"scored_events length {len(scored_events)}"
+            )
         return [self.enrich(ev, doc_id) for ev, doc_id in zip(scored_events, es_doc_ids)]
 
 
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+def _epoch_millis(timestamp: str | None) -> str:
+    """Convert an ISO8601 timestamp to epoch milliseconds (13-digit string)."""
+    if not timestamp:
+        return str(int(datetime.now(tz=timezone.utc).timestamp() * 1000))
+    try:
+        # ``fromisoformat`` (3.10) handles "+00:00" but not trailing "Z".
+        normalised = timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalised)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return str(int(dt.timestamp() * 1000))
+    except (ValueError, TypeError):
+        return str(int(datetime.now(tz=timezone.utc).timestamp() * 1000))
