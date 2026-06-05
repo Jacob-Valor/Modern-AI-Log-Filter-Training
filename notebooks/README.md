@@ -11,25 +11,28 @@ Keep reusable training logic in `training/`. Notebooks should call the scripts o
 | `kaggle_train_classifier.ipynb` | Tier-1 XGBoost classifier (bag-of-events) | `models/` | `src/logfilter/models/classifier.py` |
 | `kaggle_train_transformer.ipynb` | Tier-2 SecureBERT2.0-base classifier (text windows) | `models/tier2/` | `src/logfilter/models/tier2_classifier.py` |
 | `kaggle_pretrain_mlm.ipynb` | Continued MLM pre-training of SecureBERT2.0-base on log corpus | `models/securebert2-logs-mlm/final/` | All downstream encoders below (optional but recommended) |
-| `kaggle_train_ner.ipynb` | SecureBERT2.0-NER fine-tuned on log-domain entities (regex weak supervision) | `models/ner/final/` | `src/logfilter/models/ner.py` |
+| `kaggle_train_ner.ipynb` | SecureBERT2.0-NER fine-tuned on CyNER (MIT, arXiv:2204.05754; pinned commit `37aff53b`); 5 entity types match wrapper exactly; per-class seqeval F1 reported; domain-transfer yield check required before promotion | `models/ner/final/` | `src/logfilter/models/ner.py` |
 | `kaggle_train_cross_encoder.ipynb` | SecureBERT2.0-cross_encoder fine-tuned on log↔ATT&CK pairs | `models/cross_encoder/final/` | `src/logfilter/models/cross_encoder.py` |
+| `kaggle_train_biencoder.ipynb` | SecureBERT2.0-biencoder on (log window, ATT&CK technique) positive pairs via MultipleNegativesRankingLoss; optional SimCSE cell for unsupervised dedup sharpening; optional BYO pairs loader | `models/biencoder/final/` (sentence-transformers directory; no ONNX export) | `src/logfilter/models/biencoder.py` (one-line `config.yaml` `model_id` swap) |
 
 ## Recommended training order
 
-The Tier-1 and Tier-2 notebooks are independent and can run any time. The three new notebooks form a small dependency graph:
+The Tier-1 and Tier-2 notebooks are independent and can run any time. The downstream notebooks form a small dependency graph:
 
 ```text
 kaggle_pretrain_mlm.ipynb  ──►  models/securebert2-logs-mlm/final/
                                  │
-                ┌────────────────┼────────────────┐
-                ▼                ▼                ▼
-   kaggle_train_transformer  kaggle_train_ner  kaggle_train_cross_encoder
-   (re-train Tier-2 on        (set MODEL_ID    (set MODEL_ID to log-adapted
-    log-adapted base for       to log-adapted   base in the model-load cell)
+                ┌────────────────┼──────────────────────────────┐
+                ▼                ▼                ▼              ▼
+   kaggle_train_transformer  kaggle_train_ner  kaggle_train_cross_encoder  kaggle_train_biencoder
+   (re-train Tier-2 on        (set MODEL_ID    (set MODEL_ID to log-adapted  (set MODEL_ID to
+    log-adapted base for       to log-adapted   base in the model-load cell)   log-adapted base)
     higher Tier-2 quality)     base)
 ```
 
 The MLM step is optional but produces a domain-adapted encoder that lifts every downstream head. Each downstream notebook documents how to switch its `MODEL_ID` constant from the published Cisco variant to the local MLM-adapted directory.
+
+`kaggle_train_ner`, `kaggle_train_cross_encoder`, and `kaggle_train_biencoder` are all Tier-3 fine-tunes with no ordering dependency between them; run them in any order after the MLM base is ready.
 
 ## Per-notebook flow
 
@@ -73,8 +76,21 @@ models/ner/final/{config.json,model.safetensors,model.onnx,ner_metrics.json,ner_
 
 # CrossEncoder
 models/cross_encoder/final/{config.json,model.safetensors,tokenizer.json,cross_encoder_metrics.json}
+
+# BiEncoder (sentence-transformers directory — no ONNX export; runtime loads natively)
+models/biencoder/final/{modules.json,config_sentence_transformers.json,sentence_bert_config.json,model.safetensors,tokenizer.json,biencoder_metrics.json}
 ```
 
 The ONNX exports are production classifiers. The HuggingFace directories remain useful for further fine-tuning and reproducible export. Keep artifacts under their respective `models/<head>/final/` subdirectories so the existing wrapper code in `src/logfilter/models/` can find them with one config-file change.
+
+The BiEncoder artifacts are a sentence-transformers directory, not ONNX. The runtime wrapper loads them natively via `sentence-transformers`; no export step is needed.
+
+## Data sources
+
+| Dataset | Labels | Size | Notes |
+|---|---|---|---|
+| HDFS TraceBench | Line-level Anomaly / NotAnomaly | ~2.2 GB | Preprocessed; `HDFS_v3_TraceBench/preprocessed/` |
+| MITRE ATT&CK techniques | N/A (retrieval corpus) | ~50 techniques | `config/mitre_techniques.json` |
+| CyNER | Token-level BIO (5 entity types) | ~107K tokens | MIT licence; arXiv:2204.05754; pinned commit `37aff53b` |
 
 See [MODEL_SELECTION.md](MODEL_SELECTION.md) for model selection rationale, cascade design, and limitations.
