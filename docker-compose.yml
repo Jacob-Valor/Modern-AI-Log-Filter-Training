@@ -288,10 +288,26 @@ services:
       - ./config/otel-collector.yml:/etc/otelcol/config.yaml:ro
     restart: unless-stopped
 
+  # ── Alertmanager ──────────────────────────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: logfilter-alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    restart: unless-stopped
+
   # ── Prometheus ─────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.51.0
     container_name: logfilter-prometheus
+    depends_on:
+      - alertmanager
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
@@ -356,6 +372,7 @@ volumes:
   kafka-data:
   es-data:
   prometheus-data:
+  alertmanager-data:
   grafana-data:
   hf-cache:   # persist HuggingFace model downloads across container restarts
   redis-data:
