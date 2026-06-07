@@ -13,19 +13,25 @@ syslog clients
 collector (:5140) ──► Kafka raw-logs ──► archive ──► Elasticsearch
     |                                         │
     |  Prometheus :9100/metrics               v
-    |                                   scoring API (:8080)
+    |                                   nginx (:443) ──► scoring API (:8080)
     |  DLQ ◄── Kafka logfilter-dlq             |
     |                                           v
-    └──► spool (on Kafka failure)        router ──► QRadar / downstream SIEM
+    |                                    router ──► QRadar / downstream SIEM
+    |
+    └──► spool (on Kafka failure)
+
+    Prometheus ──► Alertmanager (:9093) ──► webhook receiver
 ```
 
 Core services:
 
 - `collector`: receives UDP/TCP syslog, publishes normalized envelopes to Kafka, exposes Prometheus metrics on `:9100/metrics`.
+- `nginx`: TLS reverse proxy in front of the API (self-signed dev certs; use your PKI in production).
 - `logfilter-api`: exposes `/score`, `/score/batch`, `/health`, and `/metrics` for AI scoring.
 - `archive`: persists raw events to Elasticsearch before scoring decisions; DLQ on persistent failure.
 - `router`: consumes Kafka events, calls the scoring API, and forwards LEEF output.
 - `training`: trains and exports the HDFS TraceBench classifier artifacts.
+- `alertmanager`: receives Prometheus alerts and forwards to a configurable webhook receiver.
 
 ## Dual-Classifier Architecture
 
