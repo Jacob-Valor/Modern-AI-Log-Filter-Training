@@ -214,6 +214,12 @@ async def lifespan(app: FastAPI):
             version=qradar_cfg.get("leef_version", "1.0"),
         )
 
+        t0 = time.perf_counter()
+        logger.info("Pre-loading models …")
+        _state.scorer.preload_models()
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.info("Models pre-loaded", elapsed_ms=round(elapsed, 1))
+
         _model_loaded.labels(model="scorer").set(1)
         logger.info("LogFilter API ready")
 
@@ -699,6 +705,15 @@ async def health(response: Response) -> HealthResponse:
             tier2 = getattr(_state.scorer, "tier2_classifier", None)
             if tier2 is not None:
                 models_loaded["tier2_classifier"] = tier2.is_ready()
+            biencoder = getattr(_state.scorer, "biencoder", None)
+            if biencoder is not None:
+                models_loaded["biencoder"] = biencoder._model is not None
+            ner = getattr(_state.scorer, "ner_model", None)
+            if ner is not None:
+                models_loaded["ner"] = ner._pipeline is not None
+            cross_encoder = getattr(_state.scorer, "cross_encoder", None)
+            if cross_encoder is not None:
+                models_loaded["cross_encoder"] = cross_encoder._model is not None
 
         overall_status = "healthy" if scorer_ready else "degraded"
         span.set_attribute("logfilter.health.status", overall_status)

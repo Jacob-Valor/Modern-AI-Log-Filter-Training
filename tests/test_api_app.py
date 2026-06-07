@@ -469,13 +469,18 @@ def test_metrics_endpoint_returns_prometheus_payload() -> None:
 
 def test_lifespan_initializes_scorer_and_enricher(monkeypatch) -> None:
     monkeypatch.setattr(api_app, "load_config", lambda path: {"qradar": {"leef_vendor": "Vendor"}})
-    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "scorer")
+
+    class FakeScorerObj:
+        def preload_models(self):
+            pass
+
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": FakeScorerObj())
     monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
 
     async def run_lifespan() -> None:
         async with api_app.lifespan(api_app.app):
             assert api_app._state.config == {"qradar": {"leef_vendor": "Vendor"}}
-            assert api_app._state.scorer == "scorer"
+            assert isinstance(api_app._state.scorer, FakeScorerObj)
             assert cast(tuple[Any, dict[str, str]], api_app._state.enricher)[0] == "enricher"
 
     asyncio.run(run_lifespan())
@@ -598,7 +603,12 @@ def test_metrics_snapshot_with_zero_events() -> None:
 
 def test_lifespan_with_empty_config(monkeypatch) -> None:
     monkeypatch.setattr(api_app, "load_config", lambda path: {})
-    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "scorer")
+
+    class FakeScorerObj:
+        def preload_models(self):
+            pass
+
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": FakeScorerObj())
     monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
 
     async def run_lifespan() -> None:

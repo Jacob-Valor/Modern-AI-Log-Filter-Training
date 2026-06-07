@@ -105,7 +105,7 @@ class BiEncoderModel:
         if self.revision is not None:
             st_kwargs["revision"] = self.revision
         self._model = SentenceTransformer(self.model_id, **st_kwargs)
-        self._dim = self._model.get_sentence_embedding_dimension()
+        self._dim = self._model.get_embedding_dimension()
 
         # FAISS index for deduplication (flat L2 — will normalise → cosine)
         self._faiss_dedup = faiss.IndexFlatIP(self._dim)

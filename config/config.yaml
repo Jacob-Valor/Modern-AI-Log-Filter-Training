@@ -61,16 +61,12 @@ models:
 
   biencoder:
     enabled: "${LOGFILTER_BIENCODER_ENABLED:true}"
-    model_id: "cisco-ai/SecureBERT2.0-biencoder"
+    model_id: "models/biencoder/final"
     device: "cpu"
     batch_size: 64
     dedup_threshold: 0.95  # cosine sim above this = duplicate
     dedup_window_minutes: 5
     faiss_top_k: 3         # ATT&CK candidate retrieval
-    cache_dir: "${HF_HOME:}"
-    # Pinned to main branch commit b42d43a (2025-10-30) for reproducible builds.
-    # Override via LOGFILTER_BIENCODER_REVISION if a newer revision is validated.
-    revision: "${LOGFILTER_BIENCODER_REVISION:b42d43a}"
 
   cross_encoder:
     enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"

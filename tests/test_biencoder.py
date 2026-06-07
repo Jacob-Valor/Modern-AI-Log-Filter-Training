@@ -39,6 +39,9 @@ class FakeSentenceTransformer:
     def get_sentence_embedding_dimension(self) -> int:
         return 2
 
+    def get_embedding_dimension(self) -> int:
+        return 2
+
     def encode(self, texts, **kwargs):
         mapping = {
             "technique one": [1.0, 0.0],
