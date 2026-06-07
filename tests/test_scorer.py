@@ -11,6 +11,7 @@ from logfilter.models.biencoder import ATTACKCandidate, BiEncoderModel, DedupRes
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel, CrossEncoderScore
 from logfilter.models.ner import ExtractedEntities, NERModel
+from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.pipeline.normalizer import LogNormalizer
 from logfilter.pipeline.scorer import LogScorer
@@ -29,6 +30,19 @@ class FakeClassifier(LogClassifier):
 
     def is_ready(self) -> bool:
         return True
+
+
+class FakeSyslogClassifier(SyslogClassifier):
+    def __init__(self) -> None:
+        self._feature_names = ["sshd+failed password"]
+        self.last_vectors: np.ndarray | None = None
+
+    def is_ready(self) -> bool:
+        return True
+
+    def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
+        self.last_vectors = feature_vectors
+        return np.full(len(feature_vectors), 0.82, dtype=np.float32)
 
 
 class FakeTier2Classifier(Tier2Classifier):
@@ -80,7 +94,7 @@ class FakeCrossEncoder(CrossEncoderModel):
 
 
 def test_classifier_score_is_applied_to_composite_score() -> None:
-    classifier = FakeClassifier()
+    syslog_classifier = FakeSyslogClassifier()
     scorer = LogScorer(
         config={
             "scoring": {
@@ -93,11 +107,12 @@ def test_classifier_score_is_applied_to_composite_score() -> None:
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
         },
-        classifier=classifier,
+        classifier=FakeClassifier(),
         tier2_classifier=FakeTier2Classifier(),
         ner_model=FakeNER(),
         biencoder=FakeBiEncoder(),
         cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=syslog_classifier,
     )
 
     event = LogNormalizer().normalize(
@@ -108,9 +123,9 @@ def test_classifier_score_is_applied_to_composite_score() -> None:
     assert abs(scored.classifier_score - 0.82) < 1e-6
     assert abs(scored.ai_threat_score - 0.82) < 1e-6
     assert scored.ai_priority == "MEDIUM"
-    assert classifier.last_vectors is not None
-    assert classifier.last_vectors.shape == (1, 2)
-    assert classifier.last_vectors[0, 0] > 0
+    assert syslog_classifier.last_vectors is not None
+    assert syslog_classifier.last_vectors.shape == (1, 1)
+    assert syslog_classifier.last_vectors[0, 0] > 0
 
 
 class RaisingNER(NERModel):
@@ -158,6 +173,7 @@ def test_optional_downstream_models_can_be_disabled_for_local_validation() -> No
         },
         classifier=classifier,
         tier2_classifier=FakeTier2Classifier(),
+        syslog_classifier=FakeSyslogClassifier(),
     )
 
     event = LogNormalizer().normalize(
@@ -270,6 +286,7 @@ def test_score_batch_processes_multiple_events() -> None:
         ner_model=FakeNER(),
         biencoder=FakeBiEncoder(),
         cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
     )
 
     normalizer = LogNormalizer()
@@ -318,11 +335,12 @@ def test_tier2_escalates_when_uncertain() -> None:
         ner_model=FakeNER(),
         biencoder=FakeBiEncoder(),
         cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
     )
 
-    event = LogNormalizer().normalize(
-        "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
-    )
+    # Use a non-syslog event so it goes through the HDFS classifier path
+    # and is eligible for tier-2 escalation (syslog events are excluded by design).
+    event = LogNormalizer().normalize("test event")
     scored = scorer.score(event)
 
     assert scored.tier2_used is True
@@ -427,6 +445,7 @@ def test_duplicate_penalty_and_entity_boost() -> None:
         ner_model=FakeNERWithEntities(),
         biencoder=FakeDuplicateBiEncoder(),
         cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
     )
 
     event = LogNormalizer().normalize(
@@ -457,6 +476,7 @@ def test_entity_boost_for_non_duplicates() -> None:
         ner_model=FakeNERWithEntities(),
         biencoder=FakeBiEncoder(),
         cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
     )
 
     event = LogNormalizer().normalize(
@@ -532,6 +552,10 @@ def test_no_model_loaded_marks_degraded() -> None:
         def predict_proba(self, feature_vectors):
             return np.full(len(feature_vectors), 0.5, dtype=np.float32)
 
+    class NotReadySyslogClassifier(FakeSyslogClassifier):
+        def is_ready(self) -> bool:
+            return False
+
     scorer = LogScorer(
         config={
             "scoring": {
@@ -549,6 +573,7 @@ def test_no_model_loaded_marks_degraded() -> None:
         ner_model=FakeNER(),
         biencoder=FakeBiEncoder(),
         cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=NotReadySyslogClassifier(),
     )
 
     event = LogNormalizer().normalize("test event")

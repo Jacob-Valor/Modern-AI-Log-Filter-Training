@@ -168,9 +168,7 @@ def test_tier2_predict_returns_valid_probs(tmp_path) -> None:
 def test_scorer_tier2_overrides_when_uncertain() -> None:
     tier2 = FakeTier2(probability=0.9)
     scorer = _make_scorer(FakeClassifier(probability=0.5), tier2)
-    event = LogNormalizer().normalize(
-        "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
-    )
+    event = LogNormalizer().normalize("test event")
 
     scored = scorer.score(event)
 
@@ -183,7 +181,7 @@ def test_scorer_tier2_overrides_when_uncertain() -> None:
 def test_scorer_tier2_skipped_when_confident() -> None:
     tier2 = FakeTier2(probability=0.1)
     scorer = _make_scorer(FakeClassifier(probability=0.95), tier2)
-    event = LogNormalizer().normalize("Jan 15 11:07:53 prod app[1]: startup completed")
+    event = LogNormalizer().normalize("test event")
 
     scored = scorer.score(event)
 
@@ -309,14 +307,22 @@ def test_scorer_tier2_inference_exception_keeps_tier1_scores() -> None:
         FakeClassifier(probability=0.5),
         cast(FakeTier2, ExplodingTier2()),
     )
-    event = LogNormalizer().normalize(
-        "Jan 15 11:07:53 prod sshd[123]: Failed password for root from 10.0.0.5"
-    )
+    event = LogNormalizer().normalize("test event")
 
     scored = scorer.score(event)
 
     assert scored.classifier_score == pytest.approx(0.5)
     assert scored.tier2_used is False
+
+
+class FakeSyslogClassifier:
+    feature_names = ["sshd+failed password"]
+
+    def is_ready(self) -> bool:
+        return True
+
+    def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
+        return np.full(len(feature_vectors), 0.82, dtype=np.float32)
 
 
 def _make_scorer(classifier: FakeClassifier, tier2_classifier: FakeTier2) -> LogScorer:
@@ -337,4 +343,5 @@ def _make_scorer(classifier: FakeClassifier, tier2_classifier: FakeTier2) -> Log
         ner_model=cast(NERModel, FakeNER()),
         biencoder=cast(BiEncoderModel, FakeBiEncoder()),
         cross_encoder=cast(CrossEncoderModel, FakeCrossEncoder()),
+        syslog_classifier=FakeSyslogClassifier(),  # type: ignore[arg-type]
     )

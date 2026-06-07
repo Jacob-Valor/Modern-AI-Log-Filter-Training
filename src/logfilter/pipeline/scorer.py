@@ -34,6 +34,7 @@ from logfilter.models.biencoder import BiEncoderModel
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
 from logfilter.models.ner import NERModel
+from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.monitoring.drift_detector import DriftDetector
 from logfilter.pipeline.events import ScoredEvent
@@ -172,6 +173,7 @@ class LogScorer:
         ner_model: NERModel | None = None,
         biencoder: BiEncoderModel | None = None,
         cross_encoder: CrossEncoderModel | None = None,
+        syslog_classifier: SyslogClassifier | None = None,
         model_version: str = "",
         drift_detector: DriftDetector | None = None,
     ) -> None:
@@ -286,8 +288,12 @@ class LogScorer:
         else:
             self.drift_detector = None
 
+        self.syslog_classifier = syslog_classifier or SyslogClassifier()
+
         self._feature_cache_names: tuple[str, ...] = ()
         self._feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
+        self._syslog_feature_cache_names: tuple[str, ...] = ()
+        self._syslog_feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -295,6 +301,8 @@ class LogScorer:
         """Eagerly load all models to eliminate cold-start latency."""
         logger.info("Pre-loading classifier")
         _ = self.classifier.is_ready()
+        logger.info("Pre-loading syslog classifier")
+        _ = self.syslog_classifier.is_ready()
         logger.info("Pre-loading tier2 classifier")
         _ = self.tier2_classifier.is_ready()
         logger.info("Pre-loading biencoder")
@@ -589,31 +597,50 @@ class LogScorer:
 
     def _apply_classifier(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
         """Populate classifier_score using the trained event-count classifier."""
+        from logfilter.pipeline.normalizer import LogSourceType
+
+        syslog_indices = [
+            i for i, ev in enumerate(events)
+            if ev.source_type in (LogSourceType.SYSLOG, LogSourceType.WEB,
+                                  LogSourceType.FIREWALL, LogSourceType.WINEVENT)
+        ]
+        hdfs_indices = [i for i in range(len(events)) if i not in syslog_indices]
+
         with telemetry.start_as_current_span(
             "scorer.tier1.classifier",
             {"logfilter.batch_size": len(events)},
         ) as span:
             try:
-                feature_vectors = self._classifier_feature_vectors(events)
-                span.set_attribute("logfilter.feature_count", int(feature_vectors.shape[1]))
-                probabilities = self.classifier.predict_proba(feature_vectors)
-                if not self.classifier.is_ready():
+                if syslog_indices and self.syslog_classifier.is_ready():
+                    syslog_events = [events[i] for i in syslog_indices]
+                    syslog_vectors = self._syslog_feature_vectors(syslog_events)
+                    syslog_probs = self.syslog_classifier.predict_proba(syslog_vectors)
+                    for idx, prob in zip(syslog_indices, syslog_probs):
+                        scored[idx].classifier_score = max(0.0, min(1.0, float(prob)))
+
+                if hdfs_indices:
+                    hdfs_events = [events[i] for i in hdfs_indices]
+                    feature_vectors = self._classifier_feature_vectors(hdfs_events)
+                    span.set_attribute("logfilter.feature_count", int(feature_vectors.shape[1]))
+                    hdfs_probs = self.classifier.predict_proba(feature_vectors)
+                    for idx, prob in zip(hdfs_indices, hdfs_probs):
+                        scored[idx].classifier_score = max(0.0, min(1.0, float(prob)))
+
+                if not self.classifier.is_ready() and not self.syslog_classifier.is_ready():
                     for se in scored:
                         se.score_degraded = True
             except (ValueError, IndexError, TypeError, RuntimeError) as exc:
                 telemetry.record_exception(span, exc)
                 logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
-                probabilities = np.full(len(events), 0.5, dtype=np.float32)
                 for se in scored:
+                    se.classifier_score = 0.5
                     se.score_degraded = True
-
-        for se, prob in zip(scored, probabilities):
-            se.classifier_score = max(0.0, min(1.0, float(prob)))
 
         escalation_indices = [
             i
             for i, se in enumerate(scored)
-            if self.tier2_classifier.should_escalate(se.classifier_score)
+            if i not in syslog_indices
+            and self.tier2_classifier.should_escalate(se.classifier_score)
         ]
         with telemetry.start_as_current_span(
             "scorer.tier2.classifier",
@@ -682,6 +709,55 @@ class LogScorer:
                         vectors[row, col] += 1.0
         return vectors
 
+    def _syslog_feature_vectors(self, events: list[NormalizedEvent]) -> np.ndarray:
+        """Convert normalized log text into the 100-feature syslog classifier vector."""
+        feature_names = tuple(self.syslog_classifier.feature_names)
+        n_features = len(feature_names) or 100
+        vectors = np.zeros((len(events), n_features), dtype=np.float32)
+        if not feature_names:
+            return vectors
+
+        prepared = self._prepared_syslog_features(feature_names)
+        for row, event in enumerate(events):
+            text = f"{event.text} {event.raw}".lower()
+            text_tokens = set(_TOKEN_RE.findall(text))
+            for col, (feature_text, feature_tokens) in enumerate(prepared):
+                if feature_text and feature_text in text:
+                    vectors[row, col] += 1.0
+                    continue
+                if feature_tokens and text_tokens:
+                    hits = 0
+                    for ft in feature_tokens:
+                        if ft in text_tokens:
+                            hits += 1
+                        elif len(ft) >= 4 and any(ft in tt for tt in text_tokens):
+                            hits += 1
+                    threshold = 0.50 if len(feature_tokens) <= 3 else 0.65
+                    if hits / len(feature_tokens) >= threshold:
+                        vectors[row, col] += 1.0
+        return vectors
+
+    def _prepared_syslog_features(
+        self, feature_names: tuple[str, ...]
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        if feature_names == self._syslog_feature_cache_names:
+            return self._syslog_feature_cache_tokens
+
+        prepared: list[tuple[str, tuple[str, ...]]] = []
+        for name in feature_names:
+            lowered = name.lower()
+            normalized = lowered.replace("+", " ")
+            tokens = tuple(
+                token
+                for token in _TOKEN_RE.findall(normalized)
+                if len(token) > 2 and token not in _FEATURE_STOPWORDS
+            )
+            prepared.append((normalized, tokens))
+
+        self._syslog_feature_cache_names = feature_names
+        self._syslog_feature_cache_tokens = prepared
+        return prepared
+
     def _prepared_classifier_features(
         self, feature_names: tuple[str, ...]
     ) -> list[tuple[str, tuple[str, ...]]]:
@@ -709,12 +785,17 @@ class LogScorer:
         if se.sigma_matched:
             se.classifier_score = max(se.classifier_score, 0.90)
 
+        # Only apply dedup penalty when cross-encoder actually contributed;
+        # otherwise the penalty unfairly zeroes out scores for duplicates
+        # that never got a cross-encoder evaluation.
+        dedup = se.dedup_penalty if se.cross_encoder_max > 0 else 0.0
+
         score = (
             self.w_cls * se.classifier_score
             + self.w_ent * se.entity_boost
             + self.w_ce * se.cross_encoder_max
             + self.w_nov * se.novelty_score
-            - se.dedup_penalty
+            - dedup
         )
         # Clamp to [0, 1]
         return max(0.0, min(1.0, score))
