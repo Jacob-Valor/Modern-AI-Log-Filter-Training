@@ -20,6 +20,7 @@ All weights are read from config.yaml.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import re
 import time
@@ -294,6 +295,45 @@ class LogScorer:
         self._feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
         self._syslog_feature_cache_names: tuple[str, ...] = ()
         self._syslog_feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
+
+        self._validate_manifest()
+
+    def _validate_manifest(self) -> None:
+        manifest_path = ROOT / "models" / "model_manifest.json"
+        if not manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            errors: list[str] = []
+            for key, expected in manifest.get("models", {}).items():
+                if expected.get("status") == "missing":
+                    continue
+                model_dir = ROOT / expected.get("path", "")
+                if not model_dir.exists():
+                    errors.append(f"{key}: directory not found")
+                    continue
+                for pattern, meta in expected.get("artifacts", {}).items():
+                    artifact_path = model_dir / pattern
+                    if not artifact_path.exists():
+                        errors.append(f"{key}: artifact {pattern} missing")
+                        continue
+                    h = hashlib.sha256()
+                    with open(artifact_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(8192), b""):
+                            h.update(chunk)
+                    actual_hash = h.hexdigest()[:16]
+                    if actual_hash != meta.get("sha256"):
+                        errors.append(
+                            f"{key}: {pattern} hash mismatch "
+                            f"(expected {meta['sha256']}, got {actual_hash})"
+                        )
+            if errors:
+                for err in errors:
+                    logger.warning("Model manifest mismatch", error=err)
+            else:
+                logger.info("Model manifest validated")
+        except Exception as exc:
+            logger.warning("Manifest validation skipped", error=str(exc))
 
     # ── public API ─────────────────────────────────────────────────────────────
 

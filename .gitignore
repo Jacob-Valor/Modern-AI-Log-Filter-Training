@@ -2,6 +2,7 @@
 HDFS_v3_TraceBench/
 models/*
 !models/.gitkeep
+!models/model_manifest.json
 notebooks/artifacts/
 artifacts/kaggle-runs/
 coverage.xml

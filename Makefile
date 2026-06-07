@@ -83,6 +83,15 @@ integration-test:
 smoke-pipeline:
 	$(PYTHON) scripts/smoke_test_pipeline.py
 
+benchmark-standalone:
+	$(PYTHON) scripts/throughput_benchmark.py $(BENCHMARK_ARGS)
+
+model-manifest-generate:
+	$(PYTHON) scripts/model_manifest.py generate
+
+model-manifest-validate:
+	$(PYTHON) scripts/model_manifest.py validate
+
 verify: lint test-coverage smoke-pipeline
 
 audit:

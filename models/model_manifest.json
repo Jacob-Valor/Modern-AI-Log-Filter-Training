@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "models": {
+    "classifier": {
+      "path": "models",
+      "artifacts": {
+        "log_classifier.onnx": {
+          "sha256": "1b5c8fcb6ae38328",
+          "size_mb": 0.11
+        },
+        "scaler.json": {
+          "sha256": "43307e3f81350ac0",
+          "size_mb": 0.02
+        },
+        "feature_names.json": {
+          "sha256": "6ed8ddd5149ec7f3",
+          "size_mb": 0.39
+        }
+      },
+      "onnx_input_features": 2255,
+      "feature_names_count": 2255,
+      "feature_count_match": true
+    },
+    "syslog_classifier": {
+      "path": "models/syslog",
+      "artifacts": {
+        "log_classifier_syslog.onnx": {
+          "sha256": "a9e7222a29ec0404",
+          "size_mb": 0.08
+        }
+      },
+      "onnx_input_features": 100
+    },
+    "ner": {
+      "path": "models/ner/final",
+      "artifacts": {
+        "config.json": {
+          "sha256": "601634fd6fe5a6c4",
+          "size_mb": 0.0
+        },
+        "model.safetensors": {
+          "sha256": "bd1032fd77046336",
+          "size_mb": 570.74
+        },
+        "model.onnx": {
+          "sha256": "b6baa30317e931ea",
+          "size_mb": 571.28
+        }
+      }
+    },
+    "biencoder": {
+      "path": "models/biencoder/final",
+      "artifacts": {
+        "config.json": {
+          "sha256": "4adbd75e6de6c4e3",
+          "size_mb": 0.0
+        },
+        "model.safetensors": {
+          "sha256": "e7b2e8f8802f962c",
+          "size_mb": 568.46
+        }
+      }
+    },
+    "cross_encoder": {
+      "path": "models/cross_encoder/final",
+      "artifacts": {
+        "config.json": {
+          "sha256": "ba170e000eb70493",
+          "size_mb": 0.0
+        },
+        "model.safetensors": {
+          "sha256": "47fa96a8e06dedb9",
+          "size_mb": 570.71
+        }
+      }
+    },
+    "tier2": {
+      "path": "models/tier2",
+      "artifacts": {
+        "log_classifier_tier2.onnx": {
+          "sha256": "77e0308dfbd8d8e3",
+          "size_mb": 571.25
+        }
+      }
+    }
+  }
+}
