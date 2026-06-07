@@ -257,6 +257,11 @@ services:
       - ./scripts/certs/services-server.crt:/etc/tls/server.crt:ro
       - ./scripts/certs/services-server.key:/etc/tls/server.key:ro
       - ./config/nginx/nginx.conf:/etc/nginx/conf.d/logfilter.conf:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://localhost/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
   # ── Log Collector (syslog listener → Kafka) ────────────────────────────────
