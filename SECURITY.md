@@ -93,3 +93,71 @@ against accidental introduction of the vulnerable code path.
   requires vendoring a fork; deferred to upstream fix.
 
 This exception is reviewed on every dependency bump.
+
+## Incident Response Runbook
+
+### Severity Levels
+
+| Level | Description | Response Time | Examples |
+|-------|-------------|---------------|----------|
+| P1 | Pipeline down, data loss | 15 min | Collector unreachable, Kafka broker down, ES cluster red |
+| P2 | Degraded throughput | 1 hour | Consumer lag > 10k, API p99 > 2s, scoring errors > 1% |
+| P3 | Non-urgent anomaly | 4 hours | Model drift detected, disk usage > 80%, cert expiry < 30d |
+
+### P1: Pipeline Down
+
+**Symptoms**: Collector unreachable, Kafka producer errors, API returning 5xx.
+
+1. Check service health: `docker compose ps` or `kubectl get pods`
+2. Check Kafka: `kafka-topics.sh --bootstrap-server localhost:9092 --list`
+3. Check Elasticsearch: `curl -s localhost:9200/_cluster/health?pretty`
+4. Check logs: `docker compose logs -f --tail=100 <service>`
+5. If Kafka is down: restart broker, check disk space, verify advertised listeners
+6. If ES is down: check heap usage, disk space, cluster state
+7. If collector is down: check SYSLOG_ALLOWED_CIDRS, port bindings
+
+**Escalation**: If restart doesn't restore within 15 min, page on-call.
+
+### P2: Degraded Throughput
+
+**Symptoms**: Consumer lag growing, API latency spiking, scoring errors.
+
+1. Check consumer lag: `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe <group>`
+2. Check API metrics: `curl -s localhost:8080/metrics`
+3. Check model loading: scorer logs show "Model manifest mismatch" warnings
+4. If lag is growing: increase consumer instances or batch size
+5. If API is slow: check ONNX session thread count, memory pressure
+6. If scoring errors: check model manifest, verify artifacts match
+
+### P3: Non-Urgent Anomaly
+
+**Symptoms**: Model drift, disk usage high, cert expiry approaching.
+
+1. Model drift: check DriftDetector logs, retrain if PSI > 0.25
+2. Disk usage: `df -h`, clean old ES indices or Kafka retention
+3. Cert expiry: rotate certs before 30-day window
+
+## Scaling Playbook
+
+### Horizontal Scaling
+
+- **Collector**: Scale replicas behind load balancer; each binds to its own port
+- **API**: Scale replicas behind load balancer; stateless, no sticky sessions
+- **Kafka**: Add brokers, increase partitions per topic
+- **Elasticsearch**: Add data nodes, rebalance shards
+
+### Vertical Scaling
+
+- **API**: Increase `intra_op_num_threads` for ONNX sessions (currently 4)
+- **Kafka**: Increase `num.io.threads` and `num.network.threads`
+- **Elasticsearch**: Increase heap (50% of available RAM, max 31g)
+
+### Capacity Planning
+
+| Component | Metric | Threshold | Action |
+|-----------|--------|-----------|--------|
+| Kafka | Consumer lag | > 10,000 | Scale consumers or increase batch size |
+| Elasticsearch | Disk usage | > 80% | Add nodes or increase retention policy |
+| API | p99 latency | > 2s | Scale replicas or optimize model |
+| Collector | Drops/sec | > 0 | Scale collectors or increase buffer |
+| All | CPU usage | > 80% sustained | Scale horizontally |

@@ -127,3 +127,26 @@ groups:
         annotations:
           summary: "Sigma match rate > 80%"
           description: "{{ $value }} of events match Sigma rules; verify rule calibration."
+
+      # ── Dead Man's Switch ──────────────────────────────────────────────────
+      # Prometheus auto-resolves this alert when the probe stops sending.
+      # If LogfilterDeadManSwitch is NOT firing, the monitoring pipeline itself is broken.
+      - alert: LogfilterDeadManSwitch
+        expr: probe_success{job="logfilter-blackbox"} == 1
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dead man's switch: monitoring pipeline is alive"
+          description: "If this alert is NOT firing, the monitoring pipeline itself is broken."
+
+      # ── DLQ Depth ─────────────────────────────────────────────────────────
+      - alert: LogfilterDLQDepthHigh
+        expr: |
+          kafka_consumer_group_lag{group=~"logfilter-.*", topic="logfilter-dlq"} > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DLQ topic has >100 unprocessed messages"
+          description: "{{ $value }} messages in DLQ; check for persistent failures."

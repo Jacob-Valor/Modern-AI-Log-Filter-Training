@@ -7,6 +7,7 @@ from elasticsearch import Elasticsearch
 
 from logfilter.config import load_config
 from logfilter.kafka.consumer import ArchiveConsumer
+from logfilter.kafka.producer import LogProducer
 from logfilter.pipeline.archive import LogArchive
 
 logger = structlog.get_logger(__name__)
@@ -34,12 +35,24 @@ def main() -> None:
     )
     es_client: Elasticsearch = archive.client
 
+    dlq_topic = topics.get("dlq")
+    dlq_producer = None
+    if dlq_topic:
+        dlq_producer = LogProducer(
+            bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
+            topic=dlq_topic,
+            dlq_topic=dlq_topic,
+            kafka_config=kafka_cfg,
+        )
+        logger.info("DLQ producer enabled", topic=dlq_topic)
+
     consumer = ArchiveConsumer(
         bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
         raw_topic=topics.get("raw_logs", "raw-logs"),
         es_client=es_client,
         index_prefix=es_cfg.get("index_prefix", "raw-logs"),
         batch_size=int(kafka_cfg.get("max_poll_records", 100)),
+        dlq_producer=dlq_producer,
         kafka_config=kafka_cfg,
     )
 
