@@ -27,21 +27,27 @@ Core services:
 - `router`: consumes Kafka events, calls the scoring API, and forwards LEEF output.
 - `training`: trains and exports the HDFS TraceBench classifier artifacts.
 
-## Two-Tier Classification Architecture
+## Dual-Classifier Architecture
 
-The scoring pipeline uses a cascade of two classifiers. Tier-1 is a fast XGBoost model that consumes bag-of-events count vectors and runs in milliseconds on CPU. Tier-2 is a transformer (SecureBERT2.0-base) that consumes reconstructed log text and provides higher-fidelity decisions when tier-1 is uncertain.
+The scoring pipeline uses a cascade of two classifiers with source-type routing. Syslog, web, firewall, and Windows events route to a dedicated syslog classifier (100-feature XGBoost trained on sparse real-world patterns). All other events (HDFS TraceBench traces, generic) route to the HDFS classifier (2255-feature XGBoost). Tier-2 escalation is applied only to HDFS-classified events.
 
 ```
-syslog event ──► tier-1 (XGBoost / ONNX, ms)
-                    │
-                    ├─ p < 0.10 (confident benign)  ──► trust tier-1
-                    ├─ p > 0.90 (confident failure) ──► trust tier-1
-                    └─ 0.10 ≤ p ≤ 0.90 (uncertain) ──► tier-2 (SecureBERT2.0 / ONNX, ~50ms)
-                                                           │
-                                                           └─► override classifier_score
+event ──► source-type router
+              │
+              ├─ syslog / web / firewall / winevent ──► syslog classifier (XGBoost, 100 feat)
+              │                                              │
+              │                                              └─► final score (no tier-2)
+              │
+              └─ generic / other ──► HDFS classifier (XGBoost, 2255 feat)
+                                         │
+                                         ├─ p < 0.10 (confident benign)  ──► trust tier-1
+                                         ├─ p > 0.90 (confident failure) ──► trust tier-1
+                                         └─ 0.10 ≤ p ≤ 0.90 (uncertain) ──► tier-2 (SecureBERT2.0 / ONNX, ~50ms)
+                                                                                │
+                                                                                └─► override classifier_score
 ```
 
-Tier-1 is sufficient for most decisions. Tier-2 is invoked only in the uncertainty band (0.10-0.90) to resolve ambiguous cases. The cascade preserves low latency for the common case while allowing the transformer to handle novel templates, semantic variation, and cross-domain transfer that the bag-of-events model cannot see. See [notebooks/MODEL_SELECTION.md](notebooks/MODEL_SELECTION.md) for model selection rationale, data flow, and limitations.
+The syslog classifier was retrained with sparse-feature data (1-7 features per sample) to handle real-world events that activate far fewer features than the dense HDFS training set. Events with no matching features receive a neutral 0.5 score. See `training/retrain_syslog_sparse.py` for the retraining script.
 
 Before changing production thresholds, generate a Tier-2 threshold report:
 
