@@ -201,6 +201,11 @@ services:
       <<: *common-env
     volumes:
       - ./config:/app/config:ro
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
     restart: unless-stopped
 
   # ── AI Scoring API ─────────────────────────────────────────────────────────
@@ -234,6 +239,24 @@ services:
         limits:
           memory: 8G
           cpus: "4.0"
+    restart: unless-stopped
+
+  # ── TLS Reverse Proxy (nginx → API) ─────────────────────────────────────
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
+    container_name: logfilter-nginx
+    depends_on:
+      logfilter-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:80:80"
+    volumes:
+      - ./scripts/certs/services-server.crt:/etc/tls/server.crt:ro
+      - ./scripts/certs/services-server.key:/etc/tls/server.key:ro
+      - ./config/nginx/nginx.conf:/etc/nginx/conf.d/logfilter.conf:ro
     restart: unless-stopped
 
   # ── Log Collector (syslog listener → Kafka) ────────────────────────────────
@@ -279,6 +302,11 @@ services:
       <<: *common-env
     volumes:
       - ./config:/app/config:ro
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
     restart: unless-stopped
 
   # ── OpenTelemetry Collector ────────────────────────────────────────────────

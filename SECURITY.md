@@ -161,3 +161,94 @@ This exception is reviewed on every dependency bump.
 | API | p99 latency | > 2s | Scale replicas or optimize model |
 | Collector | Drops/sec | > 0 | Scale collectors or increase buffer |
 | All | CPU usage | > 80% sustained | Scale horizontally |
+
+## TLS Termination
+
+The stack includes an nginx reverse proxy that terminates TLS in front of the API.
+
+**Dev setup** (self-signed certs):
+
+```bash
+bash scripts/certs/generate_services_tls.sh
+docker compose up nginx
+```
+
+The nginx service proxies HTTPS on port 443 to the API on port 8080.
+HTTP on port 80 redirects to HTTPS.
+
+**Production**: Replace self-signed certs with certificates from your PKI
+(e.g. cert-manager, Let's Encrypt, or cloud-provider ACM). The nginx config
+lives at `config/nginx/nginx.conf`.
+
+All service ports (Kafka, Elasticsearch, Prometheus, Grafana, Redis, collector
+metrics) remain bound to `127.0.0.1` by default. Expose them only through
+trusted network paths.
+
+## Elasticsearch ILM
+
+Raw-log indices use an ILM policy to prevent unbounded disk growth.
+
+```bash
+# Apply the policy after ES is healthy:
+ES_PASSWORD=<your-password> bash scripts/setup_es_ilm.sh
+```
+
+Policy phases:
+
+| Phase | Trigger | Action |
+|-------|---------|--------|
+| Hot | 0d | Rollover at 30GB or 7d |
+| Warm | 30d | Shrink to 1 shard, force-merge |
+| Delete | 90d | Permanently remove indices |
+
+Adjust retention in `scripts/setup_es_ilm.sh` if your compliance window
+requires longer or shorter retention.
+
+## Backup & Restore
+
+Snapshot-based backups for Elasticsearch raw-log data:
+
+```bash
+# Create a snapshot:
+ES_PASSWORD=<your-password> bash scripts/es_backup.sh
+
+# List available snapshots:
+curl -u elastic:<password> http://localhost:9200/_snapshot/logfilter-backups/_all
+
+# Restore a snapshot:
+ES_PASSWORD=<your-password> bash scripts/es_restore.sh <snapshot-name>
+```
+
+The default snapshot repository is `logfilter-backups` (filesystem-based).
+For production, configure an S3 or GCS snapshot repository and schedule
+backups via cron or your orchestration layer.
+
+## Alertmanager
+
+Prometheus alerts route to Alertmanager, which forwards to a configurable
+webhook receiver.
+
+**Default receivers**:
+
+- `default-webhook` — all alerts (4h repeat interval)
+- `critical-webhook` — critical alerts (1h repeat interval)
+
+Set `ALERT_WEBHOOK_URL` in `.env` to point at your alerting endpoint
+(PagerDuty, Slack, Opsgenie, etc.). Without this, alerts evaluate but are
+not delivered.
+
+**Alertmanager UI**: `http://localhost:9093` (dev only, localhost-bound).
+
+## Resource Limits
+
+All services have `deploy.resources.limits` in `docker-compose.yml`:
+
+| Service | Memory | CPUs |
+|---------|--------|------|
+| logfilter-api | 8G | 4.0 |
+| collector | 2G | 2.0 |
+| router | 2G | 2.0 |
+| archive | 2G | 2.0 |
+
+Adjust these for your node capacity. The API limit accounts for ONNX model
+memory (SecureBERT2.0 cross-encoder + NER + biencoder).
