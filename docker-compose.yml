@@ -249,9 +249,11 @@ services:
     ports:
       - "127.0.0.1:5140:5140/udp"   # local dev; expose via trusted load balancer in prod
       - "127.0.0.1:5140:5140/tcp"   # local dev; expose via trusted load balancer in prod
+      - "127.0.0.1:9100:9100/tcp"   # Prometheus metrics (SYSLOG_METRICS_PORT)
     environment:
       <<: *common-env
       SYSLOG_ALLOWED_CIDRS: "${SYSLOG_ALLOWED_CIDRS:-127.0.0.1/32,::1/128}"
+      SYSLOG_METRICS_PORT: "${SYSLOG_METRICS_PORT:-9100}"
     volumes:
       - ./config:/app/config:ro
     restart: unless-stopped

@@ -25,4 +25,7 @@ USER logfilter
 EXPOSE 5140/udp
 EXPOSE 5140/tcp
 
+# Prometheus metrics endpoint (SYSLOG_METRICS_PORT, default 9100)
+EXPOSE 9100/tcp
+
 CMD ["python", "-m", "logfilter.collector"]

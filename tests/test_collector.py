@@ -384,3 +384,55 @@ def test_prometheus_received_increments_before_drops() -> None:
     assert _collector_received_total.labels(protocol="udp")._value.get() == 1
     assert _collector_dropped_total.labels(reason="empty")._value.get() == 1
     assert _collector_published_total.labels(protocol="udp")._value.get() == 0
+
+
+def test_metrics_server_returns_200_on_slash_metrics() -> None:
+    import socket
+    import threading
+
+    from prometheus_client import start_http_server
+
+    server = start_http_server(0)
+    port = server[0].server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.sendall(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            resp = s.recv(4096)
+        assert b"200 OK" in resp
+    finally:
+        server[0].shutdown()
+
+
+def test_metrics_server_exposes_collector_counters() -> None:
+    import socket
+
+    from prometheus_client import start_http_server
+
+    from logfilter.collector import (
+        _collector_dropped_total,
+        _collector_published_total,
+        _collector_received_total,
+    )
+
+    _reset_collector_counters()
+    _collector_received_total.labels(protocol="tcp").inc(3)
+    _collector_published_total.labels(protocol="tcp").inc(2)
+    _collector_dropped_total.labels(reason="empty").inc(1)
+
+    server = start_http_server(0)
+    port = server[0].server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.sendall(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            body = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+        text = body.decode()
+        assert b"logfilter_collector_received_total" in body
+        assert b"logfilter_collector_published_total" in body
+        assert b"logfilter_collector_dropped_total" in body
+    finally:
+        server[0].shutdown()
