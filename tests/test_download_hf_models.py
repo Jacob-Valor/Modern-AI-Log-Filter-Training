@@ -36,7 +36,7 @@ def test_maybe_empty_returns_string_for_value():
 def test_load_config_reads_yaml_and_substitutes_env():
     cfg = mod._load_config(Path("config/config.yaml"))
     assert "models" in cfg
-    assert cfg["models"]["ner"]["model_id"] == "cisco-ai/SecureBERT2.0-NER"
+    assert cfg["models"]["ner"]["model_id"] == "models/ner/final"
 
 
 def test_main_requires_config_or_defaults():

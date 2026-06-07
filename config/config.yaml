@@ -50,14 +50,10 @@ models:
   # revision: exact git commit hash / tag to pin (empty = default/main)
   ner:
     enabled: "${LOGFILTER_NER_ENABLED:true}"
-    model_id: "cisco-ai/SecureBERT2.0-NER"
+    model_id: "models/ner/final"
     device: "cpu"          # or "cuda"
     batch_size: 32
     min_confidence: 0.80
-    cache_dir: "${HF_HOME:}"  # empty defaults to ~/.cache/huggingface
-    # Pinned to main branch commit 792db5b (2025-10-06) for reproducible builds.
-    # Override via LOGFILTER_NER_REVISION if a newer revision is validated.
-    revision: "${LOGFILTER_NER_REVISION:792db5b}"
 
   biencoder:
     enabled: "${LOGFILTER_BIENCODER_ENABLED:true}"
@@ -70,13 +66,9 @@ models:
 
   cross_encoder:
     enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"
-    model_id: "cisco-ai/SecureBERT2.0-cross_encoder"
+    model_id: "models/cross_encoder/final"
     device: "cpu"
     batch_size: 16
-    cache_dir: "${HF_HOME:}"
-    # Pinned to main branch commit 960b923 (2025-10-30) for reproducible builds.
-    # Override via LOGFILTER_CROSS_ENCODER_REVISION if a newer revision is validated.
-    revision: "${LOGFILTER_CROSS_ENCODER_REVISION:960b923}"
 
   mitre_techniques_path: "config/mitre_techniques.json"
 
