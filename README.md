@@ -10,20 +10,20 @@ emits enriched LEEF payloads for downstream routing.
 syslog clients
     |
     v
-collector -> Kafka raw-logs -> archive -> Elasticsearch
-                         |
-                         v
-                   scoring API
-                         |
-                         v
-router -> QRadar / downstream SIEM
+collector (:5140) ──► Kafka raw-logs ──► archive ──► Elasticsearch
+    |                                         │
+    |  Prometheus :9100/metrics               v
+    |                                   scoring API (:8080)
+    |  DLQ ◄── Kafka logfilter-dlq             |
+    |                                           v
+    └──► spool (on Kafka failure)        router ──► QRadar / downstream SIEM
 ```
 
 Core services:
 
-- `collector`: receives UDP/TCP syslog and publishes normalized envelopes to Kafka.
-- `logfilter-api`: exposes `/score` and `/score/batch` for AI scoring.
-- `archive`: persists raw events to Elasticsearch before scoring decisions.
+- `collector`: receives UDP/TCP syslog, publishes normalized envelopes to Kafka, exposes Prometheus metrics on `:9100/metrics`.
+- `logfilter-api`: exposes `/score`, `/score/batch`, `/health`, and `/metrics` for AI scoring.
+- `archive`: persists raw events to Elasticsearch before scoring decisions; DLQ on persistent failure.
 - `router`: consumes Kafka events, calls the scoring API, and forwards LEEF output.
 - `training`: trains and exports the HDFS TraceBench classifier artifacts.
 
@@ -140,8 +140,88 @@ make train
 make evaluate
 ```
 
+Train tier-2 transformer models (NER + CrossEncoder) on Kaggle:
+
+```bash
+# Upload and run notebooks (full training, ~2h on T4 GPU)
+kaggle kernels push -p notebooks -t kaggle_train_ner
+kaggle kernels push -p notebooks -t kaggle_train_cross_encoder
+```
+
+After training, install artifacts and validate the model manifest:
+
+```bash
+make model-manifest-generate   # recompute SHA-256 hashes
+make model-manifest-validate   # verify hashes match installed artifacts
+```
+
 Runtime artifacts are written under `models/`. The API expects the scaler as
 safe JSON (`models/scaler.json`), not a pickle/joblib artifact.
+
+## Monitoring & Observability
+
+### Prometheus Metrics
+
+| Service | Endpoint | Metrics |
+|---------|----------|---------|
+| API | `:8080/metrics` | `logfilter_events_total`, `logfilter_scoring_latency_ms`, `logfilter_threat_score`, `logfilter_model_loaded`, `logfilter_drift_psi` |
+| Collector | `:9100/metrics` | `logfilter_collector_received_total`, `logfilter_collector_published_total`, `logfilter_collector_dropped_total`, `logfilter_collector_spool_depth` |
+
+Collector env var: `SYSLOG_METRICS_PORT` (default: `9100`).
+
+### Alert Rules
+
+Prometheus alerts are in `config/prometheus/alerts.yml`:
+
+- **LogfilterDeadManSwitch** — monitoring pipeline liveness probe
+- **LogfilterAPIDown** — API unreachable >1 min
+- **LogfilterNoEventsScored** — no scoring activity for 10 min
+- **LogfilterCollectorDown** — collector receives no events for 5 min
+- **LogfilterCollectorPublishLag** — events arriving but none reach Kafka
+- **LogfilterCollectorHighDropRate** — >30% drop rate for 10 min
+- **LogfilterCollectorSpoolGrowing** — spool non-empty for 10 min
+- **LogfilterDLQDepthHigh** — DLQ has >100 unprocessed messages
+- **LogfilterHighLatencyP99/P95** — SLO breach on scoring latency
+- **LogfilterLatencyBudgetBurnFast/Slow** — error-budget burn-rate alerts
+
+### Grafana
+
+Dashboards are provisioned from `config/grafana/dashboards/`. Access at
+`http://localhost:3000` (credentials from `.env`).
+
+## Model Artifacts
+
+```
+models/
+├── log_classifier.onnx        # Tier-1 XGBoost classifier
+├── scaler.json                # SafeMaxAbsScaler (JSON, not pickle)
+├── model_manifest.json        # SHA-256 hashes + feature counts
+├── ner/final/                 # SecureBERT 2.0 NER (~1.2 GB)
+│   ├── model.onnx
+│   ├── tokenizer/
+│   └── label_map.json
+└── cross_encoder/final/       # SecureBERT 2.0 CrossEncoder (~600 MB)
+    ├── model.onnx
+    └── tokenizer/
+```
+
+The scorer validates `model_manifest.json` on startup. If hashes mismatch,
+it logs a warning (non-fatal) so you can detect corrupted or stale artifacts.
+
+## Throughput Benchmark
+
+Run a standalone benchmark without Docker:
+
+```bash
+make benchmark-standalone
+```
+
+This measures p50/p95/p99 latency and events/sec against local model artifacts.
+Override sample count and concurrency:
+
+```bash
+make benchmark-standalone BENCHMARK_ARGS="--samples 10000 --concurrency 8"
+```
 
 ## Repository Layout
 
