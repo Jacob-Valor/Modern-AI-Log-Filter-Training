@@ -113,6 +113,14 @@ class DisabledCrossEncoderModel(CrossEncoderModel):
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
+
+# Attack tool signatures that XGBoost misses due to sparse training signal.
+_ATTACK_TOOL_RE = re.compile(
+    "sqlmap|nikto|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|metasploit",
+    re.IGNORECASE,
+)
+_ATTACK_TOOL_FLOOR = 0.60
+
 _FEATURE_STOPWORDS = {
     "a",
     "an",
@@ -283,6 +291,19 @@ class LogScorer:
 
     # ── public API ─────────────────────────────────────────────────────────────
 
+    def preload_models(self) -> None:
+        """Eagerly load all models to eliminate cold-start latency."""
+        logger.info("Pre-loading classifier")
+        _ = self.classifier.is_ready()
+        logger.info("Pre-loading tier2 classifier")
+        _ = self.tier2_classifier.is_ready()
+        logger.info("Pre-loading biencoder")
+        _ = self.biencoder.check_dedup_and_retrieve_batch([])
+        logger.info("Pre-loading NER model")
+        _ = self.ner_model.extract_batch([])
+        logger.info("Pre-loading cross encoder")
+        _ = self.cross_encoder.score_batch([], [])
+
     def score(self, event: NormalizedEvent) -> ScoredEvent:
         """Score a single normalized event. Thread-safe."""
         results = self.score_batch([event])
@@ -404,7 +425,10 @@ class LogScorer:
             high_count = 0
             medium_count = 0
             sigma_count = 0
-            for se in scored:
+            for se, ev in zip(scored, events):
+                if _ATTACK_TOOL_RE.search(ev.raw):
+                    se.classifier_score = max(se.classifier_score, _ATTACK_TOOL_FLOOR)
+                    se.dedup_penalty = 0.0
                 se.ai_threat_score = self._compute_score(se)
                 se.ai_priority = self._routing_label(se)
                 se.ai_confidence = self._confidence(se)
@@ -647,8 +671,14 @@ class LogScorer:
                     vectors[row, col] += 1.0
                     continue
                 if feature_tokens and text_tokens:
-                    hits = sum(1 for token in feature_tokens if token in text_tokens)
-                    if hits / len(feature_tokens) >= 0.75:
+                    hits = 0
+                    for ft in feature_tokens:
+                        if ft in text_tokens:
+                            hits += 1
+                        elif len(ft) >= 4 and any(ft in tt for tt in text_tokens):
+                            hits += 1
+                    threshold = 0.50 if len(feature_tokens) <= 3 else 0.65
+                    if hits / len(feature_tokens) >= threshold:
                         vectors[row, col] += 1.0
         return vectors
 
@@ -661,12 +691,13 @@ class LogScorer:
         prepared: list[tuple[str, tuple[str, ...]]] = []
         for name in feature_names:
             lowered = name.lower()
+            normalized = lowered.replace("+", " ")
             tokens = tuple(
                 token
-                for token in _TOKEN_RE.findall(lowered)
+                for token in _TOKEN_RE.findall(normalized)
                 if len(token) > 2 and token not in _FEATURE_STOPWORDS
             )
-            prepared.append((lowered, tokens))
+            prepared.append((normalized, tokens))
 
         self._feature_cache_names = feature_names
         self._feature_cache_tokens = prepared
