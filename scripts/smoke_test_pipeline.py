@@ -291,7 +291,20 @@ def test_router_logic() -> bool:
 
 def test_scorer_real() -> bool:
     banner("5. LogScorer — full tiered pipeline (real models)")
-    ok = True
+
+    required_models = [
+        ROOT / "models" / "log_classifier.onnx",
+        ROOT / "models" / "biencoder" / "final",
+        ROOT / "models" / "ner" / "final",
+        ROOT / "models" / "cross_encoder" / "final",
+    ]
+    missing = [p for p in required_models if not p.exists()]
+    if missing:
+        print(f"  {INFO} SKIPPED — model artifacts not found:")
+        for p in missing:
+            print(f"         {p.relative_to(ROOT)}")
+        print(f"  {INFO} Run with trained models to exercise this test.")
+        return True
 
     normalizer = LogNormalizer()
     enricher = LEEFEnricher()
@@ -306,6 +319,7 @@ def test_scorer_real() -> bool:
     }
 
     scorer = LogScorer(config=config)
+    ok = True
 
     raw = (
         "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for "
