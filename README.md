@@ -247,3 +247,49 @@ Before production, place public-facing services behind a trusted ingress with
 TLS, restrict syslog ingestion to trusted source networks, and decide whether
 Prometheus/Grafana/Elasticsearch should be private-only or protected by your
 organization's access-control layer.
+
+### TLS Termination
+
+An nginx reverse proxy terminates TLS on port 443. Generate dev certs:
+
+```bash
+bash scripts/certs/generate_services_tls.sh
+docker compose up nginx
+```
+
+For production, replace self-signed certs with your PKI (cert-manager, Let's
+Encrypt, cloud ACM). See `config/nginx/nginx.conf`.
+
+### Distributed Rate Limiting
+
+The API uses Redis-backed rate limiting when `REDIS_URL` is set (configured in
+`docker-compose.yml` by default). Without Redis, rate limiting falls back to
+per-process counters — effective only behind a single replica.
+
+### Elasticsearch ILM
+
+Raw-log indices roll over at 30 GB or 7 days, move to warm at 30 days, and
+delete at 90 days. Apply the policy after ES is healthy:
+
+```bash
+ES_PASSWORD=<your-password> bash scripts/setup_es_ilm.sh
+```
+
+### Backup & Restore
+
+```bash
+# Create snapshot:
+ES_PASSWORD=<your-password> bash scripts/es_backup.sh
+
+# List snapshots:
+curl -u elastic:<pw> http://localhost:9200/_snapshot/logfilter-backups/_all
+
+# Restore:
+ES_PASSWORD=<your-password> bash scripts/es_restore.sh <snapshot-name>
+```
+
+### Alertmanager
+
+Prometheus alerts route to Alertmanager (`:9093`) which forwards to a webhook
+receiver. Set `ALERT_WEBHOOK_URL` in `.env` to deliver alerts. Without it,
+alerts evaluate but are not delivered.
