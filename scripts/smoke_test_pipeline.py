@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -289,142 +289,57 @@ def test_router_logic() -> bool:
     return ok
 
 
-# ── 5. Scorer with mocked models ─────────────────────────────────────────────
+# ── 5. Scorer with real models ──────────────────────────────────────────────
 
 
-def test_scorer_mocked() -> bool:
-    banner("5. LogScorer — full tiered pipeline (models mocked)")
+def test_scorer_real() -> bool:
+    banner("5. LogScorer — full tiered pipeline (real models)")
     ok = True
 
     normalizer = LogNormalizer()
     enricher = LEEFEnricher()
 
-    # Patch heavy model classes to return stub results
-    with (
-        patch("logfilter.pipeline.scorer.LogClassifier") as MockClassifier,
-        patch("logfilter.pipeline.scorer.NERModel") as MockNER,
-        patch("logfilter.pipeline.scorer.BiEncoderModel") as MockBiEncoder,
-        patch("logfilter.pipeline.scorer.CrossEncoderModel") as MockCrossEncoder,
-    ):
-        # Set up mock return values
-        import numpy as np
+    from logfilter.config import load_config
 
-        from logfilter.models.biencoder import ATTACKCandidate, DedupResult
-        from logfilter.models.ner import ExtractedEntities
+    full_config = load_config(ROOT / "config" / "config.yaml")
 
-        mock_clf = MockClassifier.return_value
-        mock_clf.predict_proba.return_value = np.array([0.82])
-        mock_clf.is_ready.return_value = True
+    config = {
+        "scoring": full_config["scoring"],
+        "models": full_config["models"],
+    }
 
-        mock_ner = MockNER.return_value
-        ent = ExtractedEntities(
-            indicators=["10.0.0.5"],
-            malware=[],
-            vulnerabilities=[],
-            organizations=[],
-            systems=[],
-            confidence=0.91,
-            has_high_value_entities=True,
-        )
-        mock_ner.extract_batch.return_value = [ent]
+    scorer = LogScorer(config=config)
 
-        mock_bi = MockBiEncoder.return_value
-        mock_bi.check_dedup_and_retrieve_batch.return_value = [
-            (
-                DedupResult(is_duplicate=False, similarity=0.05),
-                [
-                    ATTACKCandidate(
-                        "T1110.001", "Password Guessing", "Adversaries may guess passwords…", 0.87
-                    )
-                ],
-            )
-        ]
+    raw = (
+        "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for "
+        "root from 10.0.0.5 port 44382 ssh2"
+    )
+    normalized = normalizer.normalize(raw)
+    scored = scorer.score(normalized)
+    leef = enricher.enrich(scored, es_doc_id="es-doc-smoke-test")
 
-        from logfilter.models.cross_encoder import CrossEncoderScore
+    checks = [
+        ("score > 0", scored.ai_threat_score > 0),
+        ("score <= 1", scored.ai_threat_score <= 1.0),
+        (
+            "priority is HIGH/MEDIUM/LOW/INFO",
+            scored.ai_priority in {"HIGH", "MEDIUM", "LOW", "INFO"},
+        ),
+        ("mitre technique set", bool(scored.ai_mitre_technique)),
+        ("entity extracted", bool(scored.ai_entities)),
+        ("LEEF produced", leef.startswith("LEEF:2.0|")),
+        ("source_type preserved", scored.source_type == "syslog"),
+        ("host preserved", scored.host == "prod-srv01"),
+    ]
 
-        mock_ce = MockCrossEncoder.return_value
-        mock_ce.score_batch.return_value = [
-            [CrossEncoderScore(technique_id="T1110.001", name="Password Guessing", score=0.88)]
-        ]
+    for name, result in checks:
+        status = PASS if result else FAIL
+        if not result:
+            ok = False
+        print(f"  {status} {name}")
 
-        config = {
-            "scoring": {
-                "weights": {
-                    "classifier": 0.35,
-                    "entity_boost": 0.25,
-                    "cross_encoder": 0.40,
-                    "novelty": 0.0,
-                },
-                "entity_boost_value": 0.20,
-                "dedup_penalty": 0.30,
-                "routing": {"high": 0.80, "medium": 0.50, "low": 0.20},
-                "tier2": {"uncertainty_low": 0.10, "uncertainty_high": 0.90},
-            },
-            "models": {
-                "classifier": {"path": "models/log_classifier.onnx"},
-                "ner": {
-                    "model_id": "cisco-ai/SecureBERT2.0-NER",
-                    "device": "cpu",
-                    "batch_size": 32,
-                    "min_confidence": 0.80,
-                },
-                "biencoder": {
-                    "model_id": "cisco-ai/SecureBERT2.0-biencoder",
-                    "device": "cpu",
-                    "batch_size": 64,
-                    "dedup_threshold": 0.95,
-                    "dedup_window_minutes": 5.0,
-                    "faiss_top_k": 3,
-                },
-                "cross_encoder": {
-                    "model_id": "cisco-ai/SecureBERT2.0-cross_encoder",
-                    "device": "cpu",
-                    "batch_size": 16,
-                },
-                "mitre_techniques_path": "config/mitre_techniques.json",
-            },
-        }
-
-        scorer = LogScorer(
-            config=config,
-            classifier=mock_clf,
-            ner_model=mock_ner,
-            biencoder=mock_bi,
-            cross_encoder=mock_ce,
-        )
-
-        raw = (
-            "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for "
-            "root from 10.0.0.5 port 44382 ssh2"
-        )
-        normalized = normalizer.normalize(raw)
-        scored = scorer.score(normalized)
-        # B8: enrich() now requires es_doc_id for chain-of-custody. The smoke
-        # test runs with mocked models, so the archive ref is synthetic.
-        leef = enricher.enrich(scored, es_doc_id="es-doc-smoke-test")
-
-        checks = [
-            ("score > 0", scored.ai_threat_score > 0),
-            ("score <= 1", scored.ai_threat_score <= 1.0),
-            (
-                "priority is HIGH/MEDIUM/LOW/INFO",
-                scored.ai_priority in {"HIGH", "MEDIUM", "LOW", "INFO"},
-            ),
-            ("mitre technique set", scored.ai_mitre_technique == "T1110.001"),
-            ("entity extracted", "10.0.0.5" in scored.ai_entities),
-            ("LEEF produced", leef.startswith("LEEF:2.0|")),
-            ("source_type preserved", scored.source_type == "syslog"),
-            ("host preserved", scored.host == "prod-srv01"),
-        ]
-
-        for name, result in checks:
-            status = PASS if result else FAIL
-            if not result:
-                ok = False
-            print(f"  {status} {name}")
-
-        print(f"\n  ai_threat_score={scored.ai_threat_score:.4f}  priority={scored.ai_priority}")
-        print(f"  ai_mitre_technique={scored.ai_mitre_technique}  ai_entities={scored.ai_entities}")
+    print(f"\n  ai_threat_score={scored.ai_threat_score:.4f}  priority={scored.ai_priority}")
+    print(f"  ai_mitre_technique={scored.ai_mitre_technique}  ai_entities={scored.ai_entities}")
 
     return ok
 
@@ -442,7 +357,7 @@ def main() -> None:
         "onnx_classifier": test_onnx_classifier(),
         "leef_enricher": test_leef_enricher(),
         "router_logic": test_router_logic(),
-        "scorer_mocked": test_scorer_mocked(),
+        "scorer_real": test_scorer_real(),
     }
 
     banner("Summary")
