@@ -256,6 +256,11 @@ services:
       SYSLOG_METRICS_PORT: "${SYSLOG_METRICS_PORT:-9100}"
     volumes:
       - ./config:/app/config:ro
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
     restart: unless-stopped
 
   # ── Router (Kafka consumer → LEEF → QRadar) ───────────────────────────────
