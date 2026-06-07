@@ -144,7 +144,7 @@ def test_onnx_classifier() -> bool:
     status2 = PASS if feat_ok else FAIL
     print(f"  {status2} Feature names loaded: {n_features} features")
 
-    return prob_ok and feat_ok
+    return is_neutral and feat_ok
 
 
 # ── 3. LEEF enricher smoke test ───────────────────────────────────────────────
