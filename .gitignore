@@ -39,6 +39,7 @@ build/
 # Generated Kafka TLS/SASL secrets — regenerate locally via scripts/certs/generate.sh
 scripts/certs/*
 !scripts/certs/generate.sh
+!scripts/certs/generate_services_tls.sh
 !scripts/certs/README.md
 !scripts/certs/.gitkeep
 
