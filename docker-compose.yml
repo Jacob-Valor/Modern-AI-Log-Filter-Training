@@ -220,10 +220,13 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       <<: *common-env
+      REDIS_URL: "redis://redis:6379/0"
     volumes:
       - ./config:/app/config:ro
       - ./models:/app/models:ro          # trained ONNX + scaler
