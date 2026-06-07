@@ -288,3 +288,99 @@ def test_drain_keeps_records_that_raise(tmp_path) -> None:
     lines = spool_path.read_text().strip().split("\n")
     assert len(lines) == 1
     assert json.loads(lines[0])["raw"] == "event1"
+
+
+def _reset_collector_counters() -> None:
+    from logfilter.collector import (
+        _collector_dropped_total,
+        _collector_published_total,
+        _collector_received_total,
+    )
+    for c in (_collector_received_total, _collector_published_total):
+        c._metrics.clear()
+    _collector_dropped_total._metrics.clear()
+
+
+def test_prometheus_received_increments_on_publish() -> None:
+    from logfilter.collector import _collector_received_total
+
+    _reset_collector_counters()
+    collector, _producer = _collector("10.0.0.0/24")
+
+    collector.publish("Jan 15 host sshd: Failed password", peer_host="10.0.0.5", protocol="tcp")
+
+    assert _collector_received_total.labels(protocol="tcp")._value.get() == 1
+
+
+def test_prometheus_published_increments_on_success() -> None:
+    from logfilter.collector import _collector_published_total
+
+    _reset_collector_counters()
+    collector, _producer = _collector("10.0.0.0/24")
+
+    collector.publish("Jan 15 host sshd: Failed password", peer_host="10.0.0.5", protocol="udp")
+
+    assert _collector_published_total.labels(protocol="udp")._value.get() == 1
+
+
+def test_prometheus_dropped_empty_increments_on_empty() -> None:
+    from logfilter.collector import _collector_dropped_total
+
+    _reset_collector_counters()
+    collector, _producer = _collector("10.0.0.0/24")
+
+    collector.publish("  ", peer_host="10.0.0.5", protocol="udp")
+
+    assert _collector_dropped_total.labels(reason="empty")._value.get() == 1
+
+
+def test_prometheus_dropped_peer_increments_on_disallowed() -> None:
+    from logfilter.collector import _collector_dropped_total
+
+    _reset_collector_counters()
+    collector, _producer = _collector("10.0.0.0/24")
+
+    collector.publish("raw", peer_host="192.0.2.10", protocol="tcp")
+
+    assert _collector_dropped_total.labels(reason="disallowed_peer")._value.get() == 1
+
+
+def test_prometheus_dropped_kafka_increments_on_producer_failure(tmp_path) -> None:
+    from logfilter.collector import _collector_dropped_total
+
+    _reset_collector_counters()
+    spool_path = tmp_path / "spool.ndjson"
+    collector = SyslogCollector(
+        CollectorSettings(
+            listen_host="127.0.0.1",
+            listen_port=5140,
+            allowed_cidrs=CIDRAllowlist.from_csv("10.0.0.0/24"),
+            bootstrap_servers="localhost:9092",
+            raw_topic="raw-logs",
+            kafka_config={},
+            spool_path=spool_path,
+            max_spool_bytes=1_000_000,
+        )
+    )
+    collector.producer = cast(LogProducer, BrokenProducer())
+
+    collector.publish("test event", peer_host="10.0.0.5", protocol="udp")
+
+    assert _collector_dropped_total.labels(reason="kafka_failure")._value.get() == 1
+
+
+def test_prometheus_received_increments_before_drops() -> None:
+    from logfilter.collector import (
+        _collector_dropped_total,
+        _collector_published_total,
+        _collector_received_total,
+    )
+
+    _reset_collector_counters()
+    collector, _producer = _collector("10.0.0.0/24")
+
+    collector.publish("  ", peer_host="10.0.0.5", protocol="udp")
+
+    assert _collector_received_total.labels(protocol="udp")._value.get() == 1
+    assert _collector_dropped_total.labels(reason="empty")._value.get() == 1
+    assert _collector_published_total.labels(protocol="udp")._value.get() == 0

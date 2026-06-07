@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from prometheus_client import Counter, Gauge, start_http_server
 
 from logfilter import telemetry
 from logfilter.config import load_config
@@ -25,6 +26,27 @@ from logfilter.pipeline.normalizer import LogNormalizer
 from logfilter.security.network import CIDRAllowlist
 
 logger = structlog.get_logger(__name__)
+
+# ── Prometheus metrics ─────────────────────────────────────────────────────────
+_collector_received_total = Counter(
+    "logfilter_collector_received_total",
+    "Raw syslog messages received by collector",
+    ["protocol"],
+)
+_collector_published_total = Counter(
+    "logfilter_collector_published_total",
+    "Events successfully published to Kafka",
+    ["protocol"],
+)
+_collector_dropped_total = Counter(
+    "logfilter_collector_dropped_total",
+    "Events dropped by collector",
+    ["reason"],
+)
+_collector_spool_depth = Gauge(
+    "logfilter_collector_spool_depth",
+    "Number of events queued in the NDJSON spool",
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +62,7 @@ class CollectorSettings:
     spool_path: Path | None = None
     max_spool_bytes: int = 50_000_000
     spool_drain_interval: float = 30.0
+    metrics_port: int = 9100
 
 
 def _settings() -> CollectorSettings:
@@ -61,6 +84,7 @@ def _settings() -> CollectorSettings:
         spool_path=Path(spool_path_str) if spool_path_str else None,
         max_spool_bytes=int(os.environ.get("SYSLOG_MAX_SPOOL_BYTES", "50000000")),
         spool_drain_interval=float(os.environ.get("SYSLOG_SPOOL_DRAIN_INTERVAL", "30.0")),
+        metrics_port=int(os.environ.get("SYSLOG_METRICS_PORT", "9100")),
     )
 
 
@@ -102,6 +126,7 @@ class BoundedNDJSONSpool:
             lines.append(line)
             lines = self._enforce_bound(lines)
             self._write_lines(lines)
+            _collector_spool_depth.set(len(lines))
 
     def drain(self, callback: Callable[[dict[str, Any]], None]) -> int:
         """Replay spooled records via *callback*; return count replayed."""
@@ -119,6 +144,7 @@ class BoundedNDJSONSpool:
                 except Exception:  # noqa: BLE001
                     remaining.append(line)
             self._write_lines(remaining)
+            _collector_spool_depth.set(len(remaining))
             return replayed
 
 
@@ -143,6 +169,7 @@ class SyslogCollector:
             )
 
     def publish(self, raw: str, peer_host: str, protocol: str) -> None:
+        _collector_received_total.labels(protocol=protocol).inc()
         with telemetry.start_as_current_span(
             "collector.syslog.publish",
             {
@@ -154,6 +181,7 @@ class SyslogCollector:
             raw = raw.strip()
             if not raw:
                 span.set_attribute("logfilter.collector.dropped", "empty")
+                _collector_dropped_total.labels(reason="empty").inc()
                 return
             try:
                 allowed = self.settings.allowed_cidrs.allows(peer_host)
@@ -161,6 +189,7 @@ class SyslogCollector:
                 allowed = False
             if not allowed:
                 span.set_attribute("logfilter.collector.dropped", "disallowed_peer")
+                _collector_dropped_total.labels(reason="disallowed_peer").inc()
                 logger.warning("Rejected syslog event from disallowed source", peer_host=peer_host)
                 return
 
@@ -180,8 +209,10 @@ class SyslogCollector:
                     host=host,
                     metadata={"collector_peer": peer_host, "collector_protocol": protocol},
                 )
+                _collector_published_total.labels(protocol=protocol).inc()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Kafka producer failed, spooling event", error=str(exc))
+                _collector_dropped_total.labels(reason="kafka_failure").inc()
                 if self._spool is not None:
                     self._spool.write(
                         {
@@ -373,6 +404,12 @@ class SyslogCollector:
                 logger.error("Spool drain failed", error=str(exc))
 
     def run(self) -> None:  # pragma: no cover
+        start_http_server(self.settings.metrics_port)
+        logger.info(
+            "Collector metrics server started",
+            port=self.settings.metrics_port,
+        )
+
         threads = [
             threading.Thread(target=self.serve_udp, daemon=True),
             threading.Thread(target=self.serve_tcp, daemon=True),

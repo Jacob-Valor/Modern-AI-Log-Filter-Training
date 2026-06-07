@@ -140,6 +140,49 @@ groups:
           summary: "Dead man's switch: monitoring pipeline is alive"
           description: "If this alert is NOT firing, the monitoring pipeline itself is broken."
 
+      # ── Collector Throughput ────────────────────────────────────────────────
+      - alert: LogfilterCollectorDown
+        expr: rate(logfilter_collector_received_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Collector received no events in 5 minutes"
+          description: "The collector is not receiving any syslog traffic. Check network / upstream senders."
+
+      - alert: LogfilterCollectorPublishLag
+        expr: |
+          rate(logfilter_collector_received_total[5m]) > 0
+          and
+          rate(logfilter_collector_published_total[5m]) == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Collector receiving events but publishing none to Kafka"
+          description: "Events are arriving but none reach Kafka. Kafka may be down or auth failing."
+
+      - alert: LogfilterCollectorHighDropRate
+        expr: |
+          rate(logfilter_collector_dropped_total[5m])
+          /
+          rate(logfilter_collector_received_total[5m]) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Collector drop rate > 30%"
+          description: "{{ $value }} of received events are being dropped. Check allowed CIDRs or empty payloads."
+
+      - alert: LogfilterCollectorSpoolGrowing
+        expr: logfilter_collector_spool_depth > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Collector spool is non-empty for 10+ minutes"
+          description: "Kafka producer may be persistently failing; spool depth is {{ $value }}."
+
       # ── DLQ Depth ─────────────────────────────────────────────────────────
       - alert: LogfilterDLQDepthHigh
         expr: |
