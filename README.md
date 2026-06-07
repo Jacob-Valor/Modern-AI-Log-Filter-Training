@@ -282,7 +282,7 @@ ES_PASSWORD=<your-password> bash scripts/setup_es_ilm.sh
 ES_PASSWORD=<your-password> bash scripts/es_backup.sh
 
 # List snapshots:
-curl -u elastic:<pw> http://localhost:9200/_snapshot/logfilter-backups/_all
+ES_PASSWORD=<your-password> bash scripts/es_backup.sh list
 
 # Restore:
 ES_PASSWORD=<your-password> bash scripts/es_restore.sh <snapshot-name>

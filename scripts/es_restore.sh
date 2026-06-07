@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Elasticsearch snapshot restore for raw-logs indices.
 # Usage: bash scripts/es_restore.sh <snapshot-name>
-# List available snapshots: curl -u elastic:PASS http://localhost:9200/_snapshot/logfilter-backups/_all
+# List available snapshots: curl -u "${ES_USER}:${ES_PASS}" "${ES_HOST}/_snapshot/logfilter-backups/_all"
 
 set -euo pipefail
 

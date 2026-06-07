@@ -388,7 +388,6 @@ def test_prometheus_received_increments_before_drops() -> None:
 
 def test_metrics_server_returns_200_on_slash_metrics() -> None:
     import socket
-    import threading
 
     from prometheus_client import start_http_server
 
@@ -430,7 +429,6 @@ def test_metrics_server_exposes_collector_counters() -> None:
                 if not chunk:
                     break
                 body += chunk
-        text = body.decode()
         assert b"logfilter_collector_received_total" in body
         assert b"logfilter_collector_published_total" in body
         assert b"logfilter_collector_dropped_total" in body
