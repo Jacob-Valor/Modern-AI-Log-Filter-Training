@@ -136,9 +136,9 @@ def test_onnx_classifier() -> bool:
     zero_vec = np.zeros((1, n_features), dtype=np.float32)
     prob = classifier.predict_proba(zero_vec)
     prob_val = float(prob[0])
-    prob_ok = 0.0 <= prob_val <= 1.0
-    status = PASS if prob_ok else FAIL
-    print(f"  {status} Zero vector → failure_prob={prob_val:.4f} (in [0, 1])")
+    is_neutral = prob_val == 0.5
+    status = PASS if is_neutral else FAIL
+    print(f"  {status} Zero vector → failure_prob={prob_val:.4f} (expected 0.5, i.e. neutral)")
 
     feat_ok = n_features > 0
     status2 = PASS if feat_ok else FAIL

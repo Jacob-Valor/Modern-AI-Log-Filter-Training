@@ -171,6 +171,12 @@ class LogClassifier:
 
         X = feature_vectors.astype(np.float32)
 
+        # Zero or near-zero vectors (empty/malformed logs) → neutral score
+        row_sums = np.abs(X).sum(axis=1)
+        neutral_mask = row_sums == 0.0
+        if neutral_mask.all():
+            return np.full(len(X), 0.5)
+
         # Apply scaler if available
         if self._scaler is not None:
             X = self._scaler.transform(X).astype(np.float32)
@@ -182,15 +188,16 @@ class LogClassifier:
             proba_output = outputs[1]
             if isinstance(proba_output, list):
                 # List of dicts like [{'0': 0.1, '1': 0.9}, ...]
-                return np.array([float(d.get("1", 0.5)) for d in proba_output])
+                result = np.array([float(d.get("1", 0.5)) for d in proba_output])
             else:
-                return proba_output[:, 1]
+                result = proba_output[:, 1]
+        elif self._xgb_model is not None:
+            result = self._xgb_model.predict_proba(X)[:, 1]
+        else:
+            result = np.full(len(X), 0.5)
 
-        if self._xgb_model is not None:
-            return self._xgb_model.predict_proba(X)[:, 1]
-
-        # No model: return neutral probability
-        return np.full(len(feature_vectors), 0.5)
+        result[neutral_mask] = 0.5
+        return result
 
     def predict_single(self, feature_vector: np.ndarray) -> float:
         """Predict failure probability for a single event."""
