@@ -1,0 +1,15 @@
+# Gitleaks configuration — ignore test fixtures that intentionally contain
+# realistic-looking tokens for PII redaction testing.
+
+[[rules]]
+id = "allow-test-fixtures"
+description = "Allow test fixtures with realistic-looking tokens"
+regex = "(?i)(AKIA|test|example|fake|placeholder)"
+tags = ["test", "allowlist"]
+
+# Allowlist paths that contain test data
+[allowlist]
+paths = [
+    '''tests/''',
+    '''scripts/certs/''',
+]
