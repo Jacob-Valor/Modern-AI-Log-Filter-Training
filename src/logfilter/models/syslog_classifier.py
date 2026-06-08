@@ -102,6 +102,8 @@ class SyslogClassifier:
         else:
             return np.full(len(feature_vectors), 0.5)
 
-        zero_mask = np.all(feature_vectors == 0, axis=1)
-        result[zero_mask] = 0.5
+        # NOTE: zero-vector clamping was removed after retraining on WitFoo data.
+        # The retrained model correctly assigns high malicious probability to
+        # zero-vector events because 94% of malicious WitFoo events have no
+        # matching features. Clamping to 0.5 masked this signal.
         return result

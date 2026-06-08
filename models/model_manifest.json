@@ -25,11 +25,11 @@
       "path": "models/syslog",
       "artifacts": {
         "log_classifier_syslog.onnx": {
-          "sha256": "a9e7222a29ec0404",
-          "size_mb": 0.08
+          "sha256": "e08a7c3dbdeb9ace",
+          "size_mb": 0.10
         }
       },
-      "onnx_input_features": 100
+      "onnx_input_features": 110
     },
     "ner": {
       "path": "models/ner/final",

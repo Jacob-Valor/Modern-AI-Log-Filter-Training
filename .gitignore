@@ -45,3 +45,10 @@ scripts/certs/*
 
 # remote scripts
 scripts/remote/
+
+# Large raw datasets — download from source instead
+demo_data/witfoo/signals/signals.parquet
+
+# Large training artifacts (>100 MB)
+kaggle-output/**/*.zip
+kaggle-output/**/*.log

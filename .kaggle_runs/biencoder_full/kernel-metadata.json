@@ -1,0 +1,23 @@
+{
+  "id": "jacobvalor/logfilter-biencoder-full-run-full-hdfs-corpus",
+  "title": "LogFilter BiEncoder full run (full HDFS corpus)",
+  "code_file": "kaggle_train_biencoder.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "jacobvalor/hdfs-tracebench-preprocessed-logs"
+  ],
+  "kernel_sources": [],
+  "model_sources": [],
+  "keywords": [
+    "logfilter",
+    "biencoder",
+    "securebert",
+    "hdfs",
+    "mitre-attack"
+  ],
+  "collaborators": []
+}

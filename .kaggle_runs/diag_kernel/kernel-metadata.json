@@ -1,0 +1,15 @@
+{
+  "id": "jacobvalor/logfilter-kaggle-diagnostic-kaggle-input-dump",
+  "title": "LogFilter Kaggle diagnostic (kaggle/input/ dump)",
+  "code_file": "diag_kernel.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "dataset_sources": ["jacobvalor/hdfs-tracebench-preprocessed-logs"],
+  "kernel_sources": [],
+  "model_sources": [],
+  "keywords": [],
+  "collaborators": []
+}

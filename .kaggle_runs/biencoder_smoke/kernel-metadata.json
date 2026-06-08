@@ -1,0 +1,10 @@
+{
+  "id": "jacobvalor/logfilter-biencoder-smoke",
+  "title": "LogFilter BiEncoder smoke test",
+  "code_file": "kaggle_train_biencoder.ipynb",
+  "language": "python",
+  "enable_internet": true,
+  "dataset_sources": ["jacobvalor/hdfs-tracebench-preprocessed-logs"],
+  "kernel_type": "notebook",
+  "gpu_type": "p100"
+}

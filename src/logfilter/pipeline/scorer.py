@@ -819,7 +819,7 @@ class LogScorer:
         return vectors
 
     def _syslog_feature_vectors(self, events: list[NormalizedEvent]) -> np.ndarray:
-        """Convert normalized log text into the 100-feature syslog classifier vector."""
+        """Convert normalized log text into the syslog classifier feature vector (110 features)."""
         feature_names = tuple(self.syslog_classifier.feature_names)
         n_features = len(feature_names) or 100
         vectors = np.zeros((len(events), n_features), dtype=np.float32)

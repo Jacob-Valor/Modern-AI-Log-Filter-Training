@@ -1,0 +1,10 @@
+{
+  "id": "jacobvalor/logfilter-biencoder-full-diag",
+  "title": "LogFilter BiEncoder full-run diagnostic",
+  "code_file": "kaggle_train_biencoder.ipynb",
+  "language": "python",
+  "enable_internet": true,
+  "dataset_sources": ["jacobvalor/hdfs-tracebench-preprocessed-logs"],
+  "kernel_type": "notebook",
+  "gpu_type": "p100"
+}

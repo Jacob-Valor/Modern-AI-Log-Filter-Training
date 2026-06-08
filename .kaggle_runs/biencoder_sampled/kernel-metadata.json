@@ -1,0 +1,23 @@
+{
+  "id": "jacobvalor/logfilter-biencoder-sampled-run-sampled-2k-2k",
+  "title": "LogFilter BiEncoder sampled run (sampled 2K+2K)",
+  "code_file": "kaggle_train_biencoder.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "jacobvalor/hdfs-tracebench-preprocessed-logs"
+  ],
+  "kernel_sources": [],
+  "model_sources": [],
+  "keywords": [
+    "logfilter",
+    "biencoder",
+    "securebert",
+    "hdfs",
+    "mitre-attack"
+  ],
+  "collaborators": []
+}
