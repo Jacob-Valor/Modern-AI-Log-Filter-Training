@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:a3ab0b966bc4e91546a033e22093cb840908979487a9fc0e6e38295747e49ac0
 
 LABEL description="AI Log Filter — Kafka Consumer + LEEF Router → QRadar"
 
@@ -8,14 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN sed -i 's/\[.*\]//g' requirements.txt && \
-    pip install --no-cache-dir -c requirements.txt kafka-python structlog tenacity PyYAML elasticsearch httpx
+COPY --from=ghcr.io/astral-sh/uv:0.11.4 /uv /usr/local/bin/uv
+COPY uv.lock pyproject.toml ./
+RUN uv pip install --system --locked --no-cache kafka-python structlog tenacity PyYAML elasticsearch httpx
 
 COPY src/ ./src/
 COPY config/ ./config/
-COPY pyproject.toml .
-RUN pip install --no-cache-dir -e . --no-deps
+RUN uv pip install --system --no-cache -e . --no-deps
 
 RUN useradd -m -u 1000 logfilter && chown -R logfilter:logfilter /app
 USER logfilter

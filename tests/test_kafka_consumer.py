@@ -10,6 +10,7 @@ import pytest
 from logfilter.kafka import consumer as consumer_module
 from logfilter.kafka.consumer import ArchiveConsumer, ScorerConsumer
 from logfilter.kafka.producer import LogProducer
+from logfilter.pipeline.archive import compute_kafka_raw_log_ref
 
 
 class FakeKafkaConsumer:
@@ -66,6 +67,45 @@ def test_archive_consumer_writes_bulk_and_commits() -> None:
     assert fake.commits == 1
     assert fake.closed
     assert es.bulk_calls[0][1]["raw"] == "raw"
+
+
+def test_archive_consumer_redacts_raw_and_uses_kafka_offset_document_id(monkeypatch) -> None:
+    class FakeES:
+        def __init__(self) -> None:
+            self.bulk_calls = []
+
+        def bulk(self, body):
+            self.bulk_calls.append(body)
+            return {"errors": False}
+
+    class SensitiveKafkaConsumer(FakeKafkaConsumer):
+        def poll(self, timeout_ms: int):
+            self.poll_calls += 1
+            if self.poll_calls == 1:
+                msg = SimpleNamespace(
+                    value={
+                        "raw": "email=alice@example.com password=hunter2",
+                        "source_type": "syslog",
+                        "host": "host",
+                        "ingest_ts": 1.0,
+                    },
+                    offset=7,
+                    partition=2,
+                )
+                return {"topic-partition": [msg]}
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(consumer_module, "KafkaConsumer", SensitiveKafkaConsumer)
+    es = FakeES()
+    consumer = ArchiveConsumer("kafka:29092", "raw-logs", es_client=es)
+
+    with pytest.raises(KeyboardInterrupt):
+        consumer.run()
+
+    assert es.bulk_calls[0][0]["index"]["_id"] == compute_kafka_raw_log_ref(
+        "raw-logs", 2, 7
+    )
+    assert es.bulk_calls[0][1]["raw"] == "email=<EMAIL> password=<REDACTED>"
 
 
 def test_archive_consumer_defaults_to_earliest_offsets() -> None:

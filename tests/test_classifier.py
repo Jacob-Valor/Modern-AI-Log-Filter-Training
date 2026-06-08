@@ -87,6 +87,14 @@ def test_safe_max_abs_scaler_transform_validates_shape() -> None:
         scaler.transform(np.array([[1.0]], dtype=np.float32))
 
 
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+def test_safe_max_abs_scaler_rejects_non_finite_inputs(bad_value: float) -> None:
+    scaler = SafeMaxAbsScaler(np.array([1.0, 2.0], dtype=np.float32))
+
+    with pytest.raises(ValueError, match="non-finite input"):
+        scaler.transform(np.array([[1.0, bad_value]], dtype=np.float32))
+
+
 def test_classifier_returns_neutral_probability_without_model(tmp_path) -> None:
     classifier = LogClassifier(
         model_path=tmp_path / "missing.onnx",
@@ -131,6 +139,7 @@ def test_classifier_applies_scaler_and_session_list_output(tmp_path) -> None:
 
     result = classifier.predict_proba(np.array([[4.0]], dtype=np.float32))
 
+    assert session.seen is not None
     np.testing.assert_allclose(session.seen, np.array([[2.0]], dtype=np.float32))
     np.testing.assert_allclose(result, np.array([0.9]))
     assert classifier.expected_feature_count == 1
@@ -284,7 +293,8 @@ def test_classifier_falls_back_to_xgb_when_onnx_fails(tmp_path, monkeypatch) -> 
     result = classifier.predict_proba(np.array([[1.0]], dtype=np.float32))
     np.testing.assert_allclose(result, np.array([0.7]))
     assert classifier.is_ready()
-    assert classifier._xgb_model.loaded_path == str(json_path)
+    assert classifier._xgb_model is not None
+    assert getattr(classifier._xgb_model, "loaded_path") == str(json_path)
     # Scaler takes precedence for expected_feature_count when present
     assert classifier.expected_feature_count == 1
 

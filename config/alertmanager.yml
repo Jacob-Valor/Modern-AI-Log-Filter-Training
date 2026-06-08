@@ -16,12 +16,12 @@ route:
 receivers:
   - name: 'default-webhook'
     webhook_configs:
-      - url: '${ALERT_WEBHOOK_URL:-http://localhost:9095/webhook}'
+      - url: '${ALERT_WEBHOOK_URL}'
         send_resolved: true
 
   - name: 'critical-webhook'
     webhook_configs:
-      - url: '${ALERT_WEBHOOK_URL:-http://localhost:9095/webhook}'
+      - url: '${ALERT_WEBHOOK_URL}'
         send_resolved: true
 
 inhibit_rules:

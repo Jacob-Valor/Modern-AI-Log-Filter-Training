@@ -84,6 +84,8 @@ class SafeMaxAbsScaler:
             raise ValueError(
                 f"Scaler expected {self.n_features_in_} features, got {matrix.shape[1]}"
             )
+        if not np.isfinite(matrix).all():
+            raise ValueError("Scaler input contains non-finite input values")
         return matrix / self.scale
 
 

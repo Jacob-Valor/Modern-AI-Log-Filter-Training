@@ -387,36 +387,49 @@ class LogScorer:
                 "scorer.tier2.biencoder",
                 {"logfilter.batch_size": len(texts)},
             ) as bi_span:
-                bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
-                duplicate_count = 0
-                candidate_count = 0
-                for se, (dedup_res, candidates) in zip(scored, bi_results):
-                    se.is_duplicate = dedup_res.is_duplicate
-                    se.dedup_similarity = dedup_res.similarity
-                    se.attack_candidates = [
+                tier3_failed = False
+                try:
+                    bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
+                    duplicate_count = 0
+                    candidate_count = 0
+                    for se, (dedup_res, candidates) in zip(scored, bi_results):
+                        se.is_duplicate = dedup_res.is_duplicate
+                        se.dedup_similarity = dedup_res.similarity
+                        se.attack_candidates = [
+                            {
+                                "id": c.technique_id,
+                                "name": c.name,
+                                "description": c.description,
+                                "bi_similarity": round(c.similarity, 4),
+                            }
+                            for c in candidates
+                        ]
+                        candidate_count += len(candidates)
+                        if se.is_duplicate:
+                            duplicate_count += 1
+                            se.dedup_penalty = self.dedup_penalty_value
+                    telemetry.set_span_attributes(
+                        bi_span,
                         {
-                            "id": c.technique_id,
-                            "name": c.name,
-                            "description": c.description,
-                            "bi_similarity": round(c.similarity, 4),
-                        }
-                        for c in candidates
-                    ]
-                    candidate_count += len(candidates)
-                    if se.is_duplicate:
-                        duplicate_count += 1
-                        se.dedup_penalty = self.dedup_penalty_value
-                telemetry.set_span_attributes(
-                    bi_span,
-                    {
-                        "logfilter.duplicate_count": duplicate_count,
-                        "logfilter.attack_candidate_count": candidate_count,
-                    },
-                )
+                            "logfilter.duplicate_count": duplicate_count,
+                            "logfilter.attack_candidate_count": candidate_count,
+                        },
+                    )
+                except Exception as exc:
+                    bi_span.set_attribute("logfilter.tier3_error_stage", "biencoder")
+                    bi_span.set_attribute("logfilter.tier3_error_type", type(exc).__name__)
+                    self._apply_tier3_neutral_fallback(
+                        scored,
+                        stage="biencoder",
+                        exc=exc,
+                    )
+                    tier3_failed = True
 
             # ── Tier 3: NER + CrossEncoder (skip duplicates) ───────────────────
-            non_dup_indices = [i for i, se in enumerate(scored) if not se.is_duplicate]
-            if non_dup_indices:
+            non_dup_indices = [] if tier3_failed else [
+                i for i, se in enumerate(scored) if not se.is_duplicate
+            ]
+            if non_dup_indices and not tier3_failed:
                 nd_texts = [texts[i] for i in non_dup_indices]
                 nd_scored = [scored[i] for i in non_dup_indices]
 
@@ -425,49 +438,79 @@ class LogScorer:
                     "scorer.ner.extract_batch",
                     {"logfilter.batch_size": len(nd_texts)},
                 ) as ner_span:
-                    ner_results = self.ner_model.extract_batch(nd_texts)
-                    high_value_count = 0
-                    for se, ner_result in zip(nd_scored, ner_results):
-                        se.entities = ner_result.to_dict()
-                        se.ai_entities = ner_result.flat_entity_string()
-                        if ner_result.has_high_value_entities:
-                            high_value_count += 1
-                            se.entity_boost = self.entity_boost_value
-                    ner_span.set_attribute("logfilter.high_value_entity_count", high_value_count)
+                    try:
+                        ner_results = self.ner_model.extract_batch(nd_texts)
+                        high_value_count = 0
+                        for se, ner_result in zip(nd_scored, ner_results):
+                            se.entities = ner_result.to_dict()
+                            se.ai_entities = ner_result.flat_entity_string()
+                            if ner_result.has_high_value_entities:
+                                high_value_count += 1
+                                se.entity_boost = self.entity_boost_value
+                        ner_span.set_attribute(
+                            "logfilter.high_value_entity_count", high_value_count
+                        )
+                    except Exception as exc:
+                        ner_span.set_attribute("logfilter.tier3_error_stage", "ner")
+                        ner_span.set_attribute("logfilter.tier3_error_type", type(exc).__name__)
+                        self._apply_tier3_neutral_fallback(
+                            scored,
+                            stage="ner",
+                            exc=exc,
+                        )
+                        tier3_failed = True
 
                 # CrossEncoder
-                candidates_per_event = [
-                    [
-                        {
-                            "id": c["id"],
-                            "name": c["name"],
-                            "description": c["description"],
-                        }
-                        for c in se.attack_candidates
-                    ]
-                    for se in nd_scored
-                ]
-                with telemetry.start_as_current_span(
-                    "scorer.cross_encoder.score_batch",
-                    {
-                        "logfilter.batch_size": len(nd_texts),
-                        "logfilter.attack_candidate_count": sum(
-                            len(candidates) for candidates in candidates_per_event
-                        ),
-                    },
-                ) as ce_span:
-                    ce_results = self.cross_encoder.score_batch(nd_texts, candidates_per_event)
-                    matched_count = 0
-                    for se, ce_scores in zip(nd_scored, ce_results):
-                        se.cross_encoder_scores = [
-                            {"id": s.technique_id, "name": s.name, "score": round(s.score, 4)}
-                            for s in ce_scores
+                if not tier3_failed:
+                    candidates_per_event = [
+                        [
+                            {
+                                "id": c["id"],
+                                "name": c["name"],
+                                "description": c["description"],
+                            }
+                            for c in se.attack_candidates
                         ]
-                        if ce_scores:
-                            matched_count += 1
-                            se.cross_encoder_max = ce_scores[0].score
-                            se.ai_mitre_technique = ce_scores[0].technique_id
-                    ce_span.set_attribute("logfilter.cross_encoder_match_count", matched_count)
+                        for se in nd_scored
+                    ]
+                    with telemetry.start_as_current_span(
+                        "scorer.cross_encoder.score_batch",
+                        {
+                            "logfilter.batch_size": len(nd_texts),
+                            "logfilter.attack_candidate_count": sum(
+                                len(candidates) for candidates in candidates_per_event
+                            ),
+                        },
+                    ) as ce_span:
+                        try:
+                            ce_results = self.cross_encoder.score_batch(
+                                nd_texts, candidates_per_event
+                            )
+                            matched_count = 0
+                            for se, ce_scores in zip(nd_scored, ce_results):
+                                se.cross_encoder_scores = [
+                                    {
+                                        "id": s.technique_id,
+                                        "name": s.name,
+                                        "score": round(s.score, 4),
+                                    }
+                                    for s in ce_scores
+                                ]
+                                if ce_scores:
+                                    matched_count += 1
+                                    se.cross_encoder_max = ce_scores[0].score
+                                    se.ai_mitre_technique = ce_scores[0].technique_id
+                            ce_span.set_attribute(
+                                "logfilter.cross_encoder_match_count", matched_count
+                            )
+                        except Exception as exc:
+                            ce_span.set_attribute("logfilter.tier3_error_stage", "cross_encoder")
+                            ce_span.set_attribute("logfilter.tier3_error_type", type(exc).__name__)
+                            self._apply_tier3_neutral_fallback(
+                                scored,
+                                stage="cross_encoder",
+                                exc=exc,
+                            )
 
             # ── Final score + routing ──────────────────────────────────────────
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -635,6 +678,31 @@ class LogScorer:
                             if word.strip(".,;:!?") == search_text:
                                 return True
         return False
+
+    def _apply_tier3_neutral_fallback(
+        self,
+        scored: list[ScoredEvent],
+        *,
+        stage: str,
+        exc: Exception,
+    ) -> None:
+        logger.warning(
+            "Tier-3 scoring failed; using neutral downstream scores",
+            stage=stage,
+            error_type=type(exc).__name__,
+        )
+        for se in scored:
+            se.is_duplicate = False
+            se.dedup_similarity = 0.0
+            se.attack_candidates = []
+            se.entities = {}
+            se.ai_entities = ""
+            se.entity_boost = 0.0
+            se.cross_encoder_scores = []
+            se.cross_encoder_max = 0.0
+            se.ai_mitre_technique = ""
+            se.dedup_penalty = 0.0
+            se.score_degraded = True
 
     def _apply_classifier(self, scored: list[ScoredEvent], events: list[NormalizedEvent]) -> None:
         """Populate classifier_score using the trained event-count classifier."""

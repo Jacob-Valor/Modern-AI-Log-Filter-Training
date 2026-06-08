@@ -16,6 +16,8 @@ from typing import Any
 import structlog
 from elasticsearch import Elasticsearch, helpers
 
+from logfilter.security.redaction import RedactionConfig, redact
+
 logger = structlog.get_logger(__name__)
 
 
@@ -41,6 +43,7 @@ class LogArchive:
         password: str | None = None,
         shards: int = 1,
         replicas: int = 0,
+        redaction_config: RedactionConfig | None = None,
     ) -> None:
         if not password:
             raise ValueError(
@@ -51,6 +54,7 @@ class LogArchive:
         self.index_prefix = index_prefix
         self.shards = shards
         self.replicas = replicas
+        self.redaction_config = redaction_config or RedactionConfig()
         client_kwargs: dict[str, Any] = {
             "hosts": hosts or ["http://localhost:9200"],
             "retry_on_timeout": True,
@@ -63,8 +67,10 @@ class LogArchive:
 
     @property
     def client(self) -> Elasticsearch:
-        """Underlying Elasticsearch client for integrations that need bulk APIs."""
         return self._es
+
+    def close(self) -> None:
+        self._es.transport.close()
 
     def _today_index(self) -> str:
         return f"{self.index_prefix}-{time.strftime('%Y.%m.%d')}"
@@ -138,7 +144,7 @@ class LogArchive:
         if ingest_ts is None:
             ingest_ts = time.time()
         doc = {
-            "raw": raw,
+            "raw": self._redact_raw(raw),
             "source_type": source_type,
             "host": host,
             "ingest_ts": ingest_ts,
@@ -170,7 +176,7 @@ class LogArchive:
         if ingest_ts is None:
             ingest_ts = time.time()
         doc = {
-            "raw": raw,
+            "raw": self._redact_raw(raw),
             "source_type": source_type,
             "host": host,
             "ingest_ts": ingest_ts,
@@ -196,7 +202,7 @@ class LogArchive:
             doc = {
                 "_index": self._today_index(),
                 "_source": {
-                    "raw": event.get("raw", ""),
+                    "raw": self._redact_raw(str(event.get("raw", ""))),
                     "source_type": event.get("source_type", "generic"),
                     "host": event.get("host", "unknown"),
                     "ingest_ts": event.get("ingest_ts", now),
@@ -219,6 +225,9 @@ class LogArchive:
         # For production, use pipeline IDs or write individual docs.
         logger.debug("Bulk archived", count=successes)
         return []  # IDs not available from bulk; use write() for individual IDs
+
+    def _redact_raw(self, raw: str) -> str:
+        return redact(raw, config=self.redaction_config)
 
     def get_by_id(self, doc_id: str, index: str | None = None) -> dict[str, Any] | None:
         """Retrieve a raw log document by its Elasticsearch ID."""
@@ -253,7 +262,8 @@ class LogArchive:
     def health(self) -> dict[str, Any]:
         """Return ES cluster health summary."""
         try:
-            return dict(self._es.cluster.health())
+            health: Any = self._es.cluster.health()
+            return dict(health)
         except Exception as exc:  # noqa: BLE001
             return {"status": "unavailable", "error": str(exc)}
 
@@ -284,6 +294,18 @@ def compute_raw_log_ref(
             "host": host,
             "ingest_ts": round(float(ingest_ts), 6),
         },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_kafka_raw_log_ref(topic: str, partition: int, offset: int) -> str:
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        {"topic": topic, "partition": int(partition), "offset": int(offset)},
         sort_keys=True,
         separators=(",", ":"),
     )

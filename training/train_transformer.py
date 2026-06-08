@@ -248,11 +248,11 @@ def export_onnx(model_dir: Path, output_path: Path) -> None:
             source = Path(tmpdir) / "model.onnx"
             output_path.write_bytes(source.read_bytes())
         logger.info("ONNX model saved to %s", output_path)
-    except ImportError:
-        logger.warning(
-            "optimum[onnxruntime] not installed — skipping ONNX export. "
+    except ImportError as exc:
+        raise RuntimeError(
+            "optimum[onnxruntime] is required for ONNX export but is not installed. "
             "Install with: pip install optimum[onnxruntime] onnx onnxruntime"
-        )
+        ) from exc
 
 
 def make_weighted_loss_trainer(trainer_cls: Any, nn_module: Any) -> type[Any]:

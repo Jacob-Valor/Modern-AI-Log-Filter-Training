@@ -176,6 +176,7 @@ class HealthResponse(BaseModel):
     status: str  # "healthy" | "degraded" | "unhealthy"
     version: str
     models_loaded: dict[str, bool]
+    dependencies: dict[str, str] = Field(default_factory=dict)
     uptime_seconds: float
 
 

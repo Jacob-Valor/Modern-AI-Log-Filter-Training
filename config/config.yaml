@@ -33,6 +33,15 @@ elasticsearch:
   password: "${ES_PASSWORD:}"
   index_shards: 1
   index_replicas: 0
+  redaction:
+    enabled: "${LOGFILTER_REDACTION_ENABLED:true}"
+    redact_emails: "${LOGFILTER_REDACT_EMAILS:true}"
+    redact_credit_cards: "${LOGFILTER_REDACT_CREDIT_CARDS:true}"
+    redact_secrets: "${LOGFILTER_REDACT_SECRETS:true}"
+    # IPs and hostnames are critical SIEM investigation signals. Keep them by
+    # default; enable these in stricter privacy environments.
+    redact_ip_addresses: "${LOGFILTER_REDACT_IP_ADDRESSES:false}"
+    redact_hostnames: "${LOGFILTER_REDACT_HOSTNAMES:false}"
 
 # ── HuggingFace cache ────────────────────────────────────────────────────────
 # Shared cache directory for downloaded transformer models.
@@ -115,6 +124,7 @@ api:
   scoring_token: "${LOGFILTER_API_TOKEN:}"
   metrics_token: "${LOGFILTER_METRICS_TOKEN:}"
   rate_limit_per_minute: 60
+  trusted_proxies: ["${LOGFILTER_TRUSTED_PROXIES:}"]
 
 # ── Monitoring ───────────────────────────────────────────────────────────────
 monitoring:

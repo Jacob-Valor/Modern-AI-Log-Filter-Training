@@ -16,7 +16,7 @@ Two consumers share the same raw-logs topic (different consumer groups):
 from __future__ import annotations
 
 import json
-import signal
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +27,8 @@ from kafka import KafkaConsumer
 from logfilter import telemetry
 from logfilter.kafka.config import kafka_security_kwargs
 from logfilter.kafka.producer import LogProducer
+from logfilter.pipeline.archive import compute_kafka_raw_log_ref
+from logfilter.security.redaction import RedactionConfig, redact
 from logfilter.utils.circuit_breaker import CircuitBreaker
 
 logger = structlog.get_logger(__name__)
@@ -59,6 +61,7 @@ class ArchiveConsumer:
         es_breaker: CircuitBreaker | None = None,
         dlq_producer: LogProducer | None = None,
         kafka_config: dict[str, Any] | None = None,
+        redaction_config: RedactionConfig | None = None,
     ) -> None:
         self.bootstrap_servers = bootstrap_servers
         self.raw_topic = raw_topic
@@ -67,9 +70,15 @@ class ArchiveConsumer:
         self.batch_size = batch_size
         self.poll_timeout_ms = poll_timeout_ms
         self._running = False
+        self._stop_event = threading.Event()
         self._es_breaker = es_breaker or _DEFAULT_ES_BREAKER
         self._dlq_producer = dlq_producer
         self._kafka_config = kafka_config or {}
+        self._redaction_config = redaction_config or RedactionConfig()
+
+    def stop(self) -> None:
+        """Signal the run loop to exit after the current poll cycle."""
+        self._stop_event.set()
 
     def _index_name(self) -> str:
         date_str = time.strftime("%Y.%m.%d")
@@ -88,18 +97,12 @@ class ArchiveConsumer:
             **kafka_security_kwargs(self._kafka_config),
         )
 
-        self._running = True
+        self._stop_event.clear()
         archived_total = 0
         logger.info("Archive consumer started", topic=self.raw_topic)
 
-        def _shutdown(signum, frame):  # noqa: ANN001
-            self._running = False
-
-        signal.signal(signal.SIGTERM, _shutdown)
-        signal.signal(signal.SIGINT, _shutdown)
-
         try:
-            while self._running:
+            while not self._stop_event.is_set():
                 records = consumer.poll(timeout_ms=self.poll_timeout_ms)
                 bulk_body: list[dict] = []
                 original_messages: list[dict[str, Any]] = []
@@ -121,10 +124,22 @@ class ArchiveConsumer:
                             try:
                                 payload = msg.value
                                 original_messages.append(payload)
-                                bulk_body.append({"index": {"_index": self._index_name()}})
+                                raw = str(payload.get("raw", ""))
                                 bulk_body.append(
                                     {
-                                        "raw": payload.get("raw", ""),
+                                        "index": {
+                                            "_index": self._index_name(),
+                                            "_id": compute_kafka_raw_log_ref(
+                                                self.raw_topic,
+                                                msg.partition,
+                                                msg.offset,
+                                            ),
+                                        }
+                                    }
+                                )
+                                bulk_body.append(
+                                    {
+                                        "raw": redact(raw, config=self._redaction_config),
                                         "source_type": payload.get("source_type", "generic"),
                                         "host": payload.get("host", "unknown"),
                                         "ingest_ts": payload.get("ingest_ts", time.time()),
@@ -212,7 +227,12 @@ class ScorerConsumer:
         self._producer = producer
         self._dlq_producer = dlq_producer
         self._running = False
+        self._stop_event = threading.Event()
         self._kafka_config = kafka_config or {}
+
+    def stop(self) -> None:
+        """Signal the run loop to exit after the current poll cycle."""
+        self._stop_event.set()
 
     def run(self) -> None:
         """Blocking run loop."""
@@ -227,18 +247,12 @@ class ScorerConsumer:
             **kafka_security_kwargs(self._kafka_config),
         )
 
-        self._running = True
+        self._stop_event.clear()
         scored_total = 0
         logger.info("Scorer consumer started", topic=self.raw_topic)
 
-        def _shutdown(signum, frame):  # noqa: ANN001
-            self._running = False
-
-        signal.signal(signal.SIGTERM, _shutdown)
-        signal.signal(signal.SIGINT, _shutdown)
-
         try:
-            while self._running:
+            while not self._stop_event.is_set():
                 records = consumer.poll(timeout_ms=self.poll_timeout_ms)
                 batch: list[dict[str, Any]] = []
 

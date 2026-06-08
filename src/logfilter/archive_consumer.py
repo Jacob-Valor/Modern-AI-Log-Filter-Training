@@ -9,6 +9,7 @@ from logfilter.config import load_config
 from logfilter.kafka.consumer import ArchiveConsumer
 from logfilter.kafka.producer import LogProducer
 from logfilter.pipeline.archive import LogArchive
+from logfilter.security.redaction import RedactionConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -54,6 +55,7 @@ def main() -> None:
         batch_size=int(kafka_cfg.get("max_poll_records", 100)),
         dlq_producer=dlq_producer,
         kafka_config=kafka_cfg,
+        redaction_config=RedactionConfig.from_mapping(es_cfg.get("redaction")),
     )
 
     logger.info("Archive consumer starting")

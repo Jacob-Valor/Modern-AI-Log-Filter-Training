@@ -15,6 +15,7 @@ from logfilter.api import app as api_app
 from logfilter.api.schemas import BatchScoreRequest, ScoreRequest
 from logfilter.pipeline.normalizer import LogSourceType
 from logfilter.pipeline.scorer import ScoredEvent
+from logfilter.security.redaction import RedactionConfig
 
 
 def _request(host: str = "198.51.100.10") -> Request:
@@ -24,6 +25,24 @@ def _request(host: str = "198.51.100.10") -> Request:
             "method": "GET",
             "path": "/metrics",
             "headers": [],
+            "client": (host, 54123),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+
+def _request_with_headers(
+    *,
+    host: str = "198.51.100.10",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/metrics",
+            "headers": headers or [],
             "client": (host, 54123),
             "server": ("testserver", 80),
             "scheme": "http",
@@ -151,6 +170,21 @@ def test_configure_rate_limiter_falls_back_when_redis_is_unavailable(monkeypatch
     assert api_app._state.rate_limiter is None
 
 
+def test_enforce_rate_limit_uses_x_forwarded_for_from_trusted_proxy() -> None:
+    api_app._state.config = {
+        "api": {"rate_limit_per_minute": 1, "trusted_proxies": ["10.0.0.0/24"]}
+    }
+    request = _request_with_headers(
+        host="10.0.0.10",
+        headers=[(b"x-forwarded-for", b"198.51.100.7")],
+    )
+
+    api_app._enforce_rate_limit(request)
+
+    assert "198.51.100.7" in api_app._state.rate_limit_windows
+    assert "10.0.0.10" not in api_app._state.rate_limit_windows
+
+
 def test_configure_archiver_enables_es_when_password_set(monkeypatch) -> None:
     api_app._state.config = {
         "elasticsearch": {
@@ -160,6 +194,14 @@ def test_configure_archiver_enables_es_when_password_set(monkeypatch) -> None:
             "index_prefix": "raw-logs",
             "index_shards": 1,
             "index_replicas": 0,
+            "redaction": {
+                "enabled": "true",
+                "redact_emails": "true",
+                "redact_credit_cards": "true",
+                "redact_secrets": "true",
+                "redact_ip_addresses": "false",
+                "redact_hostnames": "false",
+            },
         }
     }
     fake_archive_cls = Mock()
@@ -177,6 +219,14 @@ def test_configure_archiver_enables_es_when_password_set(monkeypatch) -> None:
         password="real-password",
         shards=1,
         replicas=0,
+        redaction_config=RedactionConfig(
+            enabled=True,
+            redact_emails=True,
+            redact_credit_cards=True,
+            redact_secrets=True,
+            redact_ip_addresses=False,
+            redact_hostnames=False,
+        ),
     )
 
 
@@ -234,6 +284,49 @@ def test_health_reports_classifier_state_when_ready() -> None:
     assert response.status == "healthy"
     assert response.models_loaded["classifier"] is True
     assert http_response.status_code == 200
+
+
+def test_health_reports_degraded_when_classifier_not_ready() -> None:
+    class FakeClassifier:
+        def is_ready(self) -> bool:
+            return False
+
+    class FakeScorer:
+        classifier = FakeClassifier()
+
+    api_app._state.scorer = cast(Any, FakeScorer())
+    api_app._state.enricher = cast(Any, object())
+
+    http_response = Response()
+    response = asyncio.run(api_app.health(http_response))
+
+    assert response.status == "degraded"
+    assert response.models_loaded["classifier"] is False
+    assert http_response.status_code == 503
+
+
+def test_health_reports_dependency_status_when_archiver_fails() -> None:
+    class FakeClassifier:
+        def is_ready(self) -> bool:
+            return True
+
+    class FakeScorer:
+        classifier = FakeClassifier()
+
+    class FakeArchiver:
+        def health(self) -> dict[str, str]:
+            return {"status": "red"}
+
+    api_app._state.scorer = cast(Any, FakeScorer())
+    api_app._state.enricher = cast(Any, object())
+    api_app._state.archiver = cast(Any, FakeArchiver())
+
+    http_response = Response()
+    response = asyncio.run(api_app.health(http_response))
+
+    assert response.status == "degraded"
+    assert response.dependencies["elasticsearch"] == "red"
+    assert http_response.status_code == 503
 
 
 def test_health_drift_returns_503_when_detector_not_configured() -> None:

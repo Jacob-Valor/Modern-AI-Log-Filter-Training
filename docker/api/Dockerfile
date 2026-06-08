@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:a3ab0b966bc4e91546a033e22093cb840908979487a9fc0e6e38295747e49ac0
 
 LABEL maintainer="logfilter-ai"
 LABEL description="AI Log Filter — FastAPI Scoring Service"
@@ -10,10 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python deps first (layer caching)
+# Install uv for reproducible, lockfile-driven installs
+COPY --from=ghcr.io/astral-sh/uv:0.11.4 /uv /usr/local/bin/uv
+
+# Install Python deps from lockfile (layer caching)
+COPY uv.lock pyproject.toml ./
+RUN uv pip install --system --locked --no-cache --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
 COPY requirements-api.txt .
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
-RUN pip install --no-cache-dir -r requirements-api.txt
+RUN uv pip install --system --locked --no-cache -r requirements-api.txt
 
 # Copy source
 COPY src/ ./src/
@@ -22,7 +26,7 @@ COPY pyproject.toml .
 COPY scripts/download_hf_models.py ./scripts/
 
 # Install the logfilter package
-RUN pip install --no-cache-dir -e . --no-deps
+RUN uv pip install --system --no-cache -e . --no-deps
 
 # Pre-download HuggingFace models so the image is self-contained.
 # Set empty revisions to download the default branch; override with build args

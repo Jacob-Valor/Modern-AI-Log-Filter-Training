@@ -48,6 +48,7 @@ from logfilter.api.schemas import (
 from logfilter.api.security import (
     AccessDenied,
     RedisRateLimiter,
+    client_ip_from_request,
     enforce_rate_limit,
     require_configured_token,
 )
@@ -57,6 +58,7 @@ from logfilter.pipeline.archive import LogArchive, compute_raw_log_ref
 from logfilter.pipeline.enricher import LEEFEnricher
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
 from logfilter.pipeline.scorer import LogScorer
+from logfilter.security.redaction import RedactionConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -174,6 +176,7 @@ def _configure_archiver() -> None:
             password=password,
             shards=int(es_cfg.get("index_shards", 1)),
             replicas=int(es_cfg.get("index_replicas", 0)),
+            redaction_config=RedactionConfig.from_mapping(es_cfg.get("redaction")),
         )
         logger.info(
             "ES archiver configured",
@@ -186,6 +189,61 @@ def _configure_archiver() -> None:
             error=str(exc),
         )
         _state.archiver = None
+
+
+def _is_disabled_stage(model: object) -> bool:
+    return type(model).__name__.startswith("Disabled")
+
+
+def _is_loaded_model(model: object, attr_name: str) -> bool:
+    if _is_disabled_stage(model):
+        return True
+    return getattr(model, attr_name, None) is not None
+
+
+def _collect_model_health() -> dict[str, bool]:
+    scorer_ready = _state.scorer is not None
+    models_loaded = {
+        "scorer": scorer_ready,
+        "enricher": _state.enricher is not None,
+    }
+    if scorer_ready and _state.scorer is not None:
+        models_loaded["classifier"] = _state.scorer.classifier.is_ready()
+        tier2 = getattr(_state.scorer, "tier2_classifier", None)
+        if tier2 is not None:
+            models_loaded["tier2_classifier"] = tier2.is_ready()
+        biencoder = getattr(_state.scorer, "biencoder", None)
+        if biencoder is not None:
+            models_loaded["biencoder"] = _is_loaded_model(biencoder, "_model")
+        ner = getattr(_state.scorer, "ner_model", None)
+        if ner is not None:
+            models_loaded["ner"] = _is_loaded_model(ner, "_pipeline")
+        cross_encoder = getattr(_state.scorer, "cross_encoder", None)
+        if cross_encoder is not None:
+            models_loaded["cross_encoder"] = _is_loaded_model(cross_encoder, "_model")
+    return models_loaded
+
+
+def _collect_dependency_health() -> dict[str, str]:
+    dependencies = {"elasticsearch": "disabled", "redis": "disabled", "kafka": "not_checked"}
+    if _state.archiver is not None:
+        try:
+            es_health = _state.archiver.health()
+            dependencies["elasticsearch"] = str(es_health.get("status", "unknown"))
+        except Exception as exc:  # noqa: BLE001
+            dependencies["elasticsearch"] = f"down:{type(exc).__name__}"
+    if _state.redis_client is not None:
+        try:
+            _state.redis_client.ping()
+            dependencies["redis"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            dependencies["redis"] = f"down:{type(exc).__name__}"
+    return dependencies
+
+
+def _dependencies_ready(dependencies: dict[str, str]) -> bool:
+    ok_states = {"ok", "green", "yellow", "disabled", "not_checked"}
+    return all(value in ok_states for value in dependencies.values())
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -227,6 +285,18 @@ async def lifespan(app: FastAPI):
 
     with telemetry.start_as_current_span("api.lifespan.shutdown"):
         logger.info("LogFilter API shutting down")
+        if _state.redis_client is not None:
+            try:
+                _state.redis_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _state.redis_client = None
+        if _state.archiver is not None:
+            try:
+                _state.archiver.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _state.archiver = None
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -500,8 +570,14 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 
 
 def _enforce_rate_limit(request: Request) -> None:
-    limit = int(_state.config.get("api", {}).get("rate_limit_per_minute", 60))
-    client_host = request.client.host if request.client else "unknown"
+    api_cfg = _state.config.get("api", {})
+    limit = int(api_cfg.get("rate_limit_per_minute", 60))
+    remote_addr = request.client.host if request.client else "unknown"
+    client_host = client_ip_from_request(
+        remote_addr=remote_addr,
+        forwarded_for=request.headers.get("x-forwarded-for"),
+        trusted_proxies=api_cfg.get("trusted_proxies", []),
+    )
     if _state.rate_limiter is not None:
         try:
             enforce_rate_limit(
@@ -694,28 +770,13 @@ async def health(response: Response) -> HealthResponse:
     of routing traffic to a node that cannot score.
     """
     with telemetry.start_as_current_span("api.health") as span:
-        scorer_ready = _state.scorer is not None
-
-        models_loaded = {
-            "scorer": scorer_ready,
-            "enricher": _state.enricher is not None,
-        }
-        if scorer_ready and _state.scorer is not None:
-            models_loaded["classifier"] = _state.scorer.classifier.is_ready()
-            tier2 = getattr(_state.scorer, "tier2_classifier", None)
-            if tier2 is not None:
-                models_loaded["tier2_classifier"] = tier2.is_ready()
-            biencoder = getattr(_state.scorer, "biencoder", None)
-            if biencoder is not None:
-                models_loaded["biencoder"] = biencoder._model is not None
-            ner = getattr(_state.scorer, "ner_model", None)
-            if ner is not None:
-                models_loaded["ner"] = ner._pipeline is not None
-            cross_encoder = getattr(_state.scorer, "cross_encoder", None)
-            if cross_encoder is not None:
-                models_loaded["cross_encoder"] = cross_encoder._model is not None
-
-        overall_status = "healthy" if scorer_ready else "degraded"
+        models_loaded = _collect_model_health()
+        dependencies = _collect_dependency_health()
+        overall_status = (
+            "healthy"
+            if all(models_loaded.values()) and _dependencies_ready(dependencies)
+            else "degraded"
+        )
         span.set_attribute("logfilter.health.status", overall_status)
         if overall_status != "healthy":
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -724,6 +785,7 @@ async def health(response: Response) -> HealthResponse:
             status=overall_status,
             version="0.1.0",
             models_loaded=models_loaded,
+            dependencies=dependencies,
             uptime_seconds=round(time.monotonic() - _state.start_time, 1),
         )
 

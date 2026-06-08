@@ -338,9 +338,17 @@ services:
     volumes:
       - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager
+    environment:
+      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--config.expand-env"
       - "--storage.path=/alertmanager"
+    restart: unless-stopped
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: logfilter-blackbox-exporter
     restart: unless-stopped
 
   # ── Prometheus ─────────────────────────────────────────────────────────────
@@ -349,6 +357,7 @@ services:
     container_name: logfilter-prometheus
     depends_on:
       - alertmanager
+      - blackbox-exporter
     ports:
       - "127.0.0.1:9090:9090"
     volumes:

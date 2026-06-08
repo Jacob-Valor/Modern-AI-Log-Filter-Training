@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -91,6 +92,48 @@ class FakeCrossEncoder(CrossEncoderModel):
     ) -> list[list[CrossEncoderScore]]:
         _ = candidates_per_log
         return [[CrossEncoderScore("T1110", "Brute Force", 0.0)] for _ in log_texts]
+
+
+def _tier3_fault_scorer(
+    *,
+    ner_model: NERModel,
+    biencoder: BiEncoderModel,
+    cross_encoder: CrossEncoderModel,
+) -> LogScorer:
+    return LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.5,
+                    "entity_boost": 0.3,
+                    "cross_encoder": 0.2,
+                    "novelty": 0.0,
+                },
+                "entity_boost_value": 0.3,
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=ner_model,
+        biencoder=biencoder,
+        cross_encoder=cross_encoder,
+        syslog_classifier=FakeSyslogClassifier(),
+    )
+
+
+def _assert_neutral_tier3_fallback(scored: Any, raw_payload: str, log_text: str) -> None:
+    assert scored.score_degraded is True
+    assert scored.is_duplicate is False
+    assert scored.dedup_similarity == pytest.approx(0.0)
+    assert scored.attack_candidates == []
+    assert scored.entities == {}
+    assert scored.ai_entities == ""
+    assert scored.entity_boost == pytest.approx(0.0)
+    assert scored.cross_encoder_scores == []
+    assert scored.cross_encoder_max == pytest.approx(0.0)
+    assert scored.ai_mitre_technique == ""
+    assert raw_payload not in log_text
 
 
 def test_classifier_score_is_applied_to_composite_score() -> None:
@@ -405,6 +448,73 @@ class FakeNERWithEntities(FakeNER):
         result.confidence = 0.95
         result.has_high_value_entities = True
         return [result for _ in texts]
+
+
+def test_tier3_biencoder_failure_uses_neutral_fallback(caplog) -> None:
+    raw_payload = "RAW_PAYLOAD_SHOULD_NOT_LOG"
+
+    class BrokenBiEncoder(FakeBiEncoder):
+        def check_dedup_and_retrieve_batch(
+            self, texts: list[str]
+        ) -> list[tuple[DedupResult, list[ATTACKCandidate]]]:
+            raise RuntimeError(f"BiEncoder failed while scoring {texts[0]}")
+
+    caplog.set_level(logging.WARNING)
+    scorer = _tier3_fault_scorer(
+        ner_model=FakeNERWithEntities(),
+        biencoder=BrokenBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+    event = LogNormalizer().normalize(raw_payload)
+
+    scored = scorer.score(event)
+
+    _assert_neutral_tier3_fallback(scored, raw_payload, caplog.text)
+
+
+def test_tier3_ner_failure_uses_neutral_fallback(caplog) -> None:
+    raw_payload = "RAW_PAYLOAD_SHOULD_NOT_LOG"
+
+    class BrokenNER(FakeNER):
+        def extract_batch(self, texts: list[str]) -> list[ExtractedEntities]:
+            raise RuntimeError(f"NER failed while scoring {texts[0]}")
+
+    caplog.set_level(logging.WARNING)
+    scorer = _tier3_fault_scorer(
+        ner_model=BrokenNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+    event = LogNormalizer().normalize(raw_payload)
+
+    scored = scorer.score(event)
+
+    _assert_neutral_tier3_fallback(scored, raw_payload, caplog.text)
+
+
+def test_tier3_cross_encoder_failure_uses_neutral_fallback(caplog) -> None:
+    raw_payload = "RAW_PAYLOAD_SHOULD_NOT_LOG"
+
+    class BrokenCrossEncoder(FakeCrossEncoder):
+        def score_batch(
+            self,
+            log_texts: list[str],
+            candidates_per_log: list[list[dict[str, str]]],
+        ) -> list[list[CrossEncoderScore]]:
+            del candidates_per_log
+            raise RuntimeError(f"CrossEncoder failed while scoring {log_texts[0]}")
+
+    caplog.set_level(logging.WARNING)
+    scorer = _tier3_fault_scorer(
+        ner_model=FakeNERWithEntities(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=BrokenCrossEncoder(),
+    )
+    event = LogNormalizer().normalize(raw_payload)
+
+    scored = scorer.score(event)
+
+    _assert_neutral_tier3_fallback(scored, raw_payload, caplog.text)
 
 
 class FakeDuplicateBiEncoder(FakeBiEncoder):

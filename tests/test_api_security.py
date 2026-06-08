@@ -10,6 +10,7 @@ import pytest
 from logfilter.api.security import (
     AccessDenied,
     RedisRateLimiter,
+    client_ip_from_request,
     enforce_rate_limit,
     require_configured_token,
 )
@@ -102,3 +103,42 @@ def test_redis_rate_limit_raises_when_window_is_full() -> None:
         enforce_rate_limit({}, "198.51.100.10", 2, backend=limiter)
 
     assert exc_info.value.status_code == 429
+
+
+def test_client_ip_from_request_uses_rightmost_untrusted_xff_from_trusted_proxy() -> None:
+    client_ip = client_ip_from_request(
+        remote_addr="10.0.0.10",
+        forwarded_for="198.51.100.7, 203.0.113.9, 10.0.0.11",
+        trusted_proxies=["10.0.0.0/24"],
+    )
+
+    assert client_ip == "203.0.113.9"
+
+
+def test_client_ip_from_request_ignores_spoofed_xff_from_untrusted_client() -> None:
+    client_ip = client_ip_from_request(
+        remote_addr="198.51.100.44",
+        forwarded_for="203.0.113.9",
+        trusted_proxies=["10.0.0.0/24"],
+    )
+
+    assert client_ip == "198.51.100.44"
+
+
+def test_client_ip_from_request_falls_back_on_missing_or_invalid_xff() -> None:
+    assert (
+        client_ip_from_request(
+            remote_addr="10.0.0.10",
+            forwarded_for=None,
+            trusted_proxies=["10.0.0.0/24"],
+        )
+        == "10.0.0.10"
+    )
+    assert (
+        client_ip_from_request(
+            remote_addr="10.0.0.10",
+            forwarded_for="not-an-ip",
+            trusted_proxies=["10.0.0.0/24"],
+        )
+        == "10.0.0.10"
+    )

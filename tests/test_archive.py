@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from logfilter.pipeline import archive as archive_module
-from logfilter.pipeline.archive import LogArchive
+from logfilter.pipeline.archive import LogArchive, compute_kafka_raw_log_ref
+from logfilter.security.redaction import RedactionConfig
 
 
 class FakeIndices:
@@ -74,6 +75,37 @@ def test_archive_write_returns_document_id(fake_archive) -> None:
     assert body["k"] == "v"
 
 
+def test_archive_write_redacts_sensitive_raw_payload(monkeypatch) -> None:
+    monkeypatch.setattr(archive_module, "Elasticsearch", FakeElasticsearch)
+    archive = LogArchive(hosts=["http://es:9200"], username="elastic", password="secret")
+
+    archive.write(
+        "user=alice email=alice@example.com password=hunter2 src=10.0.0.5",
+        source_type="syslog",
+        host="edge-router-1",
+    )
+
+    assert isinstance(archive.client, FakeElasticsearch)
+    body = archive.client.indexed[0]["body"]
+    assert body["raw"] == "user=alice email=<EMAIL> password=<REDACTED> src=10.0.0.5"
+
+
+def test_archive_write_can_disable_redaction(monkeypatch) -> None:
+    monkeypatch.setattr(archive_module, "Elasticsearch", FakeElasticsearch)
+    archive = LogArchive(
+        hosts=["http://es:9200"],
+        username="elastic",
+        password="secret",
+        redaction_config=RedactionConfig(enabled=False),
+    )
+
+    raw = "email=alice@example.com password=hunter2"
+    archive.write(raw, source_type="syslog", host="edge-router-1")
+
+    assert isinstance(archive.client, FakeElasticsearch)
+    assert archive.client.indexed[0]["body"]["raw"] == raw
+
+
 def test_archive_write_bulk_uses_helpers(monkeypatch, fake_archive) -> None:
     calls = []
 
@@ -88,6 +120,20 @@ def test_archive_write_bulk_uses_helpers(monkeypatch, fake_archive) -> None:
     assert ids == []
     assert len(calls[0][1]) == 2
     assert calls[0][1][1]["_source"]["host"] == "h"
+
+
+def test_archive_write_bulk_redacts_sensitive_raw_payloads(monkeypatch, fake_archive) -> None:
+    calls = []
+
+    def fake_bulk(es_client, actions, **kwargs):
+        calls.append((es_client, list(actions), kwargs))
+        return 1, []
+
+    monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
+
+    fake_archive.write_bulk([{"raw": "token=AKIAABCDEFGHIJKLMNOP email=bob@example.com"}])
+
+    assert calls[0][1][0]["_source"]["raw"] == "token=<REDACTED> email=<EMAIL>"
 
 
 def test_archive_get_by_id_returns_source_or_none(fake_archive) -> None:
@@ -108,6 +154,14 @@ def test_archive_health_handles_success_and_failure(fake_archive) -> None:
 
     fake_archive.client.raise_health = True
     assert fake_archive.health()["status"] == "unavailable"
+
+
+def test_compute_kafka_raw_log_ref_is_replay_stable_and_offset_specific() -> None:
+    same_ref = compute_kafka_raw_log_ref("raw-logs", partition=2, offset=7)
+
+    assert compute_kafka_raw_log_ref("raw-logs", partition=2, offset=7) == same_ref
+    assert compute_kafka_raw_log_ref("raw-logs", partition=2, offset=8) != same_ref
+    assert compute_kafka_raw_log_ref("raw-logs", partition=3, offset=7) != same_ref
 
 
 def test_archive_password_none_raises() -> None:

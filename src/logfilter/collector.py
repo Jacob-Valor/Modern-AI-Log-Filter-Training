@@ -427,6 +427,8 @@ class SyslogCollector:
                 pass
         finally:
             self.stop_event.set()
+            for thread in threads:
+                thread.join(timeout=5.0)
             self.producer.close()
             logger.info("Syslog collector stopped")
 

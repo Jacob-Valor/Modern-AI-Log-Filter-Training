@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import time
 from collections import deque
 from collections.abc import MutableMapping
@@ -145,3 +146,60 @@ def enforce_rate_limit(
     """Apply a sliding one-minute request limit for a client identifier."""
     limiter = backend or InMemoryRateLimiter(windows)
     limiter.enforce(client_id, limit_per_minute, now=now)
+
+
+def client_ip_from_request(
+    *,
+    remote_addr: str,
+    forwarded_for: str | None,
+    trusted_proxies: list[str] | tuple[str, ...] | str | None,
+) -> str:
+    trusted_networks = _parse_trusted_proxy_networks(trusted_proxies)
+    if not forwarded_for or not _ip_in_networks(remote_addr, trusted_networks):
+        return remote_addr
+
+    hops = [hop.strip() for hop in forwarded_for.split(",") if hop.strip()]
+    if not hops:
+        return remote_addr
+    for hop in reversed(hops):
+        if not _valid_ip(hop):
+            return remote_addr
+        if not _ip_in_networks(hop, trusted_networks):
+            return hop
+    return hops[0] if _valid_ip(hops[0]) else remote_addr
+
+
+def _parse_trusted_proxy_networks(
+    trusted_proxies: list[str] | tuple[str, ...] | str | None,
+) -> list[ipaddress._BaseNetwork]:
+    if trusted_proxies is None:
+        return []
+    if isinstance(trusted_proxies, str):
+        values = [value.strip() for value in trusted_proxies.split(",")]
+    else:
+        values = [str(value).strip() for value in trusted_proxies]
+    networks: list[ipaddress._BaseNetwork] = []
+    for value in values:
+        if not value:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
+def _valid_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _ip_in_networks(value: str, networks: list[ipaddress._BaseNetwork]) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return any(address in network for network in networks)
