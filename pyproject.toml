@@ -9,7 +9,7 @@ description = "AI-powered log preprocessing layer for IBM QRadar SIEM"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = [
-    "torch>=2.11.0",
+    "torch>=2.12.1,<2.13",
     "transformers>=5.0.0",
     "sentence-transformers>=5.4.1",
     "onnxruntime>=1.18.0",
