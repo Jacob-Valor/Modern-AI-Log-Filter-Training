@@ -82,11 +82,12 @@ jobs:
           python -m pip install --upgrade pip pip-audit
           python -m pip install -r requirements.txt
           # Match `make audit` resolution (full dep graph, not lower-bound-only)
-          # so transitive CVEs are caught. CVE-2025-69872 (diskcache) is
-          # accepted via the documented vulnerability exception — see
-          # SECURITY.md and the Makefile audit target for the rationale.
+          # so transitive CVEs are caught. CVE-2025-69872 (diskcache) and
+          # CVE-2025-3000 (torch) are accepted via documented vulnerability
+          # exceptions — see SECURITY.md and the Makefile audit target.
           python -m pip_audit -r requirements.txt --progress-spinner off \
-            --ignore-vuln CVE-2025-69872
+            --ignore-vuln CVE-2025-69872 \
+            --ignore-vuln CVE-2025-3000
 
   integration-test:
     runs-on: ubuntu-latest

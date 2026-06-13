@@ -102,8 +102,14 @@ audit:
 	# data comes from config/mitre_techniques.json. No upstream fix exists
 	# (Snyk: "no fixed version" as of audit date). Re-review when diskcache
 	# ships a patched release.
+	# CVE-2025-3000 (torch): vulnerability exception — see SECURITY.md.
+	# The current public torch index exposes 2.11.0 and 2.12.0 for this CI
+	# environment; both are flagged and pip-audit lists no fix version. Keep
+	# torch constrained below 2.12 to avoid the latest vulnerable release line,
+	# and re-review when PyTorch publishes a fixed compatible wheel.
 	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off \
-		--ignore-vuln CVE-2025-69872
+		--ignore-vuln CVE-2025-69872 \
+		--ignore-vuln CVE-2025-3000
 
 security-check: verify audit
 

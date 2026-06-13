@@ -94,6 +94,29 @@ against accidental introduction of the vulnerable code path.
 
 This exception is reviewed on every dependency bump.
 
+### CVE-2025-3000 — `torch`
+
+**Status**: Documented exception. `make audit` ignores this CVE with
+`--ignore-vuln CVE-2025-3000`.
+
+**What it is**: `pip-audit` flags the currently available PyTorch wheels for
+CVE-2025-3000. The audit output lists no fixed version for the package.
+
+**Why we accept it temporarily**:
+
+1. The public package index available to CI currently exposes `torch 2.11.0`
+   and `torch 2.12.0` as the newest compatible releases; both are flagged.
+2. `requirements.txt` and `pyproject.toml` constrain Torch to
+   `torch>=2.11.0,<2.12` so CI does not float to the newer flagged 2.12 line
+   while no fixed compatible wheel is available.
+3. Torch is used for local model loading/training and transformer wrappers; the
+   default smoke/unit-test path uses mocked or ONNX-backed inference and does
+   not expose Torch directly as a network boundary.
+
+**Re-review trigger**: When PyTorch publishes a compatible fixed wheel, update
+the Torch constraint in `requirements.txt` and `pyproject.toml`, then remove
+the `--ignore-vuln CVE-2025-3000` flag from `make audit` and CI.
+
 ## Incident Response Runbook
 
 ### Severity Levels
