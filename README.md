@@ -78,6 +78,79 @@ Only adjust these after reviewing a threshold report from representative logs. R
 must satisfy `0.0 <= low < medium < high <= 1.0`; Tier-2 uncertainty thresholds must satisfy
 `0.0 <= uncertainty_low <= uncertainty_high <= 1.0`.
 
+## Scoring Formula
+
+The final threat score is a weighted blend of all model components:
+
+```
+ai_threat_score = (0.35 × classifier_score)
+                + (0.25 × entity_boost)
+                + (0.40 × cross_encoder_max)
+                + (0.15 × novelty_score)
+                - dedup_penalty
+```
+
+| Component | Weight | Source | Purpose |
+|-----------|--------|--------|---------|
+| classifier_score | 0.35 | Tier 1 XGBoost | Fast pattern matching |
+| entity_boost | 0.25 | Tier 3 NER | IOC/malware/CVE detection |
+| cross_encoder_max | 0.40 | Tier 3 CrossEncoder | ATT&CK technique relevance |
+| novelty_score | 0.15 | Tier 3 Novelty | Zero-day/rare event detection |
+| dedup_penalty | -0.30 | Tier 2 BiEncoder | Near-duplicate suppression |
+
+Routing thresholds: HIGH (≥0.80), MEDIUM (≥0.50), LOW (≥0.20), INFO (<0.20).
+
+### LEEF Output Fields
+
+The enricher produces LEEF 2.0 payloads with these AI custom properties:
+
+| Field | Description |
+|-------|-------------|
+| `ai_threat_score` | 0.0–1.0 composite threat score |
+| `ai_priority` | HIGH / MEDIUM / LOW / INFO |
+| `ai_mitre_technique` | Top ATT&CK technique ID (e.g., T1021.002) |
+| `ai_entities` | Comma-separated IOCs/malware/CVEs extracted by NER |
+| `ai_ner_confidence` | NER model confidence (0.0–1.0) |
+| `ai_dedup_flag` | true/false (was this a near-duplicate event?) |
+| `ai_sigma_match` | true/false (matched a Sigma detection rule?) |
+| `ai_sigma_rules` | Comma-separated matched rule IDs |
+| `ai_source_type` | Event source type (syslog, web, firewall, etc.) |
+| `ai_scoring_latency_ms` | Total scoring latency in milliseconds |
+| `ai_novelty_score` | 0.0–1.0 novelty score (0=normal, 1=highly novel) |
+| `degraded` | 1 if scoring degraded, 0 otherwise |
+| `raw_log_ref` | Elasticsearch document ID for chain-of-custody |
+
+## Novelty Detection
+
+Novelty detection identifies rare/unusual events that don't match known patterns, enabling detection of zero-day attacks and emerging threats. It reuses the existing BiEncoder embeddings (768-dim) and maintains a rolling baseline of "normal" events.
+
+**How it works:**
+1. Collects embeddings into a rolling 10,000-event window
+2. Computes centroid of "normal" embeddings
+3. Measures cosine distance from centroid for each new event
+4. High distance = novel event (score 0.0–1.0)
+
+**Enable novelty detection:**
+
+```bash
+LOGFILTER_NOVELTY_ENABLED=true make up
+```
+
+**Configuration:**
+
+```bash
+LOGFILTER_NOVELTY_ENABLED=false        # Enable/disable
+LOGFILTER_NOVELTY_WINDOW_SIZE=10000    # Baseline window size
+LOGFILTER_NOVELTY_MIN_BASELINE=100     # Events before scoring activates
+LOGFILTER_NOVELTY_WARMUP_EVENTS=500    # Events to collect first
+LOGFILTER_NOVELTY_DISTANCE_SCALE=2.0   # Distance → score scaling
+```
+
+**Tuning for false positives:**
+- Start with weight=0.0, gradually increase to 0.15
+- Monitor `ai_novelty_score` in LEEF output (target: < 0.1 for normal events)
+- If false positives are high, decrease `distance_scale` or increase `warmup_events`
+
 ## Security Defaults
 
 The local Docker stack requires explicit secrets in `.env`; unsafe default
@@ -114,6 +187,21 @@ Edit `.env` and replace every placeholder secret before starting Docker.
 make up
 make smoke-test
 ```
+
+### High-availability Compose overlay
+
+For a local high-availability topology, layer `docker-compose.prod.yml` over the
+base stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+The overlay expands Kafka and Elasticsearch to three nodes, raises Kafka topic
+replication factors to `3`, and points API/archive/router clients at all Kafka
+brokers. It is still Compose-based scaffolding: Kafka remains PLAINTEXT inside
+the private Compose network, so use broker-side SASL/TLS or a managed Kafka
+service before crossing trust boundaries.
 
 ## Validation
 
@@ -172,6 +260,11 @@ safe JSON (`models/scaler.json`), not a pickle/joblib artifact.
 |---------|----------|---------|
 | API | `:8080/metrics` | `logfilter_events_total`, `logfilter_scoring_latency_ms`, `logfilter_threat_score`, `logfilter_model_loaded`, `logfilter_drift_psi` |
 | Collector | `:9100/metrics` | `logfilter_collector_received_total`, `logfilter_collector_published_total`, `logfilter_collector_dropped_total`, `logfilter_collector_spool_depth` |
+
+Novelty detection stats are available via the `NoveltyDetector.get_stats()` method:
+- `baseline_size`: Current number of embeddings in the rolling window
+- `event_count`: Total events processed
+- `avg_novelty_score`: Average novelty score across all events
 
 Collector env var: `SYSLOG_METRICS_PORT` (default: `9100`).
 

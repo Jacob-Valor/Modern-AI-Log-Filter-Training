@@ -32,8 +32,12 @@ OUTPUT_DIR = ROOT / "models" / "syslog"
 
 # Token regex matching scorer.py _TOKEN_RE
 _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
-_FEATURE_STOPWORDS = frozenset({"the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her",
-                                 "was", "one", "our", "out", "has", "have", "been", "some", "same", "also", "its"})
+_FEATURE_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her",
+        "was", "one", "our", "out", "has", "have", "been", "some", "same", "also", "its",
+    }
+)
 
 # ── Config ─────────────────────────────────────────────────────────────────
 
@@ -209,7 +213,7 @@ def train_model(
     print(f"  Test:  {(y_test==0).sum()} benign, {(y_test==1).sum()} malicious")
 
     # ── Train ──────────────────────────────────────────────────────────────
-    print(f"\n  Training XGBoost (n_estimators=200, max_depth=6, lr=0.08)...")
+    print("\n  Training XGBoost (n_estimators=200, max_depth=6, lr=0.08)...")
     model = xgb.XGBClassifier(
         n_estimators=200,
         max_depth=6,
@@ -232,7 +236,7 @@ def train_model(
     y_pred = model.predict(X_test_s)
     y_proba = model.predict_proba(X_test_s)[:, 1]
 
-    print(f"\n  === Evaluation on held-out test set ===")
+    print("\n  === Evaluation on held-out test set ===")
     print(classification_report(y_test, y_pred, target_names=["benign", "malicious"]))
     print(f"  ROC-AUC: {roc_auc_score(y_test, y_proba):.4f}")
 
@@ -350,7 +354,7 @@ def main() -> None:
     export_model(model, scaler, feature_names, metrics)
 
     # 4. Summary
-    print(f"\n[4/4] Done!")
+    print("\n[4/4] Done!")
     print(f"  Test precision: {metrics['precision']:.3f}")
     print(f"  Test recall:    {metrics['recall']:.3f}")
     print(f"  Test F1:        {metrics['f1']:.3f}")

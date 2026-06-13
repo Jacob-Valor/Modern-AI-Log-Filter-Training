@@ -31,6 +31,28 @@ python scripts/verify_tier2_artifact.py
 Run `make smoke-test` only after the API stack is running and `.env` contains
 real local tokens.
 
+## High-availability Compose overlay
+
+`docker-compose.prod.yml` is an overlay for local HA validation, not a complete
+cluster deployment. Start it with the base stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+The overlay adds `kafka-2`, `kafka-3`, `elasticsearch-2`, and
+`elasticsearch-3`; sets Kafka internal replication factors and minimum ISR for
+three brokers; and configures API/archive/router Kafka clients to use all three
+brokers. Validate the rendered configuration before promotion:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+```
+
+Keep this overlay private: Kafka is still PLAINTEXT inside the Compose network.
+For production trust boundaries, replace it with broker-side SASL/TLS, managed
+Kafka/Elasticsearch, or Kubernetes manifests wired to your platform secrets.
+
 ## Rollback procedure
 
 If a deployment causes degraded service (high latency, model load failures,

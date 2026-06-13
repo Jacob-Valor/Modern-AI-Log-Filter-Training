@@ -40,6 +40,11 @@ def _download(
     library: str = "transformers",
 ) -> None:
     """Download a model snapshot to the local cache."""
+    model_path = Path(model_id)
+    if model_path.is_absolute() or len(model_path.parts) > 1:
+        print(f"Skipping local model path {model_id}; no HuggingFace download needed.")
+        return
+
     try:
         from huggingface_hub import snapshot_download
     except ImportError as exc:
