@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from logfilter.pipeline import archive as archive_module
-from logfilter.pipeline.archive import LogArchive, compute_kafka_raw_log_ref
+from logfilter.pipeline.archive import LogArchive, compute_kafka_raw_log_ref, compute_raw_log_ref
 from logfilter.security.redaction import RedactionConfig
 
 
@@ -23,6 +23,7 @@ class FakeElasticsearch:
         self.kwargs = kwargs
         self.indices = FakeIndices()
         self.indexed: list[dict] = []
+        self.get_calls: list[dict] = []
         self.raise_get = False
         self.raise_health = False
 
@@ -31,11 +32,15 @@ class FakeElasticsearch:
         return {"_id": "doc-1"}
 
     def get(self, **kwargs) -> dict:
+        self.get_calls.append(kwargs)
         if self.raise_get:
             raise RuntimeError("missing")
         return {"_source": {"raw": "event"}}
 
     def search(self, **kwargs) -> dict:
+        body = kwargs.get("body", {})
+        if body.get("query", {}).get("ids"):
+            return {"hits": {"hits": []}}
         return {"hits": {"hits": [{"_source": {"raw": "a"}}, {"_source": {"raw": "b"}}]}}
 
     @property
@@ -111,15 +116,34 @@ def test_archive_write_bulk_uses_helpers(monkeypatch, fake_archive) -> None:
 
     def fake_bulk(es_client, actions, **kwargs):
         calls.append((es_client, list(actions), kwargs))
-        return 2, [{"error": "bad"}]
+        return 2, []
 
     monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
 
     ids = fake_archive.write_bulk([{"raw": "a"}, {"raw": "b", "host": "h"}])
 
-    assert ids == []
+    assert len(ids) == 2
     assert len(calls[0][1]) == 2
+    assert calls[0][1][0]["_id"] == ids[0]
     assert calls[0][1][1]["_source"]["host"] == "h"
+
+
+def test_archive_write_bulk_returns_deterministic_document_ids(monkeypatch, fake_archive) -> None:
+    calls = []
+
+    def fake_bulk(es_client, actions, **kwargs):
+        calls.append((es_client, list(actions), kwargs))
+        return 1, []
+
+    monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
+
+    ids = fake_archive.write_bulk(
+        [{"raw": "a", "source_type": "syslog", "host": "h", "ingest_ts": 0.0}]
+    )
+
+    expected = compute_raw_log_ref("a", "syslog", "h", 0.0)
+    assert ids == [expected]
+    assert calls[0][1][0]["_id"] == expected
 
 
 def test_archive_write_bulk_redacts_sensitive_raw_payloads(monkeypatch, fake_archive) -> None:
@@ -141,6 +165,21 @@ def test_archive_get_by_id_returns_source_or_none(fake_archive) -> None:
 
     fake_archive.client.raise_get = True
     assert fake_archive.get_by_id("missing") is None
+
+
+def test_archive_get_by_id_searches_all_rolled_indices_when_index_omitted(fake_archive) -> None:
+    search_calls = []
+    fake_archive.client.raise_get = True
+
+    def search(**kwargs):
+        search_calls.append(kwargs)
+        return {"hits": {"hits": [{"_source": {"raw": "rolled"}}]}}
+
+    fake_archive.client.search = search
+
+    assert fake_archive.get_by_id("doc-rolled") == {"raw": "rolled"}
+    assert search_calls[0]["index"] == "raw-logs-*"
+    assert search_calls[0]["body"]["query"]["ids"]["values"] == ["doc-rolled"]
 
 
 def test_archive_search_recent_builds_filters(fake_archive) -> None:
@@ -172,11 +211,12 @@ def test_archive_password_none_raises() -> None:
 def test_archive_index_template_exception(monkeypatch) -> None:
     class FailingES:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            del args, kwargs
 
         class indices:
             @staticmethod
             def put_index_template(**kwargs):
+                del kwargs
                 raise RuntimeError("template fail")
 
     monkeypatch.setattr(archive_module, "Elasticsearch", FailingES)
@@ -184,24 +224,37 @@ def test_archive_index_template_exception(monkeypatch) -> None:
     assert archive.client is not None
 
 
-def test_archive_write_bulk_with_errors(monkeypatch, fake_archive) -> None:
+def test_archive_write_bulk_raises_on_non_conflict_failures(monkeypatch, fake_archive) -> None:
     def fake_bulk(es_client, actions, **kwargs):
-        return 1, [{"error": "bad"}]
+        del es_client, actions, kwargs
+        return 0, [{"create": {"_id": "x", "status": 503, "error": "unavailable"}}]
+
+    monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
+
+    with pytest.raises(archive_module.BulkArchiveError):
+        fake_archive.write_bulk([{"raw": "a"}])
+
+
+def test_archive_write_bulk_ignores_idempotent_create_conflicts(monkeypatch, fake_archive) -> None:
+    def fake_bulk(es_client, actions, **kwargs):
+        del es_client, actions, kwargs
+        return 0, [{"create": {"_id": "dup", "status": 409, "error": "already exists"}}]
 
     monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
 
     ids = fake_archive.write_bulk([{"raw": "a"}])
-    assert ids == []
+    assert len(ids) == 1
 
 
-def test_archive_write_bulk_error_count_as_int(monkeypatch, fake_archive) -> None:
+def test_archive_write_bulk_raises_when_error_count_is_int(monkeypatch, fake_archive) -> None:
     def fake_bulk(es_client, actions, **kwargs):
+        del es_client, actions, kwargs
         return 1, 5
 
     monkeypatch.setattr(archive_module.helpers, "bulk", fake_bulk)
 
-    ids = fake_archive.write_bulk([{"raw": "a"}])
-    assert ids == []
+    with pytest.raises(archive_module.BulkArchiveError):
+        fake_archive.write_bulk([{"raw": "a"}])
 
 
 def test_archive_search_recent_with_filters(fake_archive) -> None:

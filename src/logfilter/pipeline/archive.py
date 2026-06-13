@@ -20,6 +20,22 @@ from logfilter.security.redaction import RedactionConfig, redact
 
 logger = structlog.get_logger(__name__)
 
+_ALREADY_EXISTS_STATUS = 409
+
+
+class BulkArchiveError(RuntimeError):
+    """Raised when a bulk archive write fails for reasons other than an
+    idempotent create-conflict, so callers never treat unpersisted events as
+    archived (chain-of-custody integrity)."""
+
+
+def _bulk_error_status(error: Any) -> int | None:
+    if isinstance(error, dict):
+        for op_result in error.values():
+            if isinstance(op_result, dict) and "status" in op_result:
+                return int(op_result["status"])
+    return None
+
 
 class LogArchive:
     """
@@ -196,19 +212,30 @@ class LogArchive:
 
         Each event dict: {raw, source_type, host, [optional extra fields]}
         """
-        now = time.time()
         actions = []
+        doc_ids: list[str] = []
         for event in events:
+            raw = str(event.get("raw", ""))
+            source_type = str(event.get("source_type", "generic"))
+            host = str(event.get("host", "unknown"))
+            ingest_ts = float(event.get("ingest_ts", time.time()))
+            doc_id = str(
+                event.get("raw_log_ref")
+                or compute_raw_log_ref(raw, source_type, host, ingest_ts)
+            )
             doc = {
-                "_index": self._today_index(),
+                "_index": self._index_for_ts(ingest_ts),
+                "_id": doc_id,
+                "_op_type": "create",
                 "_source": {
-                    "raw": self._redact_raw(str(event.get("raw", ""))),
-                    "source_type": event.get("source_type", "generic"),
-                    "host": event.get("host", "unknown"),
-                    "ingest_ts": event.get("ingest_ts", now),
+                    "raw": self._redact_raw(raw),
+                    "source_type": source_type,
+                    "host": host,
+                    "ingest_ts": ingest_ts,
                 },
             }
             actions.append(doc)
+            doc_ids.append(doc_id)
 
         successes, errors = helpers.bulk(
             self._es,
@@ -217,14 +244,29 @@ class LogArchive:
             raise_on_exception=False,
         )
         if errors:
-            error_count = len(errors) if isinstance(errors, list) else int(errors)
-            logger.error("ES bulk write had errors", error_count=error_count)
+            if isinstance(errors, list):
+                failure_count = sum(
+                    1 for e in errors if _bulk_error_status(e) != _ALREADY_EXISTS_STATUS
+                )
+                conflict_count = len(errors) - failure_count
+            else:
+                failure_count = int(errors)
+                conflict_count = 0
+            if failure_count:
+                logger.error(
+                    "ES bulk write had non-conflict failures",
+                    failure_count=failure_count,
+                )
+                raise BulkArchiveError(
+                    f"{failure_count} bulk archive operation(s) failed; "
+                    "raw logs were not persisted"
+                )
+            logger.debug(
+                "ES bulk create conflicts ignored (already archived)", conflicts=conflict_count
+            )
 
-        # Unfortunately helpers.bulk doesn't return IDs; caller must handle
-        # by querying for the written docs if IDs are needed for raw_log_ref.
-        # For production, use pipeline IDs or write individual docs.
         logger.debug("Bulk archived", count=successes)
-        return []  # IDs not available from bulk; use write() for individual IDs
+        return doc_ids
 
     def _redact_raw(self, raw: str) -> str:
         return redact(raw, config=self.redaction_config)
@@ -236,8 +278,26 @@ class LogArchive:
             result = self._es.get(index=idx, id=doc_id)
             return result["_source"]
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not retrieve doc", doc_id=doc_id, error=str(exc))
+            if index is not None:
+                logger.warning("Could not retrieve doc", doc_id=doc_id, error=str(exc))
+                return None
+            logger.warning(
+                "Could not retrieve doc from today's index", doc_id=doc_id, error=str(exc)
+            )
+        try:
+            result = self._es.search(
+                index=f"{self.index_prefix}-*",
+                body={"query": {"ids": {"values": [doc_id]}}, "size": 1},
+            )
+            hits = result.get("hits", {}).get("hits", [])
+            if hits:
+                return hits[0]["_source"]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not retrieve doc across rolled indices", doc_id=doc_id, error=str(exc)
+            )
             return None
+        return None
 
     def search_recent(
         self,
