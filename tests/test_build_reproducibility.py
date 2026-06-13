@@ -14,11 +14,15 @@ import re
 import pytest
 
 _ROOT = pathlib.Path(__file__).parent.parent
-_DOCKERFILES = [
+_PYTHON_DOCKERFILES = [
     _ROOT / "docker" / "api" / "Dockerfile",
     _ROOT / "docker" / "collector" / "Dockerfile",
     _ROOT / "docker" / "router" / "Dockerfile",
     _ROOT / "docker" / "archive" / "Dockerfile",
+]
+_DOCKERFILES = [
+    *_PYTHON_DOCKERFILES,
+    _ROOT / "docker" / "nginx" / "Dockerfile",
 ]
 _TRAIN_TRANSFORMER = _ROOT / "training" / "train_transformer.py"
 
@@ -37,10 +41,10 @@ class TestOnnxExportHardFail:
 
         real_import = importlib.import_module
 
-        def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        def fake_import(name: str, package: str | None = None) -> object:
             if name == "optimum.onnxruntime":
                 raise ImportError("No module named 'optimum.onnxruntime'")
-            return real_import(name, *args, **kwargs)
+            return real_import(name, package)
 
         with patch("importlib.import_module", side_effect=fake_import):
             if "training.train_transformer" in sys.modules:
@@ -73,8 +77,8 @@ class TestDockerfilesUseUvLockfile:
 
     @pytest.mark.parametrize(
         "dockerfile",
-        _DOCKERFILES,
-        ids=[str(p.relative_to(_ROOT)) for p in _DOCKERFILES],
+        _PYTHON_DOCKERFILES,
+        ids=[str(p.relative_to(_ROOT)) for p in _PYTHON_DOCKERFILES],
     )
     def test_dockerfile_uses_uv(self, dockerfile: pathlib.Path) -> None:
         text = dockerfile.read_text()
@@ -84,8 +88,8 @@ class TestDockerfilesUseUvLockfile:
 
     @pytest.mark.parametrize(
         "dockerfile",
-        _DOCKERFILES,
-        ids=[str(p.relative_to(_ROOT)) for p in _DOCKERFILES],
+        _PYTHON_DOCKERFILES,
+        ids=[str(p.relative_to(_ROOT)) for p in _PYTHON_DOCKERFILES],
     )
     def test_dockerfile_copies_uv_lock(self, dockerfile: pathlib.Path) -> None:
         text = dockerfile.read_text()
@@ -95,8 +99,8 @@ class TestDockerfilesUseUvLockfile:
 
     @pytest.mark.parametrize(
         "dockerfile",
-        _DOCKERFILES,
-        ids=[str(p.relative_to(_ROOT)) for p in _DOCKERFILES],
+        _PYTHON_DOCKERFILES,
+        ids=[str(p.relative_to(_ROOT)) for p in _PYTHON_DOCKERFILES],
     )
     def test_dockerfile_no_bare_pip_install(self, dockerfile: pathlib.Path) -> None:
         """Dockerfiles must not use bare 'pip install' — use uv instead."""
@@ -135,6 +139,24 @@ class TestDockerfilesPinBaseImages:
                 f"{dockerfile.name} FROM line is not pinned to a digest: {from_line.strip()!r} — "
                 "use 'image:tag@sha256:...' for reproducible builds"
             )
+
+
+class TestDockerfilesHardenRuntime:
+    @pytest.mark.parametrize(
+        "dockerfile",
+        _DOCKERFILES,
+        ids=[str(p.relative_to(_ROOT)) for p in _DOCKERFILES],
+    )
+    def test_dockerfile_uses_non_root_user(self, dockerfile: pathlib.Path) -> None:
+        text = dockerfile.read_text()
+        user_lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("USER ")]
+        assert user_lines, f"{dockerfile.name} must switch to a non-root runtime user"
+        assert user_lines[-1] != "USER root", f"{dockerfile.name} must not run as root"
+
+    def test_nginx_dockerfile_has_healthcheck(self) -> None:
+        dockerfile = _ROOT / "docker" / "nginx" / "Dockerfile"
+        text = dockerfile.read_text()
+        assert "HEALTHCHECK" in text, "nginx Dockerfile must define a container healthcheck"
 
 
 # ── uv.lock file exists ────────────────────────────────────────────────

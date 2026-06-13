@@ -41,9 +41,12 @@ x-common-env: &common-env
   # fail loudly if unset, which is intentional — this is security telemetry.
   ES_PASSWORD: "${ES_PASSWORD:?ES_PASSWORD must be set in .env}"
   QRADAR_HOST: "${QRADAR_HOST:-localhost}"
+  QRADAR_PORT: "${QRADAR_PORT:-514}"
+  QRADAR_PROTOCOL: "${QRADAR_PROTOCOL:-tcp}"
   LOGFILTER_ADMIN_TOKEN: "${LOGFILTER_ADMIN_TOKEN:?LOGFILTER_ADMIN_TOKEN must be set in .env}"
   LOGFILTER_API_TOKEN: "${LOGFILTER_API_TOKEN:?LOGFILTER_API_TOKEN must be set in .env}"
   LOGFILTER_METRICS_TOKEN: "${LOGFILTER_METRICS_TOKEN:-}"
+  LOGFILTER_MODELS_STRICT: "${LOGFILTER_MODELS_STRICT:-0}"
   LOGFILTER_SCORE_HIGH: "${LOGFILTER_SCORE_HIGH:-0.80}"
   LOGFILTER_SCORE_MEDIUM: "${LOGFILTER_SCORE_MEDIUM:-0.50}"
   LOGFILTER_SCORE_LOW: "${LOGFILTER_SCORE_LOW:-0.20}"
@@ -164,10 +167,6 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
     restart: unless-stopped
 
   kibana:
@@ -254,14 +253,14 @@ services:
       logfilter-api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:443:443"
-      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:8443"
+      - "127.0.0.1:80:8080"
     volumes:
       - ./scripts/certs/services-server.crt:/etc/tls/server.crt:ro
       - ./scripts/certs/services-server.key:/etc/tls/server.key:ro
       - ./config/nginx/nginx.conf:/etc/nginx/conf.d/logfilter.conf:ro
     healthcheck:
-      test: ["CMD", "curl", "-fsk", "https://localhost/health"]
+      test: ["CMD", "curl", "-fsk", "https://localhost:8443/health"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -283,7 +282,7 @@ services:
       - "127.0.0.1:9100:9100/tcp"   # Prometheus metrics (SYSLOG_METRICS_PORT)
     environment:
       <<: *common-env
-      SYSLOG_ALLOWED_CIDRS: "${SYSLOG_ALLOWED_CIDRS:-127.0.0.1/32,::1/128}"
+      SYSLOG_ALLOWED_CIDRS: "${SYSLOG_ALLOWED_CIDRS:-127.0.0.1/32,::1/128,172.16.0.0/12}"
       SYSLOG_METRICS_PORT: "${SYSLOG_METRICS_PORT:-9100}"
     volumes:
       - ./config:/app/config:ro
@@ -317,11 +316,23 @@ services:
           cpus: "2.0"
     restart: unless-stopped
 
+  # ── Jaeger (trace storage + UI) ────────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: logfilter-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"   # Jaeger UI
+    restart: unless-stopped
+
   # ── OpenTelemetry Collector ────────────────────────────────────────────────
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.99.0
     container_name: logfilter-otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
+    depends_on:
+      - jaeger
     ports:
       - "127.0.0.1:4317:4317"   # OTLP gRPC
       - "127.0.0.1:4318:4318"   # OTLP HTTP
@@ -340,15 +351,42 @@ services:
       - alertmanager-data:/alertmanager
     environment:
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - "--config.file=/etc/alertmanager/alertmanager.yml"
-      - "--config.expand-env"
-      - "--storage.path=/alertmanager"
+      - |
+        sed "s|\$${ALERT_WEBHOOK_URL}|$${ALERT_WEBHOOK_URL:-http://127.0.0.1:9/alertmanager}|g" \
+          /etc/alertmanager/alertmanager.yml > /tmp/alertmanager.yml
+        exec /bin/alertmanager \
+          --config.file=/tmp/alertmanager.yml \
+          --storage.path=/alertmanager
     restart: unless-stopped
 
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.25.0
     container_name: logfilter-blackbox-exporter
+    restart: unless-stopped
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: logfilter-kafka-exporter
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - "--kafka.server=kafka:29092"
+    restart: unless-stopped
+
+  elasticsearch-exporter:
+    image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.7.0
+    container_name: logfilter-elasticsearch-exporter
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ES_USERNAME: "elastic"
+      ES_PASSWORD: "${ES_PASSWORD:?ES_PASSWORD must be set in .env}"
+    command:
+      - "--es.uri=http://elasticsearch:9200"
     restart: unless-stopped
 
   # ── Prometheus ─────────────────────────────────────────────────────────────
@@ -358,6 +396,8 @@ services:
     depends_on:
       - alertmanager
       - blackbox-exporter
+      - kafka-exporter
+      - elasticsearch-exporter
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
