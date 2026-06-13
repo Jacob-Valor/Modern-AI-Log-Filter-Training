@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ from logfilter.models.ner import NERModel
 from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.monitoring.drift_detector import DriftDetector
+from logfilter.monitoring.novelty_detector import NoveltyDetector
 from logfilter.pipeline.events import ScoredEvent
 from logfilter.pipeline.normalizer import NormalizedEvent
 
@@ -62,6 +64,10 @@ def _enabled(value: Any, default: bool = True) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _strict_model_loading() -> bool:
+    return _enabled(os.environ.get("LOGFILTER_MODELS_STRICT"), default=False)
 
 
 def _probability_config(value: Any, name: str) -> float:
@@ -102,6 +108,21 @@ class DisabledBiEncoderModel(BiEncoderModel):
 
         return [(DedupResult(is_duplicate=False, similarity=0.0), []) for _ in texts]
 
+    def check_dedup_retrieve_and_score_novelty_batch(
+        self, texts: list[str]
+    ) -> list[tuple[Any, list[Any], Any]]:
+        from logfilter.models.biencoder import DedupResult
+        from logfilter.monitoring.novelty_detector import NoveltyResult
+
+        return [
+            (
+                DedupResult(is_duplicate=False, similarity=0.0),
+                [],
+                NoveltyResult(score=0.0, distance=0.0, baseline_size=0),
+            )
+            for _ in texts
+        ]
+
 
 class DisabledCrossEncoderModel(CrossEncoderModel):
     """No-op CrossEncoder stage for local validation without downloading HF models."""
@@ -117,9 +138,49 @@ class DisabledCrossEncoderModel(CrossEncoderModel):
 
 _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
 
-# Attack tool signatures that XGBoost misses due to sparse training signal.
+# Attack tool signatures and threat keywords that XGBoost misses due to sparse
+# training signal.  The regex is intentionally broad — these are high-signal
+# strings that appear in real-world attack logs.  Matching applies a floor
+# score so the event is never buried below INFO priority.
 _ATTACK_TOOL_RE = re.compile(
-    "sqlmap|nikto|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|metasploit",
+    r"(?:"
+    # Tool names
+    r"sqlmap|nikto|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|metasploit|mimikatz"
+    r"|"
+    # Attack categories
+    r"xss\s+attack|sql\s*injection|command\s+injection|reverse\s+shell"
+    r"|"
+    r"credential\s+dump|credential\s+theft|password\s+spray"
+    r"|"
+    r"c2\s+communication|c&c\s+communication|beaconing\s+behavior"
+    r"|"
+    r"known\s+malware|malware\s+hash|trojan|ransomware|rootkit"
+    r"|"
+    r"privilege\s+escalation|lateral\s+movement|data\s+exfiltration"
+    r"|"
+    # Suspicious processes
+    r"procdump\.exe|mimikatz\.exe|powershell\.exe\s+-enc|bash\s+-i\s+>&\s*/dev/tcp"
+    r"|"
+    r"invoke-webrequest|invoke-expression|sekurlsa::logonpasswords"
+    r"|"
+    # Firewall/IDS alert keywords
+    r"port\s+scan\s+detected|syn\s+flood|brute\s+force\s+detected"
+    r"|"
+    r"outbound\s+connection\s+to\s+evil|dns\s+query\s+to\s+.*evil"
+    r"|"
+    # Additional attack patterns
+    r"invalid\s+user.*from\s+\d|maximum\s+authentication\s+attempts\s+exceeded"
+    r"|"
+    r"stealth\s+scan|tcp\s+stealth|syn\s+scan|fin.*scan"
+    r"|"
+    r"connection\s+flood|dos\s+threshold\s+exceeded|ddos\s+.*flood"
+    r"|"
+    r"<script>|alert\s*\(|or\s+1\s*=\s*1|union\s+select"
+    r"|"
+    r"cve-\d{4}-\d+.*exploit|exploit\s+attempt"
+    r"|"
+    r"failed\s+password\s+for\s+invalid\s+user"
+    r")",
     re.IGNORECASE,
 )
 _ATTACK_TOOL_FLOOR = 0.60
@@ -165,6 +226,7 @@ class LogScorer:
     ner_model : NERModel | None
     biencoder : BiEncoderModel | None
     cross_encoder : CrossEncoderModel | None
+    novelty_detector : NoveltyDetector | None
     """
 
     def __init__(
@@ -178,6 +240,7 @@ class LogScorer:
         syslog_classifier: SyslogClassifier | None = None,
         model_version: str = "",
         drift_detector: DriftDetector | None = None,
+        novelty_detector: NoveltyDetector | None = None,
     ) -> None:
         self._cfg = config
         self._model_version = model_version
@@ -290,6 +353,25 @@ class LogScorer:
         else:
             self.drift_detector = None
 
+        novelty_cfg = config.get("monitoring", {}).get("novelty", {})
+        self.novelty_detector: NoveltyDetector | None
+        if novelty_detector is not None:
+            self.novelty_detector = novelty_detector
+        elif _enabled(novelty_cfg.get("enabled", False)):
+            self.novelty_detector = NoveltyDetector(
+                window_size=int(novelty_cfg.get("window_size", 10000)),
+                min_baseline=int(novelty_cfg.get("min_baseline", 100)),
+                warmup_events=int(novelty_cfg.get("warmup_events", 500)),
+                distance_scale=float(novelty_cfg.get("distance_scale", 2.0)),
+            )
+        else:
+            self.novelty_detector = None
+
+        if self.novelty_detector is not None and not isinstance(
+            self.biencoder, DisabledBiEncoderModel
+        ):
+            self.biencoder.novelty_detector = self.novelty_detector
+
         self.syslog_classifier = syslog_classifier or SyslogClassifier()
 
         self._feature_cache_names: tuple[str, ...] = ()
@@ -340,18 +422,71 @@ class LogScorer:
 
     def preload_models(self) -> None:
         """Eagerly load all models to eliminate cold-start latency."""
+        def _warmup(model_name: str, warmup_fn: Any) -> None:
+            started = time.perf_counter()
+            try:
+                warmup_fn()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Model warmup failed",
+                    model=model_name,
+                    error=str(exc),
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                )
+                if _strict_model_loading():
+                    raise
+            else:
+                logger.info(
+                    "Model warmup completed",
+                    model=model_name,
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                )
+
         logger.info("Pre-loading classifier")
         _ = self.classifier.is_ready()
+        classifier_features = getattr(self.classifier, "expected_feature_count", 0) or 1
+        _warmup(
+            "classifier",
+            lambda: self.classifier.predict_proba(
+                np.zeros((1, classifier_features), dtype=np.float32)
+            ),
+        )
         logger.info("Pre-loading syslog classifier")
         _ = self.syslog_classifier.is_ready()
+        syslog_features = len(self.syslog_classifier.feature_names) or 1
+        _warmup(
+            "syslog_classifier",
+            lambda: self.syslog_classifier.predict_proba(
+                np.zeros((1, syslog_features), dtype=np.float32)
+            ),
+        )
         logger.info("Pre-loading tier2 classifier")
         _ = self.tier2_classifier.is_ready()
+        _warmup("tier2_classifier", self.tier2_classifier.prewarm)
         logger.info("Pre-loading biencoder")
         _ = self.biencoder.check_dedup_and_retrieve_batch([])
+        if not isinstance(self.biencoder, DisabledBiEncoderModel):
+            _warmup(
+                "biencoder",
+                lambda: self.biencoder.check_dedup_and_retrieve_batch(["warmup"]),
+            )
         logger.info("Pre-loading NER model")
         _ = self.ner_model.extract_batch([])
+        if not isinstance(self.ner_model, DisabledNERModel):
+            _warmup("ner_model", lambda: self.ner_model.extract_batch(["warmup"]))
         logger.info("Pre-loading cross encoder")
         _ = self.cross_encoder.score_batch([], [])
+        if not isinstance(self.cross_encoder, DisabledCrossEncoderModel):
+            _warmup(
+                "cross_encoder",
+                lambda: self.cross_encoder.score_batch(
+                    ["warmup"],
+                    [[{"id": "warmup", "name": "warmup", "description": "warmup"}]],
+                ),
+            )
+        if self.novelty_detector is not None:
+            logger.info("Pre-loading novelty detector")
+            _ = self.novelty_detector.get_stats()
 
     def score(self, event: NormalizedEvent) -> ScoredEvent:
         """Score a single normalized event. Thread-safe."""
@@ -388,8 +523,24 @@ class LogScorer:
                 {"logfilter.batch_size": len(texts)},
             ) as bi_span:
                 tier3_failed = False
+                novelty_results = None
                 try:
-                    bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
+                    if self.novelty_detector is not None and hasattr(
+                        self.biencoder,
+                        "check_dedup_retrieve_and_score_novelty_batch",
+                    ):
+                        combined_results = (
+                            self.biencoder.check_dedup_retrieve_and_score_novelty_batch(texts)
+                        )
+                        bi_results = [
+                            (dedup_res, candidates)
+                            for dedup_res, candidates, _novelty in combined_results
+                        ]
+                        novelty_results = [
+                            novelty for _dedup_res, _candidates, novelty in combined_results
+                        ]
+                    else:
+                        bi_results = self.biencoder.check_dedup_and_retrieve_batch(texts)
                     duplicate_count = 0
                     candidate_count = 0
                     for se, (dedup_res, candidates) in zip(scored, bi_results):
@@ -424,6 +575,25 @@ class LogScorer:
                         exc=exc,
                     )
                     tier3_failed = True
+
+            # ── Novelty detection (reuses BiEncoder embeddings) ──────────────
+            if self.novelty_detector is not None and not tier3_failed:
+                with telemetry.start_as_current_span(
+                    "scorer.novelty.score_batch",
+                    {"logfilter.batch_size": len(texts)},
+                ) as nov_span:
+                    try:
+                        if novelty_results is None:
+                            novelty_results = self.biencoder.score_novelty_batch(texts)
+                        for se, nov_result in zip(scored, novelty_results):
+                            se.novelty_score = nov_result.score
+                        nov_span.set_attribute(
+                            "logfilter.novelty_baseline_size",
+                            novelty_results[0].baseline_size if novelty_results else 0,
+                        )
+                    except Exception as exc:
+                        nov_span.set_attribute("logfilter.novelty_error", type(exc).__name__)
+                        logger.warning("Novelty detection failed", error=str(exc))
 
             # ── Tier 3: NER + CrossEncoder (skip duplicates) ───────────────────
             non_dup_indices = [] if tier3_failed else [
@@ -620,7 +790,7 @@ class LogScorer:
 
         text_lower = event_text.lower()
 
-        for name, det in detection.detections.items():
+        for _name, det in detection.detections.items():
             for item in det.detection_items:
                 field = getattr(item, "field", None)
                 if field is None:

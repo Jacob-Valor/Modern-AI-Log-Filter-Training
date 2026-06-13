@@ -14,6 +14,7 @@ from logfilter.models.cross_encoder import CrossEncoderModel, CrossEncoderScore
 from logfilter.models.ner import ExtractedEntities, NERModel
 from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
+from logfilter.monitoring.novelty_detector import NoveltyDetector, NoveltyResult
 from logfilter.pipeline.normalizer import LogNormalizer
 from logfilter.pipeline.scorer import LogScorer
 
@@ -107,7 +108,7 @@ def _tier3_fault_scorer(
                     "classifier": 0.5,
                     "entity_boost": 0.3,
                     "cross_encoder": 0.2,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "entity_boost_value": 0.3,
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
@@ -145,7 +146,7 @@ def test_classifier_score_is_applied_to_composite_score() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -169,6 +170,27 @@ def test_classifier_score_is_applied_to_composite_score() -> None:
     assert syslog_classifier.last_vectors is not None
     assert syslog_classifier.last_vectors.shape == (1, 1)
     assert syslog_classifier.last_vectors[0, 0] > 0
+
+
+def test_preload_models_strict_mode_propagates_warmup_failure(monkeypatch) -> None:
+    class BrokenClassifier(FakeClassifier):
+        def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
+            del feature_vectors
+            raise RuntimeError("classifier warmup failed")
+
+    monkeypatch.setenv("LOGFILTER_MODELS_STRICT", "true")
+    scorer = LogScorer(
+        config={"scoring": {"weights": {"classifier": 1.0}}},
+        classifier=BrokenClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
+    )
+
+    with pytest.raises(RuntimeError, match="classifier warmup failed"):
+        scorer.preload_models()
 
 
 class RaisingNER(NERModel):
@@ -209,7 +231,7 @@ def test_optional_downstream_models_can_be_disabled_for_local_validation() -> No
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             },
@@ -319,7 +341,7 @@ def test_score_batch_processes_multiple_events() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -356,6 +378,7 @@ class FakeTier2ThatEscalates(Tier2Classifier):
         return True
 
     def predict_proba(self, texts: list[str]) -> np.ndarray:
+        del texts
         return np.array([0.95], dtype=np.float32)
 
 
@@ -368,7 +391,7 @@ def test_tier2_escalates_when_uncertain() -> None:
                     "classifier": 0.8,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -388,6 +411,117 @@ def test_tier2_escalates_when_uncertain() -> None:
 
     assert scored.tier2_used is True
     assert scored.tier2_score == pytest.approx(0.95)
+
+
+def test_novelty_scoring_reuses_combined_biencoder_batch_path() -> None:
+    class CombinedBiEncoder(FakeBiEncoder):
+        combined_calls = 0
+
+        def check_dedup_retrieve_and_score_novelty_batch(
+            self, texts: list[str]
+        ) -> list[tuple[DedupResult, list[ATTACKCandidate], NoveltyResult]]:
+            self.combined_calls += 1
+            return [
+                (
+                    DedupResult(is_duplicate=False, similarity=0.0),
+                    [],
+                    NoveltyResult(score=0.42, distance=0.21, baseline_size=1),
+                )
+                for _ in texts
+            ]
+
+        def score_novelty_batch(
+            self,
+            texts: list[str],
+            embeddings: np.ndarray | None = None,
+        ) -> list[NoveltyResult]:
+            del texts, embeddings
+            raise AssertionError("legacy novelty path should not be called")
+
+    biencoder = CombinedBiEncoder()
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.15,
+                },
+                "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=biencoder,
+        cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
+        novelty_detector=NoveltyDetector(window_size=10, min_baseline=1, warmup_events=0),
+    )
+
+    scored = scorer.score(LogNormalizer().normalize("test event"))
+
+    assert scored.novelty_score == pytest.approx(0.42)
+    assert biencoder.combined_calls == 1
+
+
+def test_novelty_detector_is_wired_into_real_biencoder() -> None:
+    detector = NoveltyDetector(window_size=10, min_baseline=1, warmup_events=0)
+    real_biencoder = BiEncoderModel()
+    scorer = LogScorer(
+        config={"scoring": {"weights": {"classifier": 1.0, "novelty": 0.15}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=real_biencoder,
+        cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
+        novelty_detector=detector,
+    )
+
+    assert scorer.biencoder.novelty_detector is detector
+
+
+def test_preload_models_reraises_tier2_prewarm_failure_under_strict(monkeypatch) -> None:
+    monkeypatch.setenv("LOGFILTER_MODELS_STRICT", "1")
+
+    class BrokenWarmupTier2(FakeTier2Classifier):
+        def prewarm(self) -> None:
+            raise RuntimeError("tier2 inference broke during warmup")
+
+    scorer = LogScorer(
+        config={"scoring": {"weights": {"classifier": 1.0}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=BrokenWarmupTier2(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
+    )
+
+    with pytest.raises(RuntimeError, match="tier2 inference broke during warmup"):
+        scorer.preload_models()
+
+
+def test_preload_models_tolerates_tier2_prewarm_failure_when_not_strict(monkeypatch) -> None:
+    monkeypatch.delenv("LOGFILTER_MODELS_STRICT", raising=False)
+
+    class BrokenWarmupTier2(FakeTier2Classifier):
+        def prewarm(self) -> None:
+            raise RuntimeError("tier2 inference broke during warmup")
+
+    scorer = LogScorer(
+        config={"scoring": {"weights": {"classifier": 1.0}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=BrokenWarmupTier2(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
+    )
+
+    scorer.preload_models()
 
 
 def test_probability_config_validates_numeric() -> None:
@@ -545,7 +679,7 @@ def test_duplicate_penalty_and_entity_boost() -> None:
                     "classifier": 0.5,
                     "entity_boost": 0.3,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -575,7 +709,7 @@ def test_entity_boost_for_non_duplicates() -> None:
                     "classifier": 0.5,
                     "entity_boost": 0.3,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "entity_boost_value": 0.3,
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
@@ -599,7 +733,7 @@ def test_entity_boost_for_non_duplicates() -> None:
 
 
 def test_sigma_no_rules_dir_is_noop(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr("logfilter.pipeline.scorer.Path", lambda p: tmp_path / "nonexistent")
+    monkeypatch.setattr("logfilter.pipeline.scorer.Path", lambda _p: tmp_path / "nonexistent")
     scorer = LogScorer(
         config={
             "scoring": {
@@ -607,7 +741,7 @@ def test_sigma_no_rules_dir_is_noop(monkeypatch, tmp_path) -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -624,9 +758,10 @@ def test_sigma_no_rules_dir_is_noop(monkeypatch, tmp_path) -> None:
     assert scored.sigma_matched is False
 
 
-def test_classifier_exception_uses_neutral_scores(monkeypatch) -> None:
+def test_classifier_exception_uses_neutral_scores() -> None:
     class BrokenClassifier(FakeClassifier):
         def predict_proba(self, feature_vectors):
+            del feature_vectors
             raise RuntimeError("model broken")
 
     scorer = LogScorer(
@@ -636,7 +771,7 @@ def test_classifier_exception_uses_neutral_scores(monkeypatch) -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -673,7 +808,7 @@ def test_no_model_loaded_marks_degraded() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -700,7 +835,7 @@ def test_healthy_classifier_not_degraded() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -720,12 +855,14 @@ def test_healthy_classifier_not_degraded() -> None:
 def test_tier2_not_ready_keeps_tier1_scores() -> None:
     class Tier2NotReady(Tier2Classifier):
         def should_escalate(self, tier1_prob: float) -> bool:
+            del tier1_prob
             return True
 
         def is_ready(self) -> bool:
             return False
 
         def predict_proba(self, texts: list[str]) -> np.ndarray:
+            del texts
             raise AssertionError("should not be called")
 
     scorer = LogScorer(
@@ -735,7 +872,7 @@ def test_tier2_not_ready_keeps_tier1_scores() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -755,12 +892,14 @@ def test_tier2_not_ready_keeps_tier1_scores() -> None:
 def test_tier2_exception_keeps_tier1_scores() -> None:
     class Tier2Broken(Tier2Classifier):
         def should_escalate(self, tier1_prob: float) -> bool:
+            del tier1_prob
             return True
 
         def is_ready(self) -> bool:
             return True
 
         def predict_proba(self, texts: list[str]) -> np.ndarray:
+            del texts
             raise RuntimeError("tier2 broken")
 
     scorer = LogScorer(
@@ -770,7 +909,7 @@ def test_tier2_exception_keeps_tier1_scores() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -799,7 +938,7 @@ def test_feature_vector_matching_branches() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -824,7 +963,7 @@ def test_feature_cache_is_reused() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -851,7 +990,7 @@ def test_compute_score_with_sigma_match() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -878,7 +1017,7 @@ def test_routing_label_info() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
@@ -905,7 +1044,7 @@ def test_confidence_with_no_signals() -> None:
                     "classifier": 1.0,
                     "entity_boost": 0.0,
                     "cross_encoder": 0.0,
-                    "novelty": 0.0,
+                    "novelty": 0.15,
                 },
                 "routing": {"high": 0.85, "medium": 0.50, "low": 0.20},
             }
