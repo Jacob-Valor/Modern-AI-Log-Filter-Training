@@ -26,6 +26,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.2.0",
     "kafka-python>=2.0.2",
+    "lz4>=4.3.3",
     "elasticsearch>=8.13.0,<9",
     "prometheus-client>=0.20.0",
     "sigma-cli>=1.0.0",

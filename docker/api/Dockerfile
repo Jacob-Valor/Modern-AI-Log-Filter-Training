@@ -15,9 +15,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.4 /uv /usr/local/bin/uv
 
 # Install Python deps from lockfile (layer caching)
 COPY uv.lock pyproject.toml ./
-RUN uv pip install --system --locked --no-cache --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
+RUN uv pip install --system --no-cache --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
 COPY requirements-api.txt .
-RUN uv pip install --system --locked --no-cache -r requirements-api.txt
+RUN uv pip install --system --no-cache -r requirements-api.txt
 
 # Copy source
 COPY src/ ./src/
@@ -53,7 +53,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["uvicorn", "logfilter.api.app:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8080", \
-     "--workers", "4"]
+CMD ["sh", "-c", "uvicorn logfilter.api.app:app --host 0.0.0.0 --port 8080 --workers ${LOGFILTER_API_WORKERS:-1}"]

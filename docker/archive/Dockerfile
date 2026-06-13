@@ -10,7 +10,7 @@ WORKDIR /app
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.4 /uv /usr/local/bin/uv
 COPY uv.lock pyproject.toml ./
-RUN uv pip install --system --locked --no-cache kafka-python structlog PyYAML elasticsearch
+RUN uv pip install --system --no-cache kafka-python lz4 structlog tenacity PyYAML "elasticsearch<9"
 
 COPY src/ ./src/
 COPY config/ ./config/
