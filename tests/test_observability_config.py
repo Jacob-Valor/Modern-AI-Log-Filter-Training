@@ -38,3 +38,36 @@ def test_compose_defines_blackbox_exporter_service() -> None:
 
     assert blackbox["image"].startswith("prom/blackbox-exporter:")
     assert "blackbox-exporter" in compose["services"]["prometheus"]["depends_on"]
+
+
+def test_prometheus_exporter_scrapes_have_matching_compose_services() -> None:
+    compose = _load_yaml("docker-compose.yml")
+    prometheus = _load_yaml("config/prometheus.yml")
+    services = compose["services"]
+    jobs = {job["job_name"]: job for job in prometheus["scrape_configs"]}
+
+    assert "kafka-exporter" in services
+    assert services["kafka-exporter"]["image"].startswith("danielqsj/kafka-exporter:")
+    assert jobs["kafka"]["static_configs"][0]["targets"] == ["kafka-exporter:9308"]
+    assert "kafka-exporter" in services["prometheus"]["depends_on"]
+
+    assert "elasticsearch-exporter" in services
+    assert services["elasticsearch-exporter"]["image"].startswith(
+        "quay.io/prometheuscommunity/elasticsearch-exporter:"
+    )
+    assert jobs["elasticsearch"]["static_configs"][0]["targets"] == [
+        "elasticsearch-exporter:9114"
+    ]
+    assert "elasticsearch-exporter" in services["prometheus"]["depends_on"]
+
+
+def test_otel_collector_exports_traces_to_jaeger() -> None:
+    compose = _load_yaml("docker-compose.yml")
+    otel = _load_yaml("config/otel-collector.yml")
+
+    assert "jaeger" in compose["services"]
+    assert compose["services"]["jaeger"]["image"].startswith("jaegertracing/all-in-one:")
+    assert "otlp/jaeger" in otel["exporters"]
+    assert otel["exporters"]["otlp/jaeger"]["endpoint"] == "jaeger:4317"
+    assert "otlp/jaeger" in otel["service"]["pipelines"]["traces"]["exporters"]
+    assert "debug" in otel["service"]["pipelines"]["traces"]["exporters"]
