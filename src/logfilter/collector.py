@@ -97,6 +97,7 @@ class BoundedNDJSONSpool:
 
     def __init__(self, path: Path, max_bytes: int) -> None:
         self._path = path
+        self._bad_path = path.with_name(f"{path.name}.bad")
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,13 +137,20 @@ class BoundedNDJSONSpool:
                 return 0
             replayed = 0
             remaining: list[str] = []
+            quarantined: list[str] = []
             for line in lines:
                 try:
                     record = json.loads(line)
                     callback(record)
                     replayed += 1
+                except json.JSONDecodeError:
+                    quarantined.append(line)
+                    _collector_dropped_total.labels(reason="spool_malformed").inc()
                 except Exception:  # noqa: BLE001
                     remaining.append(line)
+            if quarantined:
+                with self._bad_path.open("a", encoding="utf-8") as f:
+                    f.writelines(quarantined)
             self._write_lines(remaining)
             _collector_spool_depth.set(len(remaining))
             return replayed
@@ -229,6 +237,37 @@ class SyslogCollector:
                 else:
                     raise
 
+    def _publish_tcp_payload(self, payload: bytes, peer_host: str) -> None:
+        with telemetry.start_as_current_span(
+            "collector.syslog.receive_tcp",
+            {
+                "network.transport": "tcp",
+                "logfilter.collector.peer_host": peer_host,
+            },
+        ) as span:
+            raw = payload.decode("utf-8", errors="replace")
+            try:
+                self.publish(raw, peer_host=peer_host, protocol="tcp")
+            except Exception as exc:  # noqa: BLE001
+                telemetry.record_exception(span, exc)
+                logger.error("Failed to publish TCP syslog event", error=str(exc))
+
+    def _pending_octet_frame(self, buffer: bytes) -> bool:
+        if not buffer[:1].isdigit():
+            return False
+        space_index = buffer.find(b" ")
+        newline_index = buffer.find(b"\n")
+        if space_index == -1 or (newline_index != -1 and newline_index < space_index):
+            return False
+        prefix = buffer[:space_index]
+        if not prefix.isdigit():
+            return False
+        frame_len = int(prefix)
+        return (
+            frame_len <= self.settings.max_tcp_line_bytes
+            and len(buffer) < space_index + 1 + frame_len
+        )
+
     def serve_udp(self) -> None:  # pragma: no cover
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(1.0)
@@ -277,7 +316,35 @@ class SyslogCollector:
                     break
 
                 buffer += chunk
-                while b"\n" in buffer:
+                while buffer:
+                    if buffer[:1].isdigit():
+                        space_index = buffer.find(b" ")
+                        newline_index = buffer.find(b"\n")
+                        if space_index != -1 and (
+                            newline_index == -1 or space_index < newline_index
+                        ):
+                            prefix = buffer[:space_index]
+                            if prefix.isdigit():
+                                frame_len = int(prefix)
+                                if frame_len > self.settings.max_tcp_line_bytes:
+                                    logger.warning(
+                                        "Dropped oversized TCP syslog frame",
+                                        peer_host=peer_host,
+                                        max_bytes=self.settings.max_tcp_line_bytes,
+                                    )
+                                    return
+                                frame_end = space_index + 1 + frame_len
+                                if len(buffer) < frame_end:
+                                    break
+                                self._publish_tcp_payload(
+                                    buffer[space_index + 1 : frame_end],
+                                    peer_host,
+                                )
+                                buffer = buffer[frame_end:]
+                                continue
+
+                    if b"\n" not in buffer:
+                        break
                     line, buffer = buffer.split(b"\n", 1)
                     if len(line) > self.settings.max_tcp_line_bytes:
                         logger.warning(
@@ -286,20 +353,11 @@ class SyslogCollector:
                             max_bytes=self.settings.max_tcp_line_bytes,
                         )
                         return
-                    with telemetry.start_as_current_span(
-                        "collector.syslog.receive_tcp",
-                        {
-                            "network.transport": "tcp",
-                            "logfilter.collector.peer_host": peer_host,
-                        },
-                    ) as span:
-                        raw = line.decode("utf-8", errors="replace")
-                        try:
-                            self.publish(raw, peer_host=peer_host, protocol="tcp")
-                        except Exception as exc:  # noqa: BLE001
-                            telemetry.record_exception(span, exc)
-                            logger.error("Failed to publish TCP syslog event", error=str(exc))
-                if len(buffer) > self.settings.max_tcp_line_bytes:
+                    self._publish_tcp_payload(line, peer_host)
+
+                if len(buffer) > self.settings.max_tcp_line_bytes and not self._pending_octet_frame(
+                    buffer
+                ):
                     logger.warning(
                         "Dropped oversized TCP syslog buffer",
                         peer_host=peer_host,
@@ -308,6 +366,13 @@ class SyslogCollector:
                     return
 
             if buffer.strip():
+                if self._pending_octet_frame(buffer):
+                    logger.warning(
+                        "Dropped incomplete TCP syslog frame",
+                        peer_host=peer_host,
+                        max_bytes=self.settings.max_tcp_line_bytes,
+                    )
+                    return
                 if len(buffer) > self.settings.max_tcp_line_bytes:
                     logger.warning(
                         "Dropped oversized TCP syslog line",
@@ -315,19 +380,7 @@ class SyslogCollector:
                         max_bytes=self.settings.max_tcp_line_bytes,
                     )
                     return
-                with telemetry.start_as_current_span(
-                    "collector.syslog.receive_tcp",
-                    {
-                        "network.transport": "tcp",
-                        "logfilter.collector.peer_host": peer_host,
-                    },
-                ) as span:
-                    raw = buffer.decode("utf-8", errors="replace")
-                    try:
-                        self.publish(raw, peer_host=peer_host, protocol="tcp")
-                    except Exception as exc:  # noqa: BLE001
-                        telemetry.record_exception(span, exc)
-                        logger.error("Failed to publish TCP syslog event", error=str(exc))
+                self._publish_tcp_payload(buffer, peer_host)
 
     def _serve_tcp_client_with_slot(self, conn: socket.socket, peer_host: str) -> None:
         try:
@@ -436,7 +489,7 @@ class SyslogCollector:
 def main() -> None:  # pragma: no cover
     collector = SyslogCollector(_settings())
 
-    def _shutdown(signum, frame):  # noqa: ANN001
+    def _shutdown(_signum, _frame):  # noqa: ANN001
         collector.stop_event.set()
 
     signal.signal(signal.SIGTERM, _shutdown)

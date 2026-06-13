@@ -127,13 +127,13 @@ class FakeTCPConnection:
     def __enter__(self) -> FakeTCPConnection:
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
         self.close()
 
     def settimeout(self, timeout: float) -> None:
         self.timeout = timeout
 
-    def recv(self, size: int) -> bytes:
+    def recv(self, _size: int) -> bytes:
         if self.chunks:
             return self.chunks.pop(0)
         return b""
@@ -161,6 +161,21 @@ def test_tcp_client_drops_oversized_line() -> None:
     assert producer.sent == []
 
 
+def test_tcp_client_accepts_rfc6587_octet_counted_frames() -> None:
+    collector, producer = _collector("10.0.0.0/24")
+    first = b"host1 event1"
+    second = b"host2 event2"
+    payload = f"{len(first)} ".encode() + first + f"{len(second)} ".encode() + second
+    connection = FakeTCPConnection([payload[:8], payload[8:]])
+
+    collector.serve_tcp_client(cast(socket.socket, connection), "10.0.0.5")
+
+    assert [record["raw_log"] for record in producer.sent] == [
+        "host1 event1",
+        "host2 event2",
+    ]
+
+
 def test_tcp_connection_slots_reject_when_full() -> None:
     collector, _producer = _collector("10.0.0.0/24")
     assert collector._tcp_slots.acquire(blocking=False)
@@ -179,7 +194,7 @@ class BrokenProducer:
         self.sent: list[dict] = []
         self.closed = False
 
-    def send(self, **kwargs) -> None:
+    def send(self, **_kwargs) -> None:
         raise RuntimeError("kafka down")
 
     def close(self) -> None:
@@ -288,6 +303,26 @@ def test_drain_keeps_records_that_raise(tmp_path) -> None:
     lines = spool_path.read_text().strip().split("\n")
     assert len(lines) == 1
     assert json.loads(lines[0])["raw"] == "event1"
+
+
+def test_drain_quarantines_malformed_spool_lines(tmp_path) -> None:
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+    spool_path.write_text('{"raw": "good"}\nnot-json\n', encoding="utf-8")
+
+    replayed: list[dict] = []
+
+    def callback(record: dict) -> None:
+        replayed.append(record)
+
+    count = spool.drain(callback)
+
+    assert count == 1
+    assert replayed == [{"raw": "good"}]
+    assert spool_path.read_text(encoding="utf-8") == ""
+    assert (tmp_path / "spool.ndjson.bad").read_text(encoding="utf-8") == "not-json\n"
 
 
 def _reset_collector_counters() -> None:
