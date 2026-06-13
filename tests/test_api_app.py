@@ -394,6 +394,7 @@ def test_metrics_snapshot_uses_counters() -> None:
 
 def test_security_headers_are_added_to_responses() -> None:
     async def call_next(request: Request) -> Response:
+        del request
         return Response("ok")
 
     response = asyncio.run(api_app.add_security_headers(_request(), call_next))
@@ -453,9 +454,11 @@ class FakeScorer:
 
 class FakeEnricher:
     def enrich(self, scored, es_doc_id: str = "fake-doc-id"):
+        del scored, es_doc_id
         return "leef"
 
     def enrich_batch(self, scored_events, es_doc_ids=None):
+        del es_doc_ids
         return [f"leef-{i}" for i, _ in enumerate(scored_events)]
 
 
@@ -524,33 +527,83 @@ def test_reload_models_requires_scorer_and_replaces_it(monkeypatch) -> None:
     monkeypatch.setattr(
         api_app,
         "load_config",
-        lambda path: {"scoring": {"routing": {"high": "0.90"}}},
+        lambda _path: {"scoring": {"routing": {"high": "0.90"}}},
     )
-    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "new-scorer")
+    class NewScorer:
+        preloaded = False
+
+        def preload_models(self) -> None:
+            self.preloaded = True
+
+    new_scorer = NewScorer()
+
+    def _new_scorer(config, model_version=""):
+        del config, model_version
+        return new_scorer
+
+    monkeypatch.setattr(api_app, "LogScorer", _new_scorer)
 
     response = asyncio.run(api_app.reload_models())
 
     assert response == {"status": "reloaded"}
     assert api_app._state.config == {"scoring": {"routing": {"high": "0.90"}}}
-    assert api_app._state.scorer == "new-scorer"
+    assert api_app._state.scorer is new_scorer
+    assert new_scorer.preloaded is True
 
 
 def test_reload_models_preserves_model_version(monkeypatch) -> None:
     api_app._state.scorer = cast(Any, FakeScorer())
     monkeypatch.setenv("LOGFILTER_MODEL_VERSION", "v9.9.9")
-    monkeypatch.setattr(api_app, "load_config", lambda path: {})
+    monkeypatch.setattr(api_app, "load_config", lambda _path: {})
 
     captured: dict[str, str] = {}
 
+    class NewScorer:
+        def preload_models(self) -> None:
+            pass
+
     def _fake_logscorer(config, model_version=""):
+        del config
         captured["model_version"] = model_version
-        return "new-scorer"
+        return NewScorer()
 
     monkeypatch.setattr(api_app, "LogScorer", _fake_logscorer)
 
     asyncio.run(api_app.reload_models())
 
     assert captured["model_version"] == "v9.9.9"
+
+
+def test_reload_models_keeps_old_state_when_new_scorer_prewarm_fails(monkeypatch) -> None:
+    old_scorer = cast(Any, FakeScorer())
+    old_enricher = cast(Any, FakeEnricher())
+    old_config = {"scoring": {"routing": {"high": "0.80"}}}
+    api_app._state.scorer = old_scorer
+    api_app._state.enricher = old_enricher
+    api_app._state.config = old_config
+    monkeypatch.setattr(
+        api_app,
+        "load_config",
+        lambda _path: {"scoring": {"routing": {"high": "0.90"}}},
+    )
+
+    class BrokenNewScorer:
+        def preload_models(self) -> None:
+            raise RuntimeError("warmup failed")
+
+    def _broken_new_scorer(config, model_version=""):
+        del config, model_version
+        return BrokenNewScorer()
+
+    monkeypatch.setattr(api_app, "LogScorer", _broken_new_scorer)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_app.reload_models())
+
+    assert exc_info.value.status_code == 503
+    assert api_app._state.scorer is old_scorer
+    assert api_app._state.enricher is old_enricher
+    assert api_app._state.config is old_config
 
 
 def test_metrics_endpoint_returns_prometheus_payload() -> None:
@@ -561,13 +614,17 @@ def test_metrics_endpoint_returns_prometheus_payload() -> None:
 
 
 def test_lifespan_initializes_scorer_and_enricher(monkeypatch) -> None:
-    monkeypatch.setattr(api_app, "load_config", lambda path: {"qradar": {"leef_vendor": "Vendor"}})
+    monkeypatch.setattr(api_app, "load_config", lambda _path: {"qradar": {"leef_vendor": "Vendor"}})
 
     class FakeScorerObj:
         def preload_models(self):
             pass
 
-    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": FakeScorerObj())
+    def _fake_lifespan_scorer(config, model_version=""):
+        del config, model_version
+        return FakeScorerObj()
+
+    monkeypatch.setattr(api_app, "LogScorer", _fake_lifespan_scorer)
     monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
 
     async def run_lifespan() -> None:
@@ -602,6 +659,7 @@ def test_score_event_exception_handling() -> None:
         classifier = Classifier()
 
         def score(self, normalized):
+            del normalized
             raise ValueError("bad input")
 
     api_app._state.scorer = cast(Any, BrokenScorer())
@@ -635,6 +693,7 @@ def test_score_batch_exception_handling() -> None:
         classifier = Classifier()
 
         def score_batch(self, normalized_events):
+            del normalized_events
             raise ValueError("bad batch")
 
     api_app._state.scorer = cast(Any, BrokenScorer())
@@ -649,7 +708,7 @@ def test_score_batch_exception_handling() -> None:
     assert exc_info.value.status_code == 400
 
 
-def test_health_with_tier2_classifier(monkeypatch) -> None:
+def test_health_with_tier2_classifier() -> None:
     class FakeTier2:
         def is_ready(self) -> bool:
             return True
@@ -673,8 +732,17 @@ def test_health_with_tier2_classifier(monkeypatch) -> None:
 
 def test_reload_models_with_empty_config(monkeypatch) -> None:
     api_app._state.scorer = cast(Any, FakeScorer())
-    monkeypatch.setattr(api_app, "load_config", lambda path: {})
-    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": "new-scorer")
+    monkeypatch.setattr(api_app, "load_config", lambda _path: {})
+
+    class NewScorer:
+        def preload_models(self) -> None:
+            pass
+
+    def _new_scorer(config, model_version=""):
+        del config, model_version
+        return NewScorer()
+
+    monkeypatch.setattr(api_app, "LogScorer", _new_scorer)
 
     response = asyncio.run(api_app.reload_models())
     assert response == {"status": "reloaded"}
@@ -695,13 +763,17 @@ def test_metrics_snapshot_with_zero_events() -> None:
 
 
 def test_lifespan_with_empty_config(monkeypatch) -> None:
-    monkeypatch.setattr(api_app, "load_config", lambda path: {})
+    monkeypatch.setattr(api_app, "load_config", lambda _path: {})
 
     class FakeScorerObj:
         def preload_models(self):
             pass
 
-    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": FakeScorerObj())
+    def _fake_scorer(config, model_version=""):
+        del config, model_version
+        return FakeScorerObj()
+
+    monkeypatch.setattr(api_app, "LogScorer", _fake_scorer)
     monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
 
     async def run_lifespan() -> None:

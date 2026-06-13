@@ -854,12 +854,17 @@ async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
             logger.warning("config.yaml not found or empty — using defaults")
 
         model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
-        new_scorer = LogScorer(config=new_config, model_version=model_version)
-        new_enricher = LEEFEnricher(
-            vendor=new_config.get("qradar", {}).get("leef_vendor", "YourCo"),
-            product=new_config.get("qradar", {}).get("leef_product", "AIPreprocessor"),
-            version=new_config.get("qradar", {}).get("leef_version", "1.0"),
-        )
+        try:
+            new_scorer = LogScorer(config=new_config, model_version=model_version)
+            new_scorer.preload_models()
+            new_enricher = LEEFEnricher(
+                vendor=new_config.get("qradar", {}).get("leef_vendor", "YourCo"),
+                product=new_config.get("qradar", {}).get("leef_product", "AIPreprocessor"),
+                version=new_config.get("qradar", {}).get("leef_version", "1.0"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Model reload prewarm failed; keeping existing scorer", error=str(exc))
+            raise HTTPException(status_code=503, detail="Model reload failed") from exc
 
         _state.config = new_config
         _state.scorer = new_scorer
