@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,15 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent.parent
+
+
+def _strict_model_loading() -> bool:
+    return os.environ.get("LOGFILTER_MODELS_STRICT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _probability_config(value: float | str, name: str) -> float:
@@ -55,6 +65,7 @@ class Tier2Classifier:
         self._failure_label_index = 1
         self._load_attempted = False
         self._warned_unavailable = False
+        self.strict_model_loading = _strict_model_loading()
 
     def is_ready(self) -> bool:
         """Return True when artifacts exist and a tokenizer/model backend is loadable."""
@@ -85,6 +96,17 @@ class Tier2Classifier:
 
         return np.full(len(texts), 0.5, dtype=np.float32)
 
+    def prewarm(self) -> None:
+        # Inference exceptions are deliberately NOT swallowed here (unlike
+        # predict_proba), so a strict warmup can reject a model that loads but
+        # cannot complete an inference pass.
+        if not self.is_ready():
+            return
+        if self._session is not None:
+            self._predict_onnx(["warmup"])
+        elif self._torch_model is not None:  # pragma: no cover
+            self._predict_torch(["warmup"])
+
     def should_escalate(self, tier1_prob: float) -> bool:
         """Return True when Tier-1 probability is inside the uncertainty band."""
         return self.uncertainty_low <= float(tier1_prob) <= self.uncertainty_high
@@ -112,7 +134,7 @@ class Tier2Classifier:
             and label_map_present
         )
         if not ready:
-            self._warn_degraded(
+            self._fail_or_warn(
                 "Tier-2 classifier artifacts missing",
                 model_dir=str(self.model_dir),
                 onnx_path=str(self.onnx_path),
@@ -127,13 +149,13 @@ class Tier2Classifier:
         try:
             transformers = importlib.import_module("transformers")
         except ImportError as exc:
-            self._warn_degraded("transformers unavailable for Tier-2 classifier", error=str(exc))
+            self._fail_or_warn("transformers unavailable for Tier-2 classifier", error=str(exc))
             return
 
         try:
             self._tokenizer = transformers.AutoTokenizer.from_pretrained(str(self.model_dir))
         except Exception as exc:  # noqa: BLE001
-            self._warn_degraded("Tier-2 tokenizer failed to load", error=str(exc))
+            self._fail_or_warn("Tier-2 tokenizer failed to load", error=str(exc))
             return
 
         if self.onnx_path.exists() and self._load_onnx():
@@ -149,7 +171,7 @@ class Tier2Classifier:
                     self._failure_label_index = int(key)
                     return
         except Exception as exc:  # noqa: BLE001
-            self._warn_degraded("Tier-2 label map failed to load", error=str(exc))
+            self._fail_or_warn("Tier-2 label map failed to load", error=str(exc))
 
     def _load_onnx(self) -> bool:  # pragma: no cover
         try:
@@ -181,7 +203,7 @@ class Tier2Classifier:
             self._torch_model.eval()
             logger.info("Tier-2 PyTorch classifier loaded", path=str(self.model_dir))
         except Exception as exc:  # noqa: BLE001
-            self._warn_degraded("Tier-2 PyTorch model failed to load", error=str(exc))
+            self._fail_or_warn("Tier-2 PyTorch model failed to load", error=str(exc))
             self._torch = None
             self._torch_model = None
 
@@ -240,3 +262,8 @@ class Tier2Classifier:
             return
         logger.warning(message, **kwargs)
         self._warned_unavailable = True
+
+    def _fail_or_warn(self, message: str, **kwargs: Any) -> None:
+        if self.strict_model_loading:
+            raise RuntimeError(message)
+        self._warn_degraded(message, **kwargs)

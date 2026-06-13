@@ -108,6 +108,18 @@ def test_classifier_returns_neutral_probability_without_model(tmp_path) -> None:
     assert not classifier.is_ready()
 
 
+def test_classifier_strict_mode_raises_when_model_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOGFILTER_MODELS_STRICT", "true")
+    classifier = LogClassifier(
+        model_path=tmp_path / "missing.onnx",
+        scaler_path=tmp_path / "missing-scaler.json",
+        feature_names_path=tmp_path / "missing-feature-names.json",
+    )
+
+    with pytest.raises(RuntimeError, match="No classifier model found"):
+        classifier.predict_proba(np.ones((1, 3), dtype=np.float32))
+
+
 def test_classifier_applies_scaler_and_session_list_output(tmp_path) -> None:
     scaler_path = tmp_path / "scaler.json"
     SafeMaxAbsScaler(np.array([2.0], dtype=np.float32)).to_json(scaler_path)
@@ -120,7 +132,7 @@ def test_classifier_applies_scaler_and_session_list_output(tmp_path) -> None:
         def __init__(self) -> None:
             self.seen = None
 
-        def run(self, output_names, feed):
+        def run(self, _output_names, feed):
             self.seen = feed["features"]
             return [None, [{"0": 0.1, "1": 0.9}]]
 
@@ -148,7 +160,7 @@ def test_classifier_applies_scaler_and_session_list_output(tmp_path) -> None:
 
 def test_classifier_session_array_and_xgb_paths(tmp_path) -> None:
     class FakeSession:
-        def run(self, output_names, feed):
+        def run(self, _output_names, _feed):
             return [None, np.array([[0.2, 0.8]], dtype=np.float32)]
 
     classifier = LogClassifier(
@@ -166,7 +178,7 @@ def test_classifier_session_array_and_xgb_paths(tmp_path) -> None:
     class FakeXGB:
         n_features_in_ = 3
 
-        def predict_proba(self, values):
+        def predict_proba(self, _values):
             return np.array([[0.7, 0.3]], dtype=np.float32)
 
     classifier._session = None
@@ -224,12 +236,12 @@ def test_classifier_load_onnx_model_when_available(tmp_path, monkeypatch) -> Non
 
     class FakeSession:
         def __init__(self, path, sess_options, providers):
-            pass
+            del path, sess_options, providers
 
         def get_inputs(self):
             return [FakeInput()]
 
-        def run(self, output_names, feed):
+        def run(self, _output_names, _feed):
             return [None, np.array([[0.1, 0.9]], dtype=np.float32)]
 
     class FakeSessionOptions:
@@ -268,7 +280,7 @@ def test_classifier_falls_back_to_xgb_when_onnx_fails(tmp_path, monkeypatch) -> 
         def load_model(self, path):
             self.loaded_path = path
 
-        def predict_proba(self, values):
+        def predict_proba(self, _values):
             return np.array([[0.3, 0.7]], dtype=np.float32)
 
     fake_xgb = type("FakeXGB", (), {"XGBClassifier": FakeXGBClassifier})
@@ -280,6 +292,7 @@ def test_classifier_falls_back_to_xgb_when_onnx_fails(tmp_path, monkeypatch) -> 
             pass
         class InferenceSession:
             def __init__(self, *args, **kwargs):
+                del args, kwargs
                 raise RuntimeError("ONNX broken")
 
     monkeypatch.setitem(__import__("sys").modules, "onnxruntime", BrokenRT)

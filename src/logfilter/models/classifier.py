@@ -15,6 +15,7 @@ from your own environment. It serves as Tier-1 fast classification.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,15 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent.parent  # project root
+
+
+def _strict_model_loading() -> bool:
+    return os.environ.get("LOGFILTER_MODELS_STRICT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 @dataclass
@@ -111,6 +121,7 @@ class LogClassifier:
         self._scaler: SafeMaxAbsScaler | None = None
         self._feature_names: list[str] = []
         self._input_name: str = ""
+        self.strict_model_loading = _strict_model_loading()
 
     def _load(self) -> None:
         if self.scaler_path.exists():
@@ -154,6 +165,8 @@ class LogClassifier:
             self._xgb_model.load_model(str(json_path))
             logger.info("XGBoost classifier loaded (fallback)", path=str(json_path))
         else:
+            if self.strict_model_loading:
+                raise RuntimeError("No classifier model found")
             logger.warning("No classifier model found — returning 0.5 for all events")
 
     def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:

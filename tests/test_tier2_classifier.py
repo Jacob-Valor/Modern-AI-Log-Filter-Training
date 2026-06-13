@@ -11,6 +11,7 @@ from logfilter.models.biencoder import BiEncoderModel
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
 from logfilter.models.ner import NERModel
+from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.pipeline.normalizer import LogNormalizer
 from logfilter.pipeline.scorer import LogScorer
@@ -109,6 +110,14 @@ def test_tier2_not_ready_when_artifacts_missing(tmp_path) -> None:
 
     assert not classifier.is_ready()
     np.testing.assert_allclose(result, np.array([0.5, 0.5], dtype=np.float32))
+
+
+def test_tier2_strict_mode_raises_when_artifacts_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOGFILTER_MODELS_STRICT", "on")
+    classifier = Tier2Classifier(model_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="Tier-2 classifier artifacts missing"):
+        classifier.predict_proba(["log line"])
 
 
 def test_tier2_should_escalate_band() -> None:
@@ -257,6 +266,42 @@ def test_tier2_predict_handles_session_run_exception(tmp_path) -> None:
     np.testing.assert_allclose(result, np.array([0.5], dtype=np.float32))
 
 
+def _broken_session_classifier(tmp_path):
+    (tmp_path / "tokenizer.json").write_text("{}")
+    (tmp_path / "log_classifier_tier2.onnx").write_bytes(b"fake")
+    (tmp_path / "tier2_label_map.json").write_text('{"0": "normal", "1": "failure"}')
+
+    class BrokenSession:
+        def get_inputs(self) -> list:
+            return [FakeInput("input_ids")]
+
+        def run(self, output_names, feed):  # noqa: ANN001
+            del output_names, feed
+            raise RuntimeError("ORT crashed")
+
+    classifier = Tier2Classifier(model_dir=tmp_path)
+    classifier._tokenizer = FakeTokenizer()
+    classifier._session = BrokenSession()
+    classifier._onnx_input_names = ["input_ids"]
+    classifier._load_attempted = True
+    return classifier
+
+
+def test_tier2_prewarm_propagates_loaded_session_inference_failure(tmp_path) -> None:
+    classifier = _broken_session_classifier(tmp_path)
+
+    with pytest.raises(RuntimeError, match="ORT crashed"):
+        classifier.prewarm()
+
+
+def test_tier2_prewarm_noop_when_not_ready(tmp_path) -> None:
+    classifier = Tier2Classifier(model_dir=tmp_path)
+
+    classifier.prewarm()
+
+    assert not classifier.is_ready()
+
+
 def test_tier2_logits_with_unexpected_shape_returns_neutral(tmp_path) -> None:
     classifier = Tier2Classifier(model_dir=tmp_path)
     bad_logits = np.array([[1.0]], dtype=np.float32)
@@ -343,5 +388,5 @@ def _make_scorer(classifier: FakeClassifier, tier2_classifier: FakeTier2) -> Log
         ner_model=cast(NERModel, FakeNER()),
         biencoder=cast(BiEncoderModel, FakeBiEncoder()),
         cross_encoder=cast(CrossEncoderModel, FakeCrossEncoder()),
-        syslog_classifier=FakeSyslogClassifier(),  # type: ignore[arg-type]
+        syslog_classifier=cast(SyslogClassifier, FakeSyslogClassifier()),
     )

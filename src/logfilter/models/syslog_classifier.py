@@ -9,6 +9,7 @@ HDFS patterns dominate.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,15 @@ logger = structlog.get_logger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent.parent
 SYSLOG_MODEL_DIR = ROOT / "models" / "syslog"
+
+
+def _strict_model_loading() -> bool:
+    return os.environ.get("LOGFILTER_MODELS_STRICT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class SyslogClassifier:
@@ -33,6 +43,7 @@ class SyslogClassifier:
         self._xgb_model: Any | None = None
         self._scaler: Any | None = None
         self._feature_names: list[str] = []
+        self.strict_model_loading = _strict_model_loading()
 
     def _load(self) -> None:
         onnx_path = self.model_dir / "log_classifier_syslog.onnx"
@@ -41,6 +52,8 @@ class SyslogClassifier:
         features_path = self.model_dir / "feature_names_syslog.json"
 
         if not features_path.exists():
+            if self.strict_model_loading:
+                raise RuntimeError("Syslog feature names not found")
             logger.warning("Syslog feature names not found", path=str(features_path))
             return
 
@@ -70,6 +83,8 @@ class SyslogClassifier:
             self._xgb_model.load_model(str(json_path))
             logger.info("Syslog XGBoost classifier loaded", path=str(json_path))
         else:
+            if self.strict_model_loading:
+                raise RuntimeError("No syslog classifier found")
             logger.warning("No syslog classifier found")
 
     @property
