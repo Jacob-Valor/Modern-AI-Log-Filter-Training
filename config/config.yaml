@@ -84,12 +84,10 @@ models:
 # ── Scoring thresholds ───────────────────────────────────────────────────────
 scoring:
   weights:
-    # Novelty scoring is not implemented yet, so its default weight stays 0.0
-    # until a calibrated novelty detector is trained and validated.
     classifier: 0.35
     entity_boost: 0.25
     cross_encoder: 0.40
-    novelty: 0.0
+    novelty: 0.15
   entity_boost_value: 0.20
   dedup_penalty: 0.30
 
@@ -107,8 +105,8 @@ scoring:
 qradar:
   mode: "enrich_only"          # enrich_only | suppress_low
   syslog_host: "${QRADAR_HOST:localhost}"
-  syslog_port: 514
-  syslog_protocol: "tcp"       # tcp | udp | tls
+  syslog_port: "${QRADAR_PORT:514}"
+  syslog_protocol: "${QRADAR_PROTOCOL:tcp}"       # tcp | udp | tls
   leef_vendor: "YourCo"
   leef_product: "AIPreprocessor"
   leef_version: "1.0"
@@ -137,3 +135,10 @@ monitoring:
     psi_threshold: 0.25
     check_interval: 100
     auto_fallback: "${LOGFILTER_DRIFT_AUTO_FALLBACK:true}"
+
+  novelty:
+    enabled: "${LOGFILTER_NOVELTY_ENABLED:false}"
+    window_size: 10000
+    min_baseline: 100
+    warmup_events: 500
+    distance_scale: 2.0

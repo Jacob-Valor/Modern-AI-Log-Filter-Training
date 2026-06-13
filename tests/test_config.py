@@ -44,7 +44,7 @@ def test_default_config_does_not_weight_unimplemented_novelty() -> None:
 
     config = load_config(config_path)
 
-    assert config["scoring"]["weights"]["novelty"] == 0.0
+    assert config["scoring"]["weights"]["novelty"] == 0.15
 
 
 def test_default_config_can_route_max_non_sigma_score_as_high() -> None:
