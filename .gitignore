@@ -50,9 +50,7 @@ scripts/remote/
 demo_data/
 
 # Large training artifacts (>100 MB)
-kaggle-output/**/*.zip
-kaggle-output/**/*.log
-
+kaggle-output/
 
 
 #playwright-mcp
