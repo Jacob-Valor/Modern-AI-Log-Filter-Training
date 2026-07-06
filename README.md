@@ -161,16 +161,24 @@ Required values:
 ```bash
 LOGFILTER_ADMIN_TOKEN=replace-with-openssl-rand-base64-32
 LOGFILTER_API_TOKEN=replace-with-openssl-rand-base64-32
+LOGFILTER_METRICS_TOKEN=replace-with-openssl-rand-base64-32
 ES_PASSWORD=replace-with-openssl-rand-base64-32
 GRAFANA_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
 ```
 
 The scoring API requires `X-API-Token`. The admin reload endpoint requires
-`X-Admin-Token`. Kafka and the API are bound to localhost by default in
-`docker-compose.yml`.
+`X-Admin-Token`. The metrics endpoint requires `X-Metrics-Token` (or
+`Authorization: Bearer <token>`). All token checks fail closed — the endpoint
+returns 403 when the token is not configured, and 401 when the token is wrong.
+Kafka and the API are bound to localhost by default in `docker-compose.yml`.
 
 OpenAPI docs are disabled unless `LOGFILTER_ENABLE_DOCS=1`. The collector is
 local-only by default and only accepts peers in `SYSLOG_ALLOWED_CIDRS`.
+
+`CORS_ALLOW_ORIGINS` must be set to your actual frontend origin(s) in
+production. The API refuses to start with localhost CORS origins when
+`LOGFILTER_ENABLE_DOCS` is off. Leave empty for headless deployments (no
+browser clients).
 
 ## Local Setup
 
