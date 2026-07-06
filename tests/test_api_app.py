@@ -116,8 +116,11 @@ def test_require_admin_fails_closed_and_accepts_valid_token() -> None:
     asyncio.run(api_app._require_admin(x_admin_token="secret"))
 
 
-def test_require_metrics_access_supports_optional_token_and_bearer() -> None:
-    asyncio.run(api_app._require_metrics_access())
+def test_require_metrics_access_fails_closed_without_token() -> None:
+    """Metrics endpoint must fail closed when token is not configured."""
+    with pytest.raises(HTTPException) as missing:
+        asyncio.run(api_app._require_metrics_access())
+    assert missing.value.status_code == 403
 
     api_app._state.config = {"api": {"metrics_token": "metrics"}}
     asyncio.run(
@@ -615,6 +618,7 @@ def test_metrics_endpoint_returns_prometheus_payload() -> None:
 
 def test_lifespan_initializes_scorer_and_enricher(monkeypatch) -> None:
     monkeypatch.setattr(api_app, "load_config", lambda _path: {"qradar": {"leef_vendor": "Vendor"}})
+    monkeypatch.setenv("LOGFILTER_ENABLE_DOCS", "1")
 
     class FakeScorerObj:
         def preload_models(self):
@@ -764,6 +768,7 @@ def test_metrics_snapshot_with_zero_events() -> None:
 
 def test_lifespan_with_empty_config(monkeypatch) -> None:
     monkeypatch.setattr(api_app, "load_config", lambda _path: {})
+    monkeypatch.setenv("LOGFILTER_ENABLE_DOCS", "1")
 
     class FakeScorerObj:
         def preload_models(self):
@@ -781,6 +786,58 @@ def test_lifespan_with_empty_config(monkeypatch) -> None:
             assert api_app._state.config == {}
 
     asyncio.run(run_lifespan())
+
+
+def test_lifespan_raises_on_localhost_cors_in_production(monkeypatch) -> None:
+    monkeypatch.setattr(api_app, "load_config", lambda _path: {})
+    monkeypatch.setattr(
+        api_app, "_cors_origins", ["http://localhost", "http://localhost:3000"]
+    )
+
+    class FakeScorerObj:
+        def preload_models(self):
+            pass
+
+    monkeypatch.setattr(api_app, "LogScorer", lambda config, model_version="": FakeScorerObj())
+    monkeypatch.setattr(api_app, "LEEFEnricher", lambda **kwargs: ("enricher", kwargs))
+    monkeypatch.delenv("LOGFILTER_ENABLE_DOCS", raising=False)
+
+    async def run_lifespan() -> None:
+        async with api_app.lifespan(api_app.app):
+            pass
+
+    with pytest.raises(RuntimeError, match="localhost CORS origins in production"):
+        asyncio.run(run_lifespan())
+
+
+def test_metrics_endpoint_returns_403_via_test_client_without_token() -> None:
+    """HTTP integration test: /metrics must return 403 when no token is configured."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(api_app.app, raise_server_exceptions=False)
+    response = client.get("/metrics")
+    assert response.status_code == 403
+    assert "not configured" in response.json()["detail"].lower()
+
+
+def test_metrics_endpoint_returns_401_via_test_client_with_wrong_token() -> None:
+    """HTTP integration test: /metrics must return 401 when token is wrong."""
+    from starlette.testclient import TestClient
+
+    api_app._state.config = {"api": {"metrics_token": "metrics-secret"}}
+    client = TestClient(api_app.app, raise_server_exceptions=False)
+    response = client.get("/metrics", headers={"X-Metrics-Token": "wrong"})
+    assert response.status_code == 401
+
+
+def test_metrics_endpoint_returns_200_via_test_client_with_valid_token() -> None:
+    """HTTP integration test: /metrics must return 200 when token is correct."""
+    from starlette.testclient import TestClient
+
+    api_app._state.config = {"api": {"metrics_token": "metrics-secret"}}
+    client = TestClient(api_app.app, raise_server_exceptions=False)
+    response = client.get("/metrics", headers={"X-Metrics-Token": "metrics-secret"})
+    assert response.status_code == 200
 
 
 def test_require_metrics_access_with_env_token(monkeypatch) -> None:

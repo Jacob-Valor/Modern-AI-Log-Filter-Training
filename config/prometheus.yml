@@ -16,6 +16,7 @@ scrape_configs:
       - targets: ["logfilter-api:8080"]
     metrics_path: "/metrics"
     scrape_interval: 10s
+    bearer_token_file: "/etc/prometheus/secrets/metrics-bearer-token"
 
   - job_name: "logfilter-collector"
     static_configs:

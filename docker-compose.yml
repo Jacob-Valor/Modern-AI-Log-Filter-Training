@@ -45,7 +45,7 @@ x-common-env: &common-env
   QRADAR_PROTOCOL: "${QRADAR_PROTOCOL:-tcp}"
   LOGFILTER_ADMIN_TOKEN: "${LOGFILTER_ADMIN_TOKEN:?LOGFILTER_ADMIN_TOKEN must be set in .env}"
   LOGFILTER_API_TOKEN: "${LOGFILTER_API_TOKEN:?LOGFILTER_API_TOKEN must be set in .env}"
-  LOGFILTER_METRICS_TOKEN: "${LOGFILTER_METRICS_TOKEN:-}"
+  LOGFILTER_METRICS_TOKEN: "${LOGFILTER_METRICS_TOKEN:?LOGFILTER_METRICS_TOKEN must be set in .env}"
   LOGFILTER_MODELS_STRICT: "${LOGFILTER_MODELS_STRICT:-0}"
   LOGFILTER_SCORE_HIGH: "${LOGFILTER_SCORE_HIGH:-0.80}"
   LOGFILTER_SCORE_MEDIUM: "${LOGFILTER_SCORE_MEDIUM:-0.50}"
@@ -85,6 +85,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - backend
     restart: unless-stopped
 
   kafka:
@@ -116,6 +118,8 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+    networks:
+      - backend
     restart: unless-stopped
 
   kafka-init:
@@ -144,6 +148,8 @@ services:
           --replication-factor 1 --partitions 4 \
           --topic logfilter-dlq
         echo "Kafka topics created."
+    networks:
+      - backend
     restart: "no"
 
   # ── Elasticsearch (raw log archive) ───────────────────────────────────────
@@ -167,6 +173,8 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
+    networks:
+      - backend
     restart: unless-stopped
 
   kibana:
@@ -181,6 +189,8 @@ services:
       ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
       ELASTICSEARCH_USERNAME: elastic
       ELASTICSEARCH_PASSWORD: ${ES_PASSWORD:?ES_PASSWORD must be set in .env}
+    networks:
+      - backend
     profiles: ["dev"]   # only started with: docker compose --profile dev up
     restart: unless-stopped
 
@@ -205,6 +215,8 @@ services:
         limits:
           memory: 2G
           cpus: "2.0"
+    networks:
+      - backend
     restart: unless-stopped
 
   # ── AI Scoring API ─────────────────────────────────────────────────────────
@@ -241,6 +253,9 @@ services:
         limits:
           memory: 8G
           cpus: "4.0"
+    networks:
+      - frontend
+      - backend
     restart: unless-stopped
 
   # ── TLS Reverse Proxy (nginx → API) ─────────────────────────────────────
@@ -264,6 +279,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+    networks:
+      - frontend
     restart: unless-stopped
 
   # ── Log Collector (syslog listener → Kafka) ────────────────────────────────
@@ -291,6 +308,8 @@ services:
         limits:
           memory: 2G
           cpus: "2.0"
+    networks:
+      - backend
     restart: unless-stopped
 
   # ── Router (Kafka consumer → LEEF → QRadar) ───────────────────────────────
@@ -314,6 +333,8 @@ services:
         limits:
           memory: 2G
           cpus: "2.0"
+    networks:
+      - backend
     restart: unless-stopped
 
   # ── Jaeger (trace storage + UI) ────────────────────────────────────────────
@@ -324,6 +345,8 @@ services:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "127.0.0.1:16686:16686"   # Jaeger UI
+    networks:
+      - observability
     restart: unless-stopped
 
   # ── OpenTelemetry Collector ────────────────────────────────────────────────
@@ -338,6 +361,8 @@ services:
       - "127.0.0.1:4318:4318"   # OTLP HTTP
     volumes:
       - ./config/otel-collector.yml:/etc/otelcol/config.yaml:ro
+    networks:
+      - observability
     restart: unless-stopped
 
   # ── Alertmanager ──────────────────────────────────────────────────────────
@@ -359,11 +384,16 @@ services:
         exec /bin/alertmanager \
           --config.file=/tmp/alertmanager.yml \
           --storage.path=/alertmanager
+    networks:
+      - observability
     restart: unless-stopped
 
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.25.0
     container_name: logfilter-blackbox-exporter
+    networks:
+      - observability
+      - backend
     restart: unless-stopped
 
   kafka-exporter:
@@ -374,6 +404,9 @@ services:
         condition: service_healthy
     command:
       - "--kafka.server=kafka:29092"
+    networks:
+      - observability
+      - backend
     restart: unless-stopped
 
   elasticsearch-exporter:
@@ -387,6 +420,9 @@ services:
       ES_PASSWORD: "${ES_PASSWORD:?ES_PASSWORD must be set in .env}"
     command:
       - "--es.uri=http://elasticsearch:9200"
+    networks:
+      - observability
+      - backend
     restart: unless-stopped
 
   # ── Prometheus ─────────────────────────────────────────────────────────────
@@ -398,18 +434,29 @@ services:
       - blackbox-exporter
       - kafka-exporter
       - elasticsearch-exporter
+    environment:
+      LOGFILTER_METRICS_TOKEN: "${LOGFILTER_METRICS_TOKEN:?LOGFILTER_METRICS_TOKEN must be set in .env}"
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=30d"
-      - "--web.enable-lifecycle"
-      - "--rules.alert.resend-delay=1m"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /etc/prometheus/secrets
+        printf '%s' "$LOGFILTER_METRICS_TOKEN" > /etc/prometheus/secrets/metrics-bearer-token
+        exec /bin/prometheus \
+          --config.file=/etc/prometheus/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --storage.tsdb.retention.time=30d \
+          --web.enable-lifecycle \
+          --rules.alert.resend-delay=1m
+    networks:
+      - observability
+      - backend
     restart: unless-stopped
 
   # ── Redis ──────────────────────────────────────────────────────────────────
@@ -425,6 +472,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    networks:
+      - backend
     restart: unless-stopped
 
   # ── Grafana ────────────────────────────────────────────────────────────────
@@ -445,7 +494,14 @@ services:
       - grafana-data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
+    networks:
+      - observability
     restart: unless-stopped
+
+networks:
+  frontend:
+  backend:
+  observability:
 
 # ── Volumes ────────────────────────────────────────────────────────────────────
 secrets:

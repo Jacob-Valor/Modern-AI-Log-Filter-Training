@@ -262,6 +262,24 @@ async def lifespan(app: FastAPI):
         _configure_rate_limiter()
         _configure_archiver()
 
+        # Block production startup with localhost CORS origins
+        if (
+            not _env_enabled("LOGFILTER_ENABLE_DOCS")
+            and set(_cors_origins) & _CORS_LOCALHOST_DEFAULTS
+        ):
+            localhost_origins = sorted(set(_cors_origins) & _CORS_LOCALHOST_DEFAULTS)
+            raise RuntimeError(
+                f"Refusing to start with localhost CORS origins in production mode: "
+                f"{localhost_origins}. Set CORS_ALLOW_ORIGINS to your actual frontend "
+                f"origin(s), or set LOGFILTER_ENABLE_DOCS=1 for local development."
+            )
+        if _state.rate_limiter is None:
+            logger.warning(
+                "Redis not configured — rate limiting is per-process only; "
+                "ineffective behind multi-worker deployments. "
+                "Set REDIS_URL for distributed rate limiting.",
+            )
+
         # Build scorer and enricher
         model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
         _state.scorer = LogScorer(config=_state.config, model_version=model_version)
@@ -313,16 +331,17 @@ app = FastAPI(
     openapi_url="/openapi.json" if _env_enabled("LOGFILTER_ENABLE_DOCS") else None,
 )
 
+_CORS_LOCALHOST_DEFAULTS = {"http://localhost", "http://localhost:3000", "http://localhost:8080"}
+_DEV_CORS_ORIGINS = "http://localhost,http://localhost:3000,http://localhost:8080"
+_cors_origins_str = os.environ.get(
+    "CORS_ALLOW_ORIGINS",
+    _DEV_CORS_ORIGINS if _env_enabled("LOGFILTER_ENABLE_DOCS") else "",
+)
+_cors_origins = [o.strip() for o in _cors_origins_str.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.environ.get(
-            "CORS_ALLOW_ORIGINS",
-            "http://localhost,http://localhost:3000,http://localhost:8080",
-        ).split(",")
-        if origin.strip()
-    ],
+    allow_origins=_cors_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-Admin-Token", "X-API-Token", "Authorization"],
     allow_credentials=False,
@@ -531,10 +550,7 @@ def _update_metrics(scored_event) -> None:
 
 
 async def _require_admin(x_admin_token: str | None = Header(default=None)) -> None:
-    token = os.environ.get("LOGFILTER_ADMIN_TOKEN") or _state.config.get("api", {}).get(
-        "admin_token",
-        "",
-    )
+    token = _configured_admin_token()
     try:
         require_configured_token(
             x_admin_token,
@@ -546,18 +562,40 @@ async def _require_admin(x_admin_token: str | None = Header(default=None)) -> No
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
+def _configured_admin_token() -> str:
+    env_token = os.environ.get("LOGFILTER_ADMIN_TOKEN", "")
+    if env_token:
+        return env_token
+    cfg_token = _state.config.get("api", {}).get("admin_token", "")
+    if cfg_token:
+        logger.warning(
+            "Admin token sourced from config.yaml — "
+            "prefer LOGFILTER_ADMIN_TOKEN env var"
+        )
+    return cfg_token
+
+
 def _configured_api_token() -> str:
-    return os.environ.get("LOGFILTER_API_TOKEN") or _state.config.get("api", {}).get(
-        "scoring_token",
-        "",
-    )
+    env_token = os.environ.get("LOGFILTER_API_TOKEN", "")
+    if env_token:
+        return env_token
+    cfg_token = _state.config.get("api", {}).get("scoring_token", "")
+    if cfg_token:
+        logger.warning("API token sourced from config.yaml — prefer LOGFILTER_API_TOKEN env var")
+    return cfg_token
 
 
 def _configured_metrics_token() -> str:
-    return os.environ.get("LOGFILTER_METRICS_TOKEN") or _state.config.get("api", {}).get(
-        "metrics_token",
-        "",
-    )
+    env_token = os.environ.get("LOGFILTER_METRICS_TOKEN", "")
+    if env_token:
+        return env_token
+    cfg_token = _state.config.get("api", {}).get("metrics_token", "")
+    if cfg_token:
+        logger.warning(
+            "Metrics token sourced from config.yaml — "
+            "prefer LOGFILTER_METRICS_TOKEN env var"
+        )
+    return cfg_token
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -626,8 +664,6 @@ async def _require_metrics_access(
     authorization: str | None = Header(default=None),
 ) -> None:
     token = _configured_metrics_token()
-    if not token:
-        return
     provided = x_metrics_token or _extract_bearer_token(authorization)
     try:
         require_configured_token(
