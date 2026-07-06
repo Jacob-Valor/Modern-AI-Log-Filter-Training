@@ -58,9 +58,17 @@ jobs:
 
       - name: Unit tests
         run: python -m pytest tests/ -m "not integration" --cov=src/logfilter --cov-report=term-missing
+        env:
+          LOGFILTER_API_TOKEN: ci-test-api-token
+          LOGFILTER_ADMIN_TOKEN: ci-test-admin-token
+          LOGFILTER_METRICS_TOKEN: ci-test-metrics-token
 
       - name: Pipeline smoke test
         run: python scripts/smoke_test_pipeline.py
+        env:
+          LOGFILTER_API_TOKEN: ci-test-api-token
+          LOGFILTER_ADMIN_TOKEN: ci-test-admin-token
+          LOGFILTER_METRICS_TOKEN: ci-test-metrics-token
 
   dependency-audit:
     runs-on: ubuntu-latest
