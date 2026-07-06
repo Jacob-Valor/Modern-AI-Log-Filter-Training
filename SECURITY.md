@@ -11,6 +11,8 @@ organization's ingress, firewall, TLS, identity, and monitoring controls.
 - Required secrets have no unsafe defaults.
 - Scoring endpoints require `X-API-Token`.
 - Admin endpoints require `X-Admin-Token`.
+- Metrics endpoints require `X-Metrics-Token` (or `Authorization: Bearer <token>`).
+- All token checks fail closed when the token is not configured.
 - API docs and OpenAPI JSON are disabled unless `LOGFILTER_ENABLE_DOCS=1`.
 - Kafka, API, Elasticsearch, Kibana, Prometheus, Grafana, and collector ports
   are bound to `127.0.0.1` in the default Compose stack.
@@ -24,16 +26,36 @@ organization's ingress, firewall, TLS, identity, and monitoring controls.
 
 Before exposing this system outside a developer machine:
 
-1. Terminate TLS at a trusted ingress or service mesh.
-2. Restrict collector access to trusted log forwarder CIDRs.
-3. Keep Elasticsearch, Prometheus, Grafana, Kafka, and Kibana private.
-4. Rotate `LOGFILTER_API_TOKEN`, `LOGFILTER_ADMIN_TOKEN`, `ES_PASSWORD`, and
-   `GRAFANA_ADMIN_PASSWORD` through your secret manager.
-5. Run `make verify` and `make audit` in CI before deploys.
-6. Build images in CI from a clean checkout and scan them with your container
+1. Terminate TLS at a trusted ingress or service mesh (not self-signed dev certs).
+   Replace `scripts/certs/` with certificates from your PKI (cert-manager, Let's
+   Encrypt, or cloud ACM). The nginx config lives at `config/nginx/nginx.conf`.
+2. Restrict collector access to trusted log forwarder CIDRs (`SYSLOG_ALLOWED_CIDRS`).
+3. Keep Elasticsearch, Prometheus, Grafana, Kafka, and Kibana behind private
+   network boundaries — the Compose stack binds them to `127.0.0.1` by default.
+4. Rotate `LOGFILTER_API_TOKEN`, `LOGFILTER_ADMIN_TOKEN`,
+   `LOGFILTER_METRICS_TOKEN`, `ES_PASSWORD`, and `GRAFANA_ADMIN_PASSWORD`
+   through your secret manager (Vault, AWS SM, GCP SM). Never store secrets in
+   `.env` on disk in production.
+5. Set `CORS_ALLOW_ORIGINS` to your actual frontend origin(s). The API refuses
+   to start with localhost CORS origins in production mode (when
+   `LOGFILTER_ENABLE_DOCS` is off). Leave empty for headless deployments.
+6. Configure Prometheus to authenticate against `/metrics` using the bearer
+   token file. The Compose stack writes `LOGFILTER_METRICS_TOKEN` to
+   `/etc/prometheus/secrets/metrics-bearer-token` at Prometheus startup; the
+   scrape config references `bearer_token_file`. If you manage Prometheus
+   separately, add `bearer_token_file` or `authorization` to your scrape config.
+7. Enable Kafka SASL_SSL for broker-side TLS and authentication before
+   crossing trust boundaries. The Compose stack uses PLAINTEXT inside the
+   private network — acceptable for local development but not for production.
+8. Run `make verify` and `make audit` in CI before deploys.
+9. Build images in CI from a clean checkout and scan them with your container
    scanner.
-7. Treat model artifacts as deployable code; only promote artifacts from trusted
-   training jobs.
+10. Treat model artifacts as deployable code; only promote artifacts from trusted
+    training jobs. Verify `model_manifest.json` SHA-256 hashes on every deploy.
+11. For high availability, layer `docker-compose.prod.yml` over the base stack
+    (`docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`)
+    to expand Kafka to 3 brokers, ES to 3 data nodes, and raise replication
+    factors. See README for details.
 
 ## Reporting
 
@@ -82,6 +104,10 @@ CVE-2025-69872, remove the `--ignore-vuln CVE-2025-69872` flag from
 test in `tests/test_sigma_cache_path_unused.py` should remain as a guard
 against accidental introduction of the vulnerable code path.
 
+**Re-review deadline**: 2026-10-06. If no upstream fix is available by this
+date, reassess the exception — consider forking diskcache to remove pickle
+or switching to a Sigma engine without the transitive dependency.
+
 **Alternatives considered**:
 
 - Pin `pysigma` to a version that does not require `diskcache`. Rejected:
@@ -116,6 +142,10 @@ CVE-2025-3000. The audit output lists no fixed version for the package.
 **Re-review trigger**: When PyTorch publishes a compatible fixed wheel, update
 the Torch constraint in `requirements.txt` and `pyproject.toml`, then remove
 the `--ignore-vuln CVE-2025-3000` flag from `make audit` and CI.
+
+**Re-review deadline**: 2026-10-06. If no fixed wheel is available by this
+date, reassess the exception — consider switching to a CPU-only ONNX
+deployment that removes the torch dependency entirely.
 
 ## Incident Response Runbook
 
