@@ -159,6 +159,10 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
       ES_HOST: http://elasticsearch:9200
 
+  collector:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
+
   archive:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092

@@ -63,6 +63,7 @@ Core stack: Python 3.10+, FastAPI, Kafka, Elasticsearch, XGBoost, Transformers (
 - **Logging**: `structlog` in runtime, standard `logging` in training
 - **Paths**: `Path(__file__)` chains to project root; never hardcode absolute paths
 - **Config**: YAML with `${ENV_VAR:default}` placeholder resolution via `config.py`
+- **Security env vars**: Use `${VAR:?error message}` for required tokens in config.yaml, not `${VAR:}` (empty default), to prevent fail-open auth paths
 - **Models**: ONNX Runtime for inference; native format kept for retraining
 - **Security**: API tokens via `X-API-Token` / `X-Admin-Token` headers; no default secrets
 
@@ -102,3 +103,14 @@ make down             # Stop Docker stack
 - Kaggle dataset: `jacobvalor/hdfs-tracebench-preprocessed-logs` (public)
 - Docker stack binds Kafka and API to localhost by default
 - OpenAPI docs disabled unless `LOGFILTER_ENABLE_DOCS=1`
+
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them, including dynamic-dispatch hops grep can't follow. Name a file or symbol in the query to read its current line-numbered source. If it's listed but deferred, load it by name via tool search.
+- **Shell** (always works): `codegraph explore "<symbol names or question>"` prints the same output.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
+<!-- CODEGRAPH_END -->

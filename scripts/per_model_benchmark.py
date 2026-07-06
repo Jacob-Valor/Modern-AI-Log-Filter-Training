@@ -51,7 +51,7 @@ SYSLOG_EVENTS = [
 ]
 
 N_FEATURES_CLASSIFIER = 2255
-N_FEATURES_SYSLOG = 100
+N_FEATURES_SYSLOG = 110  # actual feature count — read from model at runtime
 
 # MITRE technique candidates for CrossEncoder benchmark
 CANDIDATES = [
@@ -132,11 +132,12 @@ def bench_log_classifier(
 def bench_syslog_classifier(
     events: int, warmup: int, batch_size: int
 ) -> list[str]:
-    print(f"\n  Loading SyslogClassifier (ONNX XGBoost, {N_FEATURES_SYSLOG} features)...")
     model = SyslogClassifier()
     _ = model.is_ready()
+    n_features = len(model.feature_names) or N_FEATURES_SYSLOG
+    print(f"\n  Loading SyslogClassifier (ONNX XGBoost, {n_features} features)...")
 
-    batch = generate_classifier_features(batch_size, N_FEATURES_SYSLOG)
+    batch = generate_classifier_features(batch_size, n_features)
     latencies: list[float] = []
 
     for i in range(events + warmup):
@@ -261,7 +262,7 @@ def bench_full_pipeline(
 
 BENCHMARKS = [
     ("Tier-1: LogClassifier (2255 features)", bench_log_classifier),
-    ("Tier-1: SyslogClassifier (100 features)", bench_syslog_classifier),
+    ("Tier-1: SyslogClassifier (110 features)", bench_syslog_classifier),
     ("Tier-2: Tier2Classifier (SecureBERT2.0 ONNX)", bench_tier2_classifier),
     ("Tier-3: NERModel (SecureBERT2.0-NER)", bench_ner),
     ("Tier-2: BiEncoderModel + FAISS", bench_biencoder),

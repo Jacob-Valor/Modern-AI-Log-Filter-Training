@@ -18,6 +18,7 @@ artifacts/
 HDFS_v3_TraceBench/preprocessed/*.csv
 HDFS_v3_TraceBench/preprocessed/*.json
 HDFS_v3_TraceBench/tracebench/
+models/
 
 # IDE
 .vscode
