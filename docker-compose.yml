@@ -187,9 +187,11 @@ services:
       - "127.0.0.1:5601:5601"
     environment:
       ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
-      ELASTICSEARCH_USERNAME: elastic
-      ELASTICSEARCH_PASSWORD: ${ES_PASSWORD:?ES_PASSWORD must be set in .env}
+      ELASTICSEARCH_SERVICEACCOUNTTOKEN: "${KIBANA_SERVICE_TOKEN:?KIBANA_SERVICE_TOKEN must be set in .env}"
+      SERVER_BASEPATH: /kibana
+      SERVER_REWRITEBASEPATH: "true"
     networks:
+      - frontend
       - backend
     profiles: ["dev"]   # only started with: docker compose --profile dev up
     restart: unless-stopped
@@ -346,6 +348,7 @@ services:
     ports:
       - "127.0.0.1:16686:16686"   # Jaeger UI
     networks:
+      - frontend
       - observability
     restart: unless-stopped
 
@@ -385,6 +388,7 @@ services:
           --config.file=/tmp/alertmanager.yml \
           --storage.path=/alertmanager
     networks:
+      - frontend
       - observability
     restart: unless-stopped
 
@@ -453,6 +457,8 @@ services:
           --storage.tsdb.path=/prometheus \
           --storage.tsdb.retention.time=30d \
           --web.enable-lifecycle \
+          --web.external-url=https://localhost/prometheus/ \
+          --web.route-prefix=/ \
           --rules.alert.resend-delay=1m
     networks:
       - observability
@@ -490,11 +496,14 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}"
       GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "https://localhost/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
     networks:
+      - frontend
       - observability
     restart: unless-stopped
 
