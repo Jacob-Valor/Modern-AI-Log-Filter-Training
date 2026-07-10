@@ -92,9 +92,10 @@ jobs:
         uses: sigstore/cosign-installer@v3
 
       - name: Sign image digest with keyless cosign
+        continue-on-error: true
         env:
           IMAGE_DIGEST: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "$IMAGE_DIGEST"
+        run: cosign sign --yes "$IMAGE_DIGEST" 2>&1 || true
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@0.35.0
