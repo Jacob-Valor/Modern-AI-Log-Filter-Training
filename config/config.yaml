@@ -30,7 +30,7 @@ elasticsearch:
   index_prefix: "raw-logs"
   username: "${ES_USER:elastic}"
   # No default. ES_PASSWORD must be set in the environment.
-  password: "${ES_PASSWORD:}"
+  password: "${ES_PASSWORD:?ES_PASSWORD must be set in .env}"
   index_shards: 1
   index_replicas: 0
   redaction:
