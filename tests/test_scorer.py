@@ -6,25 +6,34 @@ import logging
 from typing import Any
 
 import numpy as np
-import pytest
+import pytest  # type: ignore[import-not-found]
+import yaml
 
 from logfilter.models.biencoder import ATTACKCandidate, BiEncoderModel, DedupResult
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel, CrossEncoderScore
+from logfilter.models.flow_classifier import FlowClassifier
 from logfilter.models.ner import ExtractedEntities, NERModel
 from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.monitoring.novelty_detector import NoveltyDetector, NoveltyResult
+from logfilter.pipeline import scorer as scorer_module
+from logfilter.pipeline.events import ScoredEvent
 from logfilter.pipeline.normalizer import LogNormalizer
 from logfilter.pipeline.scorer import LogScorer
 
 
 class FakeClassifier(LogClassifier):
-    feature_names = ["failed password from", "namenode block received"]
-    expected_feature_count = 2
-
     def __init__(self) -> None:
         self.last_vectors: np.ndarray | None = None
+
+    @property
+    def feature_names(self) -> list[str]:
+        return ["failed password from", "namenode block received"]
+
+    @property
+    def expected_feature_count(self) -> int:
+        return 2
 
     def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
         self.last_vectors = feature_vectors
@@ -172,6 +181,22 @@ def test_classifier_score_is_applied_to_composite_score() -> None:
     assert syslog_classifier.last_vectors[0, 0] > 0
 
 
+def test_strict_mode_requires_model_manifest(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LOGFILTER_MODELS_STRICT", "true")
+    monkeypatch.setattr(scorer_module, "ROOT", tmp_path)
+
+    with pytest.raises(RuntimeError, match="Model manifest not found"):
+        LogScorer(
+            config={"scoring": {"weights": {"classifier": 1.0}}},
+            classifier=FakeClassifier(),
+            tier2_classifier=FakeTier2Classifier(),
+            ner_model=FakeNER(),
+            biencoder=FakeBiEncoder(),
+            cross_encoder=FakeCrossEncoder(),
+            syslog_classifier=FakeSyslogClassifier(),
+        )
+
+
 def test_preload_models_strict_mode_propagates_warmup_failure(monkeypatch) -> None:
     class BrokenClassifier(FakeClassifier):
         def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
@@ -256,11 +281,7 @@ def test_optional_downstream_models_can_be_disabled_for_local_validation() -> No
 
 def test_routing_thresholds_accept_env_substituted_strings() -> None:
     scorer = LogScorer(
-        config={
-            "scoring": {
-                "routing": {"high": "0.90", "medium": "0.60", "low": "0.30"}
-            }
-        },
+        config={"scoring": {"routing": {"high": "0.90", "medium": "0.60", "low": "0.30"}}},
         classifier=FakeClassifier(),
         tier2_classifier=FakeTier2Classifier(),
         ner_model=FakeNER(),
@@ -275,9 +296,7 @@ def test_routing_thresholds_accept_env_substituted_strings() -> None:
 
 def test_scorer_wires_tier2_uncertainty_config() -> None:
     scorer = LogScorer(
-        config={
-            "scoring": {"tier2": {"uncertainty_low": "0.25", "uncertainty_high": "0.75"}}
-        },
+        config={"scoring": {"tier2": {"uncertainty_low": "0.25", "uncertainty_high": "0.75"}}},
         classifier=FakeClassifier(),
         ner_model=FakeNER(),
         biencoder=FakeBiEncoder(),
@@ -298,9 +317,7 @@ def test_scorer_wires_tier2_uncertainty_config() -> None:
         ({"high": "0.50", "medium": "0.50", "low": "0.20"}, "low < medium"),
     ],
 )
-def test_invalid_routing_thresholds_fail_fast(
-    routing: dict[str, str], message: str
-) -> None:
+def test_invalid_routing_thresholds_fail_fast(routing: dict[str, str], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         LogScorer(
             config={"scoring": {"routing": routing}},
@@ -652,9 +669,7 @@ def test_tier3_cross_encoder_failure_uses_neutral_fallback(caplog) -> None:
 
 
 class FakeDuplicateBiEncoder(FakeBiEncoder):
-    def check_dedup_and_retrieve_batch(
-        self, texts: list[str]
-    ) -> list[tuple[Any, list[Any]]]:
+    def check_dedup_and_retrieve_batch(self, texts: list[str]) -> list[tuple[Any, list[Any]]]:
         return [
             (
                 DedupResult(is_duplicate=True, similarity=0.95),
@@ -928,8 +943,9 @@ def test_tier2_exception_keeps_tier1_scores() -> None:
 
 def test_feature_vector_matching_branches() -> None:
     class FeatureClassifier(FakeClassifier):
-        feature_names = ["exact.match", "partial token"]
-        expected_feature_count = 2
+        @property
+        def feature_names(self) -> list[str]:
+            return ["exact.match", "partial token"]
 
     scorer = LogScorer(
         config={
@@ -1066,9 +1082,8 @@ def test_confidence_with_no_signals() -> None:
 
 
 def test_sigma_rule_matches_contains() -> None:
-    from sigma.rule import SigmaRule
-
-    rule = SigmaRule.from_yaml("""
+    rule = scorer_module._parse_sigma_document(
+        yaml.safe_load("""
 title: SSH Brute Force
 id: 12345678-1234-1234-1234-123456789abc
 logsource:
@@ -1081,6 +1096,8 @@ detection:
     condition: sel
 level: high
 """)
+    )
+    assert rule is not None
     scorer = LogScorer(
         config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
         classifier=FakeClassifier(),
@@ -1091,9 +1108,8 @@ level: high
 
 
 def test_sigma_rule_matches_startswith() -> None:
-    from sigma.rule import SigmaRule
-
-    rule = SigmaRule.from_yaml("""
+    rule = scorer_module._parse_sigma_document(
+        yaml.safe_load("""
 title: SSH Start
 logsource:
     category: process_creation
@@ -1104,6 +1120,8 @@ detection:
     condition: sel
 level: low
 """)
+    )
+    assert rule is not None
     scorer = LogScorer(
         config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
         classifier=FakeClassifier(),
@@ -1114,9 +1132,8 @@ level: low
 
 
 def test_sigma_rule_matches_endswith() -> None:
-    from sigma.rule import SigmaRule
-
-    rule = SigmaRule.from_yaml("""
+    rule = scorer_module._parse_sigma_document(
+        yaml.safe_load("""
 title: SSH End
 logsource:
     category: process_creation
@@ -1127,6 +1144,8 @@ detection:
     condition: sel
 level: low
 """)
+    )
+    assert rule is not None
     scorer = LogScorer(
         config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
         classifier=FakeClassifier(),
@@ -1137,9 +1156,8 @@ level: low
 
 
 def test_sigma_rule_matches_exact() -> None:
-    from sigma.rule import SigmaRule
-
-    rule = SigmaRule.from_yaml("""
+    rule = scorer_module._parse_sigma_document(
+        yaml.safe_load("""
 title: Exact Match
 logsource:
     category: process_creation
@@ -1150,6 +1168,8 @@ detection:
     condition: sel
 level: low
 """)
+    )
+    assert rule is not None
     scorer = LogScorer(
         config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
         classifier=FakeClassifier(),
@@ -1160,9 +1180,8 @@ level: low
 
 
 def test_sigma_rule_skips_unmappable_field() -> None:
-    from sigma.rule import SigmaRule
-
-    rule = SigmaRule.from_yaml("""
+    rule = scorer_module._parse_sigma_document(
+        yaml.safe_load("""
 title: Windows Image
 logsource:
     category: process_creation
@@ -1173,21 +1192,89 @@ detection:
     condition: sel
 level: low
 """)
+    )
+    assert rule is None
+
+
+def test_sigma_rule_no_detection_returns_none() -> None:
+    assert scorer_module._parse_sigma_document({"title": "no detection"}) is None
+
+
+def test_http_source_profile_uses_lexical_score_and_own_routing() -> None:
     scorer = LogScorer(
-        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.1,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.9, "medium": 0.8, "low": 0.7},
+                "source_profiles": {
+                    "firewall_http": {
+                        "weights": {"classifier": 1.0},
+                        "routing": {"high": 0.8, "medium": 0.5, "low": 0.2},
+                    }
+                },
+            }
+        },
         classifier=FakeClassifier(),
         tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+        syslog_classifier=FakeSyslogClassifier(),
     )
-    assert not scorer._sigma_rule_matches(rule, "cmd.exe running")
+    event = LogNormalizer().normalize(
+        '{"event_type":"waf","request":{"method":"POST","uri":"/login",'
+        '"headers":{"Content-Type":"text/plain"},"body":"id=1 OR 1=1--"}}'
+    )
+
+    scored = scorer.score(event)
+
+    assert scored.http_score >= 0.7
+    assert scored.ai_threat_score == pytest.approx(scored.http_score)
+    assert scored.ai_priority in {"MEDIUM", "HIGH"}
 
 
-def test_sigma_rule_no_detection_returns_false() -> None:
+def test_calibrated_flow_isolation_excludes_sigma_and_other_components() -> None:
     scorer = LogScorer(
-        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
-        classifier=FakeClassifier(),
+        config={
+            "scoring": {
+                "calibrated_flow_isolation": True,
+                "weights": {
+                    "classifier": 0.1,
+                    "entity_boost": 1.0,
+                    "cross_encoder": 1.0,
+                    "novelty": 1.0,
+                },
+                "routing": {"high": 0.8, "medium": 0.5, "low": 0.2},
+            }
+        },
+        flow_classifier=FlowClassifier(),
+        bot_flow_classifier=object(),
         tier2_classifier=FakeTier2Classifier(),
     )
-    class FakeRule:
-        detection = None
+    event = ScoredEvent(
+        source_type="firewall",
+        timestamp="",
+        host="flow",
+        raw="attack tool marker",
+        normalized_text="flow",
+        fields={"dpt": 443},
+        classifier_score=0.6,
+        sigma_matched=True,
+        entity_boost=1.0,
+        cross_encoder_max=1.0,
+        novelty_score=1.0,
+        dedup_penalty=0.3,
+    )
+    event.ai_threat_score = scorer._compute_score(event)
+    assert event.ai_threat_score == pytest.approx(0.6)
+    assert scorer._routing_label(event) == "MEDIUM"
 
-    assert not scorer._sigma_rule_matches(FakeRule(), "any text")
+
+def test_unknown_source_profile_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Invalid scoring source profile"):
+        LogScorer(config={"scoring": {"source_profiles": {"unknown": {}}}})

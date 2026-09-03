@@ -23,30 +23,120 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import structlog
+import structlog  # type: ignore[import-not-found]
+import yaml
 
 from logfilter import telemetry
 from logfilter.models.biencoder import BiEncoderModel
 from logfilter.models.classifier import LogClassifier
 from logfilter.models.cross_encoder import CrossEncoderModel
+from logfilter.models.endpoint_novelty import EndpointNoveltyModel
+from logfilter.models.flow_classifier import FlowClassifier
 from logfilter.models.ner import NERModel
 from logfilter.models.syslog_classifier import SyslogClassifier
 from logfilter.models.tier2_classifier import Tier2Classifier
 from logfilter.monitoring.drift_detector import DriftDetector
 from logfilter.monitoring.novelty_detector import NoveltyDetector
+from logfilter.pipeline.endpoint_features import extract_endpoint_vector
 from logfilter.pipeline.events import ScoredEvent
+from logfilter.pipeline.flow_features import FlowWindowAggregator, extract_flow_vector
 from logfilter.pipeline.normalizer import NormalizedEvent
 
 logger = structlog.get_logger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent.parent
+_SIGMA_TEXT_FIELDS = frozenset(
+    {
+        "CommandLine",
+        "ServiceName",
+        "TargetObject",
+        "Details",
+        "QueryName",
+        "QueryResults",
+        "Path",
+        "LogonType",
+        "TargetUserName",
+        "SubjectUserName",
+        "ObjectName",
+        "ProcessName",
+        "ParentCommandLine",
+        "TargetFilename",
+    }
+)
+_SIGMA_TEXT_MODIFIERS = frozenset({"contains", "endswith", "startswith", "exact"})
+
+
+@dataclass(frozen=True, slots=True)
+class _SigmaTextPattern:
+    field: str
+    modifier: str
+    values: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SigmaTextRule:
+    rule_id: str
+    patterns: tuple[_SigmaTextPattern, ...]
+
+
+def _parse_sigma_document(document: Any) -> _SigmaTextRule | None:
+    """Parse the safe text-matching subset used by the in-process scorer."""
+    if not isinstance(document, dict):
+        return None
+    detection = document.get("detection")
+    if not isinstance(detection, dict):
+        return None
+    condition = detection.get("condition")
+    if not isinstance(condition, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", condition):
+        return None
+    selection = detection.get(condition)
+    if not isinstance(selection, dict):
+        return None
+
+    patterns: list[_SigmaTextPattern] = []
+    for field_expression, raw_values in selection.items():
+        if not isinstance(field_expression, str):
+            continue
+        field, separator, modifier = field_expression.partition("|")
+        modifier = modifier if separator else "exact"
+        if field not in _SIGMA_TEXT_FIELDS or modifier not in _SIGMA_TEXT_MODIFIERS:
+            continue
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        clean_values = tuple(value for value in values if isinstance(value, str) and value)
+        if clean_values:
+            patterns.append(_SigmaTextPattern(field, modifier, clean_values))
+
+    if not patterns:
+        return None
+    rule_id = str(document.get("id") or document.get("title") or "unnamed")
+    return _SigmaTextRule(rule_id, tuple(patterns))
+
+
+def _load_sigma_text_rules(rules_dir: Path) -> list[_SigmaTextRule]:
+    rules: list[_SigmaTextRule] = []
+    for rule_path in sorted(rules_dir.glob("*.yml")):
+        try:
+            with rule_path.open(encoding="utf-8") as handle:
+                for document in yaml.safe_load_all(handle):
+                    rule = _parse_sigma_document(document)
+                    if rule is not None:
+                        rules.append(rule)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning("Sigma rule file skipped", path=str(rule_path), error=str(exc))
+    return rules
+
+
+_bot_classifier_module: Any = importlib.import_module("logfilter.models.bot_flow_classifier")
+_flow_fusion_module: Any = importlib.import_module("logfilter.models.flow_fusion")
 
 
 def _resolve_path(value: str | Path) -> Path:
@@ -70,6 +160,24 @@ def _strict_model_loading() -> bool:
     return _enabled(os.environ.get("LOGFILTER_MODELS_STRICT"), default=False)
 
 
+def _float_value(value: Any, name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+
+
+def _int_value(value: Any, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _bounded_probability(value: Any) -> float:
+    return max(0.0, min(1.0, _float_value(value, "model probability")))
+
+
 def _probability_config(value: Any, name: str) -> float:
     """Parse and validate a probability threshold from config or env."""
     try:
@@ -78,6 +186,13 @@ def _probability_config(value: Any, name: str) -> float:
         raise ValueError(f"{name} must be a numeric probability") from exc
     if not 0.0 <= parsed <= 1.0:
         raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return parsed
+
+
+def _weight_value(value: Any, name: str) -> float:
+    parsed = _float_value(value, name)
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
     return parsed
 
 
@@ -241,23 +356,79 @@ class LogScorer:
         model_version: str = "",
         drift_detector: DriftDetector | None = None,
         novelty_detector: NoveltyDetector | None = None,
+        flow_classifier: FlowClassifier | None = None,
+        bot_flow_classifier: Any | None = None,
+        flow_aggregator: FlowWindowAggregator | None = None,
+        endpoint_novelty_model: EndpointNoveltyModel | None = None,
     ) -> None:
         self._cfg = config
         self._model_version = model_version
         scoring = config.get("scoring", {})
+        self.calibrated_flow_isolation = _enabled(
+            scoring.get("calibrated_flow_isolation", False), default=False
+        )
         weights = scoring.get("weights", {})
 
-        self.w_cls = float(weights.get("classifier", 0.35))
-        self.w_ent = float(weights.get("entity_boost", 0.25))
-        self.w_ce = float(weights.get("cross_encoder", 0.40))
-        self.w_nov = float(weights.get("novelty", 0.0))
-        self.entity_boost_value = float(scoring.get("entity_boost_value", 0.20))
-        self.dedup_penalty_value = float(scoring.get("dedup_penalty", 0.30))
+        self.w_cls = _weight_value(weights.get("classifier", 0.35), "classifier weight")
+        self.w_ent = _weight_value(weights.get("entity_boost", 0.25), "entity weight")
+        self.w_ce = _weight_value(weights.get("cross_encoder", 0.40), "cross-encoder weight")
+        self.w_nov = _weight_value(weights.get("novelty", 0.0), "novelty weight")
+        self.entity_boost_value = _float_value(
+            scoring.get("entity_boost_value", 0.20), "entity boost"
+        )
+        self.dedup_penalty_value = _float_value(
+            scoring.get("dedup_penalty", 0.30), "deduplication penalty"
+        )
 
         routing = scoring.get("routing", {})
         self.threshold_low, self.threshold_medium, self.threshold_high = _routing_thresholds(
             routing
         )
+        self._default_profile = (
+            self.w_cls,
+            self.w_ent,
+            self.w_ce,
+            self.w_nov,
+            self.threshold_low,
+            self.threshold_medium,
+            self.threshold_high,
+        )
+        self._source_profiles: dict[str, tuple[float, ...]] = {}
+        allowed_profiles = {
+            "syslog",
+            "winevent",
+            "firewall",
+            "firewall_http",
+            "firewall_flow",
+            "endpoint",
+            "cloudtrail",
+            "web",
+            "generic",
+        }
+        for profile_name, profile_value in scoring.get("source_profiles", {}).items():
+            if profile_name not in allowed_profiles or not isinstance(profile_value, dict):
+                raise ValueError(f"Invalid scoring source profile: {profile_name}")
+            profile_weights = profile_value.get("weights", {})
+            profile_routing = {**routing, **profile_value.get("routing", {})}
+            self._source_profiles[profile_name] = (
+                _weight_value(
+                    profile_weights.get("classifier", self.w_cls),
+                    f"{profile_name} classifier weight",
+                ),
+                _weight_value(
+                    profile_weights.get("entity_boost", self.w_ent),
+                    f"{profile_name} entity weight",
+                ),
+                _weight_value(
+                    profile_weights.get("cross_encoder", self.w_ce),
+                    f"{profile_name} cross-encoder weight",
+                ),
+                _weight_value(
+                    profile_weights.get("novelty", self.w_nov),
+                    f"{profile_name} novelty weight",
+                ),
+                *_routing_thresholds(profile_routing),
+            )
 
         models_cfg = config.get("models", {})
         classifier_path = _resolve_path(
@@ -299,8 +470,10 @@ class LogScorer:
             NERModel(
                 model_id=ner_cfg.get("model_id", NERModel.MODEL_ID),
                 device=ner_cfg.get("device", "cpu"),
-                batch_size=int(ner_cfg.get("batch_size", 32)),
-                min_confidence=float(ner_cfg.get("min_confidence", 0.80)),
+                batch_size=_int_value(ner_cfg.get("batch_size", 32), "NER batch size"),
+                min_confidence=_float_value(
+                    ner_cfg.get("min_confidence", 0.80), "NER minimum confidence"
+                ),
                 cache_dir=ner_cache if ner_cache else None,
                 revision=ner_revision if ner_revision else None,
             )
@@ -313,10 +486,14 @@ class LogScorer:
             BiEncoderModel(
                 model_id=biencoder_cfg.get("model_id", BiEncoderModel.MODEL_ID),
                 device=biencoder_cfg.get("device", "cpu"),
-                batch_size=int(biencoder_cfg.get("batch_size", 64)),
-                dedup_threshold=float(biencoder_cfg.get("dedup_threshold", 0.95)),
-                dedup_window_minutes=float(biencoder_cfg.get("dedup_window_minutes", 5.0)),
-                faiss_top_k=int(biencoder_cfg.get("faiss_top_k", 3)),
+                batch_size=_int_value(biencoder_cfg.get("batch_size", 64), "BiEncoder batch size"),
+                dedup_threshold=_float_value(
+                    biencoder_cfg.get("dedup_threshold", 0.95), "deduplication threshold"
+                ),
+                dedup_window_minutes=_float_value(
+                    biencoder_cfg.get("dedup_window_minutes", 5.0), "deduplication window"
+                ),
+                faiss_top_k=_int_value(biencoder_cfg.get("faiss_top_k", 3), "FAISS top-k"),
                 mitre_techniques_path=_resolve_path(
                     models_cfg.get("mitre_techniques_path", "config/mitre_techniques.json")
                 ),
@@ -332,7 +509,9 @@ class LogScorer:
             CrossEncoderModel(
                 model_id=cross_encoder_cfg.get("model_id", CrossEncoderModel.MODEL_ID),
                 device=cross_encoder_cfg.get("device", "cpu"),
-                batch_size=int(cross_encoder_cfg.get("batch_size", 16)),
+                batch_size=_int_value(
+                    cross_encoder_cfg.get("batch_size", 16), "CrossEncoder batch size"
+                ),
                 cache_dir=ce_cache if ce_cache else None,
                 revision=ce_revision if ce_revision else None,
             )
@@ -345,9 +524,11 @@ class LogScorer:
             self.drift_detector = drift_detector
         elif _enabled(drift_cfg.get("enabled", False)):
             self.drift_detector = DriftDetector(
-                window_size=int(drift_cfg.get("window_size", 1000)),
-                psi_threshold=float(drift_cfg.get("psi_threshold", 0.25)),
-                check_interval=int(drift_cfg.get("check_interval", 100)),
+                window_size=_int_value(drift_cfg.get("window_size", 1000), "drift window"),
+                psi_threshold=_float_value(drift_cfg.get("psi_threshold", 0.25), "PSI threshold"),
+                check_interval=_int_value(
+                    drift_cfg.get("check_interval", 100), "drift check interval"
+                ),
                 auto_fallback=_enabled(drift_cfg.get("auto_fallback", True)),
             )
         else:
@@ -359,10 +540,12 @@ class LogScorer:
             self.novelty_detector = novelty_detector
         elif _enabled(novelty_cfg.get("enabled", False)):
             self.novelty_detector = NoveltyDetector(
-                window_size=int(novelty_cfg.get("window_size", 10000)),
-                min_baseline=int(novelty_cfg.get("min_baseline", 100)),
-                warmup_events=int(novelty_cfg.get("warmup_events", 500)),
-                distance_scale=float(novelty_cfg.get("distance_scale", 2.0)),
+                window_size=_int_value(novelty_cfg.get("window_size", 10000), "novelty window"),
+                min_baseline=_int_value(novelty_cfg.get("min_baseline", 100), "novelty baseline"),
+                warmup_events=_int_value(novelty_cfg.get("warmup_events", 500), "novelty warmup"),
+                distance_scale=_float_value(
+                    novelty_cfg.get("distance_scale", 2.0), "novelty distance scale"
+                ),
             )
         else:
             self.novelty_detector = None
@@ -374,6 +557,86 @@ class LogScorer:
 
         self.syslog_classifier = syslog_classifier or SyslogClassifier()
 
+        flow_cfg = models_cfg.get("flow", {})
+        self.flow_enabled = flow_classifier is not None or _enabled(
+            flow_cfg.get("enabled", False), default=False
+        )
+        self.flow_classifier = flow_classifier or FlowClassifier(
+            model_path=_resolve_path(flow_cfg.get("path", "models/flow/flow_classifier.onnx")),
+            scaler_path=_resolve_path(flow_cfg.get("scaler_path", "models/flow/scaler.json")),
+            feature_names_path=_resolve_path(
+                flow_cfg.get("feature_names_path", "models/flow/feature_names.json")
+            ),
+        )
+        bot_cfg = flow_cfg.get("bot", {})
+        self.bot_flow_enabled = bot_flow_classifier is not None or _enabled(
+            bot_cfg.get("enabled", False), default=False
+        )
+        self.bot_flow_classifier = bot_flow_classifier or _bot_classifier_module.BotFlowClassifier(
+            model_path=_resolve_path(bot_cfg.get("path", "models/flow/bot_classifier.onnx")),
+            scaler_path=_resolve_path(bot_cfg.get("scaler_path", "models/flow/bot_scaler.json")),
+            feature_names_path=_resolve_path(
+                bot_cfg.get("feature_names_path", "models/flow/bot_feature_names.json")
+            ),
+            calibration_path=_resolve_path(
+                bot_cfg.get("calibration_path", "models/flow/bot_calibration.json")
+            ),
+            target_fpr=str(bot_cfg.get("target_fpr", "0.01")),
+            alert_floor=_probability_config(
+                bot_cfg.get("alert_floor", 0.65), "Bot flow alert floor"
+            ),
+        )
+        self.flow_fusion_policy = _flow_fusion_module.FlowFusionPolicy(
+            calibration_path=_resolve_path(
+                flow_cfg.get("fusion_calibration_path", "models/flow/fusion_calibration.json")
+            ),
+            target_fpr=str(flow_cfg.get("fusion_target_fpr", "0.01")),
+        )
+        window_cfg = scoring.get("flow_window", {})
+        self.flow_aggregator = flow_aggregator
+        if self.flow_aggregator is None and _enabled(window_cfg.get("enabled", False), False):
+            self.flow_aggregator = FlowWindowAggregator(
+                window_seconds=_float_value(window_cfg.get("window_seconds", 10.0), "flow window"),
+                max_keys=_int_value(window_cfg.get("max_keys", 10_000), "flow maximum keys"),
+                max_events_per_key=_int_value(
+                    window_cfg.get("max_events_per_key", 5_000), "flow events per key"
+                ),
+                flow_threshold=_float_value(
+                    window_cfg.get("flow_threshold", 200.0), "flow threshold"
+                ),
+                packet_threshold=_float_value(
+                    window_cfg.get("packet_threshold", 20_000.0), "packet threshold"
+                ),
+                byte_threshold=_float_value(
+                    window_cfg.get("byte_threshold", 10_000_000.0), "byte threshold"
+                ),
+                source_threshold=_float_value(
+                    window_cfg.get("source_threshold", 50.0), "source threshold"
+                ),
+            )
+
+        if self.calibrated_flow_isolation:
+            if self.flow_aggregator is not None:
+                raise ValueError("Calibrated flow isolation requires flow_window.enabled=false")
+            if not self.flow_enabled or not self.bot_flow_enabled:
+                raise ValueError("Calibrated flow isolation requires both flow heads")
+
+        endpoint_cfg = models_cfg.get("endpoint_novelty", {})
+        self.endpoint_novelty_enabled = endpoint_novelty_model is not None or _enabled(
+            endpoint_cfg.get("enabled", False), default=False
+        )
+        self.endpoint_novelty_model = endpoint_novelty_model or EndpointNoveltyModel(
+            model_path=_resolve_path(
+                endpoint_cfg.get("path", "models/endpoint/endpoint_novelty.onnx")
+            ),
+            config_path=_resolve_path(
+                endpoint_cfg.get("config_path", "models/endpoint/novelty_config.json")
+            ),
+            score_scale=_float_value(
+                endpoint_cfg.get("score_scale", 0.03), "endpoint novelty score scale"
+            ),
+        )
+
         self._feature_cache_names: tuple[str, ...] = ()
         self._feature_cache_tokens: list[tuple[str, tuple[str, ...]]] = []
         self._syslog_feature_cache_names: tuple[str, ...] = ()
@@ -383,10 +646,14 @@ class LogScorer:
 
     def _validate_manifest(self) -> None:
         manifest_path = ROOT / "models" / "model_manifest.json"
+        strict = _strict_model_loading()
         if not manifest_path.exists():
+            if strict:
+                raise RuntimeError(f"Model manifest not found: {manifest_path}")
+            logger.warning("Model manifest not found; integrity validation skipped")
             return
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             errors: list[str] = []
             for key, expected in manifest.get("models", {}).items():
                 if expected.get("status") == "missing":
@@ -411,17 +678,25 @@ class LogScorer:
                             f"(expected {meta['sha256']}, got {actual_hash})"
                         )
             if errors:
-                for err in errors:
-                    logger.warning("Model manifest mismatch", error=err)
+                message = "Model manifest validation failed: " + "; ".join(errors)
+                if strict:
+                    raise RuntimeError(message)
+                for error in errors:
+                    logger.warning("Model manifest mismatch", error=error)
             else:
                 logger.info("Model manifest validated")
+        except RuntimeError:
+            raise
         except Exception as exc:
+            if strict:
+                raise RuntimeError("Model manifest validation failed") from exc
             logger.warning("Manifest validation skipped", error=str(exc))
 
     # ── public API ─────────────────────────────────────────────────────────────
 
     def preload_models(self) -> None:
         """Eagerly load all models to eliminate cold-start latency."""
+
         def _warmup(model_name: str, warmup_fn: Any) -> None:
             started = time.perf_counter()
             try:
@@ -451,6 +726,34 @@ class LogScorer:
                 np.zeros((1, classifier_features), dtype=np.float32)
             ),
         )
+        if self.endpoint_novelty_enabled:
+            logger.info("Pre-loading endpoint novelty model")
+            endpoint_ready = self.endpoint_novelty_model.is_ready()
+            if not endpoint_ready and _strict_model_loading():
+                raise RuntimeError("endpoint novelty model failed readiness validation")
+        if self.flow_enabled:
+            logger.info("Pre-loading flow classifier")
+            flow_ready = self.flow_classifier.is_loaded()
+            if not flow_ready and _strict_model_loading():
+                raise RuntimeError("flow classifier failed readiness validation")
+            flow_features = self.flow_classifier.expected_feature_count or 1
+            _warmup(
+                "flow_classifier",
+                lambda: self.flow_classifier.predict_proba(
+                    np.ones((1, flow_features), dtype=np.float32)
+                ),
+            )
+        if self.bot_flow_enabled:
+            logger.info("Pre-loading Bot flow classifier")
+            _ = self.bot_flow_classifier.is_loaded()
+            bot_features = self.bot_flow_classifier.expected_feature_count or 1
+            _warmup(
+                "bot_flow_classifier",
+                lambda: self.bot_flow_classifier.predict_proba(
+                    np.ones((1, bot_features), dtype=np.float32)
+                ),
+            )
+            _ = self.flow_fusion_policy.composite_threshold
         logger.info("Pre-loading syslog classifier")
         _ = self.syslog_classifier.is_ready()
         syslog_features = len(self.syslog_classifier.feature_names) or 1
@@ -596,9 +899,9 @@ class LogScorer:
                         logger.warning("Novelty detection failed", error=str(exc))
 
             # ── Tier 3: NER + CrossEncoder (skip duplicates) ───────────────────
-            non_dup_indices = [] if tier3_failed else [
-                i for i, se in enumerate(scored) if not se.is_duplicate
-            ]
+            non_dup_indices = (
+                [] if tier3_failed else [i for i, se in enumerate(scored) if not se.is_duplicate]
+            )
             if non_dup_indices and not tier3_failed:
                 nd_texts = [texts[i] for i in non_dup_indices]
                 nd_scored = [scored[i] for i in non_dup_indices]
@@ -688,7 +991,7 @@ class LogScorer:
             medium_count = 0
             sigma_count = 0
             for se, ev in zip(scored, events):
-                if _ATTACK_TOOL_RE.search(ev.raw):
+                if not self._is_isolated_flow(se) and _ATTACK_TOOL_RE.search(ev.raw):
                     se.classifier_score = max(se.classifier_score, _ATTACK_TOOL_FLOOR)
                     se.dedup_penalty = 0.0
                 se.ai_threat_score = self._compute_score(se)
@@ -736,117 +1039,56 @@ class LogScorer:
         """
         Lightweight Sigma rule matching for syslog events.
 
-        Sigma rules are loaded with pySigma and evaluated against the raw
-        normalized log text.  This is a simplified, text-only matcher: it
-        honours ``contains`` modifiers by doing substring searches in the
-        log text, but it does not perform structured field extraction (e.g.
-        ``Image``, ``ParentImage``) because syslog events lack those fields.
-        Rules that reference un-mappable fields are skipped with a debug log.
+        Rules are parsed with ``yaml.safe_load_all`` and only the local
+        text-matching subset is accepted: one named selection containing
+        mappable fields with exact, contains, startswith, or endswith values.
+        Complex conditions and structured-only fields are skipped.
 
         For full fidelity Sigma evaluation, pipe the enriched event to a
         dedicated Sigma backend (Splunk, Elastic, or a field-extracted
         normaliser) rather than relying on this in-process matcher.
         """
+        sigma_cfg = self._cfg.get("scoring", {}).get("sigma", {})
+        if not _enabled(sigma_cfg.get("enabled", False), default=False):
+            return
         with telemetry.start_as_current_span(
             "scorer.sigma.apply",
             {"logfilter.batch_size": len(events)},
         ) as span:
-            try:
-                sigma_collection = importlib.import_module("sigma.collection")
-                sigma_collection_cls = sigma_collection.SigmaCollection
-            except ImportError:
-                span.set_attribute("logfilter.sigma.available", False)
-                return
-
-            sigma_rules_dir = Path("config/sigma_rules")
-            if not sigma_rules_dir.exists() or not list(sigma_rules_dir.glob("*.yml")):
+            sigma_rules_dir = ROOT / "config" / "sigma_rules"
+            if not sigma_rules_dir.exists():
                 span.set_attribute("logfilter.sigma.rule_count", 0)
                 return
 
-            try:
-                rules = sigma_collection_cls.load_ruleset([str(sigma_rules_dir)])
-                match_count = 0
-                for se, ev in zip(scored, events):
-                    for rule in rules:
-                        if self._sigma_rule_matches(rule, ev.text):
-                            se.sigma_matched = True
-                            se.sigma_rule_ids.append(str(rule.id or rule.title))
-                            match_count += 1
-                span.set_attribute("logfilter.sigma.match_count", match_count)
-            except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                telemetry.record_exception(span, exc)
-                logger.warning("Sigma evaluation failed", error=str(exc))
+            rules = _load_sigma_text_rules(sigma_rules_dir)
+            span.set_attribute("logfilter.sigma.rule_count", len(rules))
+            match_count = 0
+            for se, ev in zip(scored, events):
+                for rule in rules:
+                    if self._sigma_rule_matches(rule, ev.text):
+                        se.sigma_matched = True
+                        se.sigma_rule_ids.append(rule.rule_id)
+                        match_count += 1
+            span.set_attribute("logfilter.sigma.match_count", match_count)
 
-    def _sigma_rule_matches(self, rule: Any, event_text: str) -> bool:
-        """
-        Evaluate a single SigmaRule against a raw log text.
-
-        Returns ``True`` if any mappable ``contains`` detection item
-        matches the event text.
-        """
-        detection = getattr(rule, "detection", None)
-        if detection is None:
-            return False
-
+    def _sigma_rule_matches(self, rule: _SigmaTextRule, event_text: str) -> bool:
+        """Return whether the event matches any accepted text pattern."""
         text_lower = event_text.lower()
-
-        for _name, det in detection.detections.items():
-            for item in det.detection_items:
-                field = getattr(item, "field", None)
-                if field is None:
+        for pattern in rule.patterns:
+            for value in pattern.values:
+                search_text = value.strip().lower()
+                if not search_text:
                     continue
-
-                # Syslog text fields we can reasonably map to raw log text
-                mappable_fields = {
-                    "CommandLine",
-                    "ServiceName",
-                    "TargetObject",
-                    "Details",
-                    "QueryName",
-                    "QueryResults",
-                    "Path",
-                    "LogonType",
-                    "TargetUserName",
-                    "SubjectUserName",
-                    "ObjectName",
-                    "ProcessName",
-                    "ParentCommandLine",
-                    "TargetFilename",
-                }
-                if field not in mappable_fields:
-                    continue
-
-                modifiers = getattr(item, "modifiers", [])
-                modifier_names = {
-                    m.__name__ if hasattr(m, "__name__") else str(m) for m in modifiers
-                }
-
-                for val in item.value:
-                    # Extract plain string tokens from SigmaString
-                    plain_parts = [
-                        str(part)
-                        for part in val.s
-                        if not hasattr(part, "name")  # skip SpecialChars enum members
-                    ]
-                    search_text = " ".join(plain_parts).strip().lower()
-
-                    if not search_text:
-                        continue
-
-                    if "SigmaContainsModifier" in modifier_names:
-                        if search_text in text_lower:
+                if pattern.modifier == "contains" and search_text in text_lower:
+                    return True
+                if pattern.modifier == "endswith" and text_lower.endswith(search_text):
+                    return True
+                if pattern.modifier == "startswith" and text_lower.startswith(search_text):
+                    return True
+                if pattern.modifier == "exact":
+                    for word in text_lower.split():
+                        if word.strip(".,;:!?") == search_text:
                             return True
-                    elif "SigmaEndswithModifier" in modifier_names:
-                        if text_lower.endswith(search_text):
-                            return True
-                    elif "SigmaStartswithModifier" in modifier_names:
-                        if text_lower.startswith(search_text):
-                            return True
-                    elif not modifiers:
-                        # No modifier = exact match on a word boundary
-                        for word in text_lower.split():
-                            if word.strip(".,;:!?") == search_text:
-                                return True
         return False
 
     def _apply_tier3_neutral_fallback(
@@ -878,48 +1120,156 @@ class LogScorer:
         """Populate classifier_score using the trained event-count classifier."""
         from logfilter.pipeline.normalizer import LogSourceType
 
+        endpoint_indices: list[int] = []
+        if self.endpoint_novelty_enabled:
+            endpoint_vectors: list[np.ndarray] = []
+            endpoint_candidates: list[int] = []
+            for index, event in enumerate(events):
+                vector = extract_endpoint_vector(event)
+                if vector is not None:
+                    endpoint_candidates.append(index)
+                    endpoint_vectors.append(vector)
+            if endpoint_candidates:
+                try:
+                    probabilities = self.endpoint_novelty_model.predict_proba(
+                        np.vstack(endpoint_vectors)
+                    )
+                    for index, probability in zip(endpoint_candidates, probabilities):
+                        endpoint_score = _bounded_probability(probability)
+                        scored[index].endpoint_score = endpoint_score
+                        scored[index].classifier_score = endpoint_score
+                    endpoint_indices = endpoint_candidates
+                except (ValueError, IndexError, TypeError, RuntimeError) as exc:
+                    logger.warning("Endpoint novelty scoring failed", error=str(exc))
+                    for index in endpoint_candidates:
+                        scored[index].score_degraded = True
+
+        flow_vectors: list[np.ndarray] = []
+        flow_candidates: list[int] = []
+        if self.flow_enabled or self.bot_flow_enabled:
+            for index, event in enumerate(events):
+                if event.source_type != LogSourceType.FIREWALL:
+                    continue
+                vector = extract_flow_vector(event)
+                if vector is not None:
+                    flow_candidates.append(index)
+                    flow_vectors.append(vector)
+
+        flow_indices: list[int] = []
+        if flow_candidates:
+            try:
+                flow_matrix = np.vstack(flow_vectors)
+                loaded_general = self.flow_enabled and self.flow_classifier.is_loaded()
+                loaded_bot = self.bot_flow_enabled and self.bot_flow_classifier.is_loaded()
+                general_probabilities = (
+                    self.flow_classifier.predict_proba(flow_matrix)
+                    if loaded_general
+                    else np.zeros(len(flow_candidates), dtype=np.float32)
+                )
+                bot_probabilities = (
+                    self.bot_flow_classifier.predict_proba(flow_matrix)
+                    if loaded_bot
+                    else np.zeros(len(flow_candidates), dtype=np.float32)
+                )
+                if loaded_general or loaded_bot:
+                    for position, index in enumerate(flow_candidates):
+                        flow_score = _bounded_probability(general_probabilities[position])
+                        bot_score = _bounded_probability(bot_probabilities[position])
+                        scored[index].flow_score = flow_score
+                        scored[index].bot_score = bot_score
+                        if loaded_general and loaded_bot:
+                            classifier_score = self.flow_fusion_policy.calibrated_risk(
+                                flow_score, bot_score
+                            )
+                        else:
+                            classifier_score = max(flow_score, bot_score)
+                        scored[index].classifier_score = classifier_score
+                        if self.flow_aggregator is not None:
+                            snapshot = self.flow_aggregator.update(events[index])
+                            scored[index].ddos_window_score = snapshot.risk_score
+                            scored[index].classifier_score = max(
+                                scored[index].classifier_score, snapshot.risk_score
+                            )
+                    flow_indices = flow_candidates
+            except (ValueError, IndexError, TypeError, RuntimeError) as exc:
+                logger.warning(
+                    "Flow classifier failed; falling back to text classifier", error=str(exc)
+                )
+                for index in flow_candidates:
+                    scored[index].score_degraded = True
+
+        flow_index_set = set(flow_indices)
+        endpoint_index_set = set(endpoint_indices)
         syslog_indices = [
-            i for i, ev in enumerate(events)
-            if ev.source_type in (LogSourceType.SYSLOG, LogSourceType.WEB,
-                                  LogSourceType.FIREWALL, LogSourceType.WINEVENT)
+            index
+            for index, event in enumerate(events)
+            if index not in flow_index_set
+            and index not in endpoint_index_set
+            and event.source_type
+            in (
+                LogSourceType.SYSLOG,
+                LogSourceType.WEB,
+                LogSourceType.FIREWALL,
+                LogSourceType.WINEVENT,
+            )
         ]
-        hdfs_indices = [i for i in range(len(events)) if i not in syslog_indices]
+        structured_indices = flow_index_set | endpoint_index_set | set(syslog_indices)
+        hdfs_indices = [index for index in range(len(events)) if index not in structured_indices]
 
         with telemetry.start_as_current_span(
             "scorer.tier1.classifier",
-            {"logfilter.batch_size": len(events)},
+            {"logfilter.batch_size": len(events), "logfilter.flow_count": len(flow_indices)},
         ) as span:
             try:
                 if syslog_indices and self.syslog_classifier.is_ready():
-                    syslog_events = [events[i] for i in syslog_indices]
+                    syslog_events = [events[index] for index in syslog_indices]
                     syslog_vectors = self._syslog_feature_vectors(syslog_events)
                     syslog_probs = self.syslog_classifier.predict_proba(syslog_vectors)
-                    for idx, prob in zip(syslog_indices, syslog_probs):
-                        scored[idx].classifier_score = max(0.0, min(1.0, float(prob)))
+                    for index, probability in zip(syslog_indices, syslog_probs):
+                        scored[index].classifier_score = _bounded_probability(probability)
 
                 if hdfs_indices:
-                    hdfs_events = [events[i] for i in hdfs_indices]
+                    hdfs_events = [events[index] for index in hdfs_indices]
                     feature_vectors = self._classifier_feature_vectors(hdfs_events)
-                    span.set_attribute("logfilter.feature_count", int(feature_vectors.shape[1]))
+                    span.set_attribute(
+                        "logfilter.feature_count",
+                        _int_value(feature_vectors.shape[1], "feature count"),
+                    )
                     hdfs_probs = self.classifier.predict_proba(feature_vectors)
-                    for idx, prob in zip(hdfs_indices, hdfs_probs):
-                        scored[idx].classifier_score = max(0.0, min(1.0, float(prob)))
+                    for index, probability in zip(hdfs_indices, hdfs_probs):
+                        scored[index].classifier_score = _bounded_probability(probability)
 
-                if not self.classifier.is_ready() and not self.syslog_classifier.is_ready():
-                    for se in scored:
-                        se.score_degraded = True
+                http_indices: list[int] = []
+                for index, event in enumerate(events):
+                    if "http_lexical_score" not in event.fields:
+                        continue
+                    http_score = _bounded_probability(event.fields["http_lexical_score"])
+                    scored[index].http_score = http_score
+                    scored[index].classifier_score = http_score
+                    http_indices.append(index)
+
+                ready = (
+                    bool(flow_indices)
+                    or bool(endpoint_indices)
+                    or bool(http_indices)
+                    or self.classifier.is_ready()
+                    or self.syslog_classifier.is_ready()
+                )
+                if not ready:
+                    for result in scored:
+                        result.score_degraded = True
             except (ValueError, IndexError, TypeError, RuntimeError) as exc:
                 telemetry.record_exception(span, exc)
                 logger.warning("Classifier scoring failed; using neutral scores", error=str(exc))
-                for se in scored:
-                    se.classifier_score = 0.5
-                    se.score_degraded = True
+                for result in scored:
+                    result.classifier_score = 0.5
+                    result.score_degraded = True
 
         escalation_indices = [
-            i
-            for i, se in enumerate(scored)
-            if i not in syslog_indices
-            and self.tier2_classifier.should_escalate(se.classifier_score)
+            index
+            for index, result in enumerate(scored)
+            if index not in structured_indices
+            and self.tier2_classifier.should_escalate(result.classifier_score)
         ]
         with telemetry.start_as_current_span(
             "scorer.tier2.classifier",
@@ -950,7 +1300,7 @@ class LogScorer:
                 return
 
             for index, prob in zip(escalation_indices, tier2_probs):
-                score = max(0.0, min(1.0, float(prob)))
+                score = _bounded_probability(prob)
                 scored[index].classifier_score = score
                 scored[index].tier2_score = score
                 scored[index].tier2_used = True
@@ -961,8 +1311,9 @@ class LogScorer:
         HDFS TraceBench classifier artifacts.
         """
         feature_names = tuple(getattr(self.classifier, "feature_names", []) or ())
-        n_features = len(feature_names) or int(
-            getattr(self.classifier, "expected_feature_count", 0) or 1
+        n_features = len(feature_names) or _int_value(
+            getattr(self.classifier, "expected_feature_count", 0) or 1,
+            "classifier feature count",
         )
         vectors = np.zeros((len(events), n_features), dtype=np.float32)
         if not feature_names:
@@ -998,7 +1349,9 @@ class LogScorer:
 
         prepared = self._prepared_syslog_features(feature_names)
         for row, event in enumerate(events):
-            text = f"{event.text} {event.raw}".lower()
+            # Adapters keep model-facing text bounded and redacted. Archived raw
+            # payloads may contain credentials and must not re-enter this surface.
+            text = event.text.lower()
             text_tokens = set(_TOKEN_RE.findall(text))
             for col, (feature_text, feature_tokens) in enumerate(prepared):
                 if feature_text and feature_text in text:
@@ -1058,33 +1411,53 @@ class LogScorer:
         self._feature_cache_tokens = prepared
         return prepared
 
+    def _profile_for(self, se: ScoredEvent) -> tuple[float, ...]:
+        profile_name = se.source_type
+        if profile_name == "firewall" and "http_lexical_features" in se.fields:
+            profile_name = "firewall_http"
+        elif profile_name == "firewall" and any(
+            key in se.fields for key in ("dpt", "duration", "fwdPackets")
+        ):
+            profile_name = "firewall_flow"
+        return self._source_profiles.get(profile_name, self._default_profile)
+
+    def _is_isolated_flow(self, se: ScoredEvent) -> bool:
+        return (
+            self.calibrated_flow_isolation
+            and se.source_type == "firewall"
+            and any(key in se.fields for key in ("dpt", "duration", "fwdPackets"))
+        )
+
     def _compute_score(self, se: ScoredEvent) -> float:
         """Compute final composite threat score."""
-        # Sigma match → immediate HIGH signal
-        if se.sigma_matched:
+        w_cls, w_ent, w_ce, w_nov, _, _, _ = self._profile_for(se)
+        isolated_flow = self._is_isolated_flow(se)
+        if isolated_flow:
+            return _bounded_probability(se.classifier_score)
+        # Sigma is outside the attested calibrated-flow policy.
+        if se.sigma_matched and not isolated_flow:
             se.classifier_score = max(se.classifier_score, 0.90)
 
-        # Only apply dedup penalty when cross-encoder actually contributed;
-        # otherwise the penalty unfairly zeroes out scores for duplicates
-        # that never got a cross-encoder evaluation.
-        dedup = se.dedup_penalty if se.cross_encoder_max > 0 else 0.0
+        # A dedup penalty is valid only when the cross-encoder has non-zero weight.
+        dedup = se.dedup_penalty if se.cross_encoder_max > 0 and w_ce > 0 else 0.0
 
         score = (
-            self.w_cls * se.classifier_score
-            + self.w_ent * se.entity_boost
-            + self.w_ce * se.cross_encoder_max
-            + self.w_nov * se.novelty_score
+            w_cls * se.classifier_score
+            + w_ent * se.entity_boost
+            + w_ce * se.cross_encoder_max
+            + w_nov * se.novelty_score
             - dedup
         )
         # Clamp to [0, 1]
         return max(0.0, min(1.0, score))
 
     def _routing_label(self, se: ScoredEvent) -> str:
-        if se.sigma_matched or se.ai_threat_score >= self.threshold_high:
+        _, _, _, _, low, medium, high = self._profile_for(se)
+        if (se.sigma_matched and not self._is_isolated_flow(se)) or se.ai_threat_score >= high:
             return "HIGH"
-        if se.ai_threat_score >= self.threshold_medium:
+        if se.ai_threat_score >= medium:
             return "MEDIUM"
-        if se.ai_threat_score >= self.threshold_low:
+        if se.ai_threat_score >= low:
             return "LOW"
         return "INFO"
 
@@ -1096,4 +1469,4 @@ class LogScorer:
             se.cross_encoder_max if se.cross_encoder_max > 0 else None,
         ]
         valid = [s for s in signals if s is not None]
-        return float(sum(valid) / len(valid)) if valid else 0.0
+        return sum(valid) / len(valid) if valid else 0.0
