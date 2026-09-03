@@ -9,7 +9,7 @@ Keep reusable training logic in `training/`. Notebooks should call the scripts o
 | Notebook | Trains | Output dir | Consumed by |
 |---|---|---|---|
 | `kaggle_train_classifier.ipynb` | Tier-1 XGBoost classifier (bag-of-events) | `models/` | `src/logfilter/models/classifier.py` |
-| `kaggle_train_transformer.ipynb` | Tier-2 SecureBERT2.0-base classifier (text windows) | `models/tier2/` | `src/logfilter/models/tier2_classifier.py` |
+| `kaggle_train_transformer_READY.ipynb` | Tier-2 SecureBERT2.0-base classifier (text windows; Kaggle P100/Triton shim) | `models/tier2/` | `src/logfilter/models/tier2_classifier.py` |
 | `kaggle_pretrain_mlm.ipynb` | Continued MLM pre-training of SecureBERT2.0-base on log corpus | `models/securebert2-logs-mlm/final/` | All downstream encoders below (optional but recommended) |
 | `kaggle_train_ner.ipynb` | SecureBERT2.0-NER fine-tuned on CyNER (MIT, arXiv:2204.05754; pinned commit `37aff53b`); 5 entity types match wrapper exactly; per-class seqeval F1 reported; domain-transfer yield check required before promotion | `models/ner/final/` | `src/logfilter/models/ner.py` |
 | `kaggle_train_cross_encoder.ipynb` | SecureBERT2.0-cross_encoder fine-tuned on log↔ATT&CK pairs | `models/cross_encoder/final/` | `src/logfilter/models/cross_encoder.py` |
@@ -24,7 +24,7 @@ kaggle_pretrain_mlm.ipynb  ──►  models/securebert2-logs-mlm/final/
                                  │
                 ┌────────────────┼──────────────────────────────┐
                 ▼                ▼                ▼              ▼
-   kaggle_train_transformer  kaggle_train_ner  kaggle_train_cross_encoder  kaggle_train_biencoder
+   kaggle_train_transformer_READY  kaggle_train_ner  kaggle_train_cross_encoder  kaggle_train_biencoder
    (re-train Tier-2 on        (set MODEL_ID    (set MODEL_ID to log-adapted  (set MODEL_ID to
     log-adapted base for       to log-adapted   base in the model-load cell)   log-adapted base)
     higher Tier-2 quality)     base)

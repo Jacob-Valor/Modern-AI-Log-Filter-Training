@@ -64,88 +64,12 @@ Report vulnerabilities privately through your normal internal security channel.
 
 ## Vulnerability Exceptions
 
-### CVE-2025-69872 — `diskcache` (transitive via `pysigma`)
+No active vulnerability exceptions. `make audit` and CI run `pip-audit`
+without ignored advisories.
 
-**Status**: Documented exception. `make audit` ignores this CVE with
-`--ignore-vuln CVE-2025-69872`.
-
-**What it is**: `diskcache 5.6.3` (the latest available release) uses Python
-`pickle` for serialization by default. If an attacker can write to the cache
-directory, they can achieve arbitrary code execution when the application
-reads from the cache. CVSS 3.1 base score: 9.8 (Critical).
-
-**Why we accept it**:
-
-1. `diskcache` is a transitive dependency of `pysigma` (required for Sigma
-   rule loading). It is not a direct dependency.
-2. `pysigma` is used in this project **only** for `sigma.collection`
-   (Sigma rule parsing and matching). We do **not** import
-   `sigma.data.mitre_attack` or `sigma.data.mitre_d3fend` — the two modules
-   that use `diskcache`. MITRE ATT&CK data is loaded from
-   `config/mitre_techniques.json` (project-owned, version-controlled), not
-   from pySigma's MITRE STIX cache.
-3. A defense-in-depth test (`tests/test_sigma_cache_path_unused.py`) asserts
-   the vulnerable modules are never imported in the runtime code path.
-4. Even if the vulnerable path were reached, our container hardening
-   narrows the attack surface: services run as non-root, use read-only root
-   filesystems, and drop Linux capabilities. The default `diskcache` cache
-   directory is created via `tempfile.mkdtemp` (mode 0700) inside the
-   container's writable layer.
-
-**No upstream fix exists** as of audit date. Snyk and OSV both list "no
-fixed version" for `diskcache` regarding CVE-2025-69872. The diskcache
-maintainer's position is that the default `tempfile.mkdtemp(0o700)` directory
-is the trust boundary and that the CVE is a documentation concern, not a
-code defect (see grantjenks/python-diskcache issue #357).
-
-**Re-review trigger**: When `diskcache` ships a release that addresses
-CVE-2025-69872, remove the `--ignore-vuln CVE-2025-69872` flag from
-`make audit` (Makefile line 88+) and re-run the gate. The defense-in-depth
-test in `tests/test_sigma_cache_path_unused.py` should remain as a guard
-against accidental introduction of the vulnerable code path.
-
-**Re-review deadline**: 2026-10-06. If no upstream fix is available by this
-date, reassess the exception — consider forking diskcache to remove pickle
-or switching to a Sigma engine without the transitive dependency.
-
-**Alternatives considered**:
-
-- Pin `pysigma` to a version that does not require `diskcache`. Rejected:
-  pySigma has required diskcache for MITRE data caching since 0.10; older
-  versions have other transitive issues.
-- Switch to a Sigma rule engine that does not require pySigma. Rejected:
-  rewrites the Sigma matching layer; out of scope for a security patch.
-- Override `pysigma`'s MITRE cache with a JSON-only backend. Possible but
-  requires vendoring a fork; deferred to upstream fix.
-
-This exception is reviewed on every dependency bump.
-
-### CVE-2025-3000 — `torch`
-
-**Status**: Documented exception. `make audit` ignores this CVE with
-`--ignore-vuln CVE-2025-3000`.
-
-**What it is**: `pip-audit` flags the currently available PyTorch wheels for
-CVE-2025-3000. The audit output lists no fixed version for the package.
-
-**Why we accept it temporarily**:
-
-1. The public package index available to CI currently exposes `torch 2.11.0`
-   and `torch 2.12.0` as the newest compatible releases; both are flagged.
-2. `requirements.txt` and `pyproject.toml` constrain Torch to
-   `torch>=2.11.0,<2.12` so CI does not float to the newer flagged 2.12 line
-   while no fixed compatible wheel is available.
-3. Torch is used for local model loading/training and transformer wrappers; the
-   default smoke/unit-test path uses mocked or ONNX-backed inference and does
-   not expose Torch directly as a network boundary.
-
-**Re-review trigger**: When PyTorch publishes a compatible fixed wheel, update
-the Torch constraint in `requirements.txt` and `pyproject.toml`, then remove
-the `--ignore-vuln CVE-2025-3000` flag from `make audit` and CI.
-
-**Re-review deadline**: 2026-10-06. If no fixed wheel is available by this
-date, reassess the exception — consider switching to a CPU-only ONNX
-deployment that removes the torch dependency entirely.
+The former `diskcache`/pySigma exception was removed by replacing pySigma with
+the scorer's constrained `yaml.safe_load_all` text-rule parser. The former
+PyTorch exception was removed by upgrading to the patched 2.13 release line.
 
 ## Incident Response Runbook
 

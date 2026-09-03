@@ -1,4 +1,5 @@
 # API inference dependencies
+setuptools>=83.0.0
 transformers>=5.0.0
 sentence-transformers>=5.4.1
 numpy>=1.26.0
@@ -29,10 +30,6 @@ opentelemetry-sdk>=1.25.0
 opentelemetry-exporter-otlp>=1.25.0
 opentelemetry-instrumentation-fastapi>=0.46b0
 opentelemetry-instrumentation-kafka-python>=0.46b0
-
-# Sigma rules
-sigma-cli>=1.0.0
-pysigma>=0.11.0
 
 # Rate limiting / shared state
 redis>=5.0.0

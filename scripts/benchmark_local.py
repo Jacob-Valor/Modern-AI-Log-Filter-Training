@@ -12,9 +12,9 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from logfilter.config import load_config
-from logfilter.pipeline.normalizer import LogNormalizer, NormalizedEvent
-from logfilter.pipeline.scorer import LogScorer
+from logfilter.config import load_config  # noqa: E402
+from logfilter.pipeline.normalizer import LogNormalizer, NormalizedEvent  # noqa: E402
+from logfilter.pipeline.scorer import LogScorer  # noqa: E402
 
 OUTPUT_PATH = ROOT / "models" / "benchmark_local.json"
 
@@ -23,8 +23,8 @@ SYSLOG_MESSAGES = [
     "Jan 15 11:07:54 prod-srv01 sshd[124]: Accepted publickey for admin from 192.168.1.100 port 22 ssh2",
     "Jan 15 11:07:55 prod-srv01 sudo: admin : TTY=pts/0 ; PWD=/home/admin ; USER=root ; COMMAND=/bin/cat /etc/shadow",
     "Jan 15 11:07:56 prod-srv01 kernel: [UFW BLOCK] IN=eth0 OUT= SRC=10.0.0.100 DST=10.0.0.1 PROTO=TCP SPT=443 DPT=80",
-    "Jan 15 11:07:57 prod-srv01 apache2[1234]: 10.0.0.200 - - [15/Jan/2026:11:07:57 +0000] \"GET /admin/config HTTP/1.1\" 403 287",
-    "Jan 15 11:07:58 prod-srv01 nginx[2345]: 172.16.0.9 - - [15/Jan/2026:11:07:58 +0000] \"POST /login HTTP/1.1\" 401 182",
+    'Jan 15 11:07:57 prod-srv01 apache2[1234]: 10.0.0.200 - - [15/Jan/2026:11:07:57 +0000] "GET /admin/config HTTP/1.1" 403 287',
+    'Jan 15 11:07:58 prod-srv01 nginx[2345]: 172.16.0.9 - - [15/Jan/2026:11:07:58 +0000] "POST /login HTTP/1.1" 401 182',
     "<34>1 2026-01-15T11:07:59Z fw01 app01 1234 ID47 [exampleSDID@32473 iut=3 eventSource=Application] SSH login failed for user root",
     "<134>Jan 15 11:08:00 prod-srv01 firewall: src=10.0.0.44 dst=10.0.0.1 proto=tcp sport=51514 dport=3389 action=deny",
     '{"EventID":4625,"ProviderName":"Microsoft-Windows-Security-Auditing","Message":"An account failed to log on","Computer":"WIN-SRV01"}',
@@ -100,7 +100,9 @@ def run_benchmark(samples: int, batch_size: int, warmup: int) -> dict[str, Any]:
         "timed_batches": len(batch_latencies_ms),
         "total_events": total_events,
         "total_time_seconds": total_seconds,
-        "throughput_events_per_second": (total_events / total_seconds) if total_seconds > 0 else 0.0,
+        "throughput_events_per_second": (total_events / total_seconds)
+        if total_seconds > 0
+        else 0.0,
         "avg_per_event_latency_ms": avg_per_event_latency_ms,
         "batch_latency_ms": {
             "mean": statistics.mean(batch_latencies_ms) if batch_latencies_ms else 0.0,

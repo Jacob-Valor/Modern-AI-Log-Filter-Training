@@ -30,12 +30,11 @@ SAMPLE_EVENTS = [
     "for root from 10.0.0.5 port 44382 ssh2",
     "Jan 15 11:08:01 prod-srv01 sshd[22400]: Accepted publickey "
     "for deploy from 10.0.0.12 port 52301 ssh2",
-    "10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] \"GET /wp-admin HTTP/1.1\" 403 512",
-    "10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] \"GET /index.html HTTP/1.1\" 200 5120",
+    '10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "GET /wp-admin HTTP/1.1" 403 512',
+    '10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] "GET /index.html HTTP/1.1" 200 5120',
     "CEF:0|Palo Alto|NGFW|10.0|threat|SSH brute force|8|"
     "src=10.0.0.5 dst=192.168.1.1 spt=55000 dpt=22",
-    "getFileInfo+success: return(ow[class=class "
-    "org.apache.hadoop.hdfs.protocol.HdfsFileStatus",
+    "getFileInfo+success: return(ow[class=class org.apache.hadoop.hdfs.protocol.HdfsFileStatus",
     "Jan 15 11:07:53 prod-srv01 sudo: user : TTY=pts/0 ; "
     "PWD=/home/user ; USER=root ; COMMAND=/bin/cat /etc/shadow",
 ]

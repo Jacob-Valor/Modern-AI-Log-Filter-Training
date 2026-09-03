@@ -159,17 +159,18 @@ passwords are not provided.
 Required values:
 
 ```bash
-LOGFILTER_ADMIN_TOKEN=replace-with-openssl-rand-base64-32
 LOGFILTER_API_TOKEN=replace-with-openssl-rand-base64-32
 LOGFILTER_METRICS_TOKEN=replace-with-openssl-rand-base64-32
 ES_PASSWORD=replace-with-openssl-rand-base64-32
 GRAFANA_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
+QRADAR_GATEWAY_HMAC_SECRET=replace-with-openssl-rand-base64-32
+LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET=replace-with-openssl-rand-base64-32
 ```
 
-The scoring API requires `X-API-Token`. The admin reload endpoint requires
-`X-Admin-Token`. The metrics endpoint requires `X-Metrics-Token` (or
-`Authorization: Bearer <token>`). All token checks fail closed — the endpoint
-returns 403 when the token is not configured, and 401 when the token is wrong.
+The scoring API requires `X-API-Token`. The metrics endpoint requires
+`X-Metrics-Token` (or `Authorization: Bearer <token>`). All token checks fail
+closed: the endpoint returns 403 when the token is not configured and 401 when
+the token is wrong.
 Kafka and the API are bound to localhost by default in `docker-compose.yml`.
 
 OpenAPI docs are disabled unless `LOGFILTER_ENABLE_DOCS=1`. The collector is
@@ -179,6 +180,24 @@ local-only by default and only accepts peers in `SYSLOG_ALLOWED_CIDRS`.
 production. The API refuses to start with localhost CORS origins when
 `LOGFILTER_ENABLE_DOCS` is off. Leave empty for headless deployments (no
 browser clients).
+
+### Acknowledged security gateways
+
+Production QRadar delivery uses `QRADAR_PROTOCOL=https_ack`. Each LEEF payload is
+signed with HMAC-SHA256 and carries its stable `raw_log_ref` as both
+`request_id` and `Idempotency-Key`. The receiver must durably persist that ID
+before returning `{"request_id":"...","status":"accepted"}`; a replay returns
+`status=duplicate`. Any other response prevents the Kafka offset from being
+committed. TCP/TLS/UDP syslog remains available but retains at-least-once
+duplicate risk because it has no durable receiver acknowledgement.
+
+Automated response uses the same signed acknowledgement contract at
+`LOGFILTER_RESPONSE_GATEWAY_URL`. `LOGFILTER_RESPONSE_MODE=dry_run` only returns
+recommendations. Armed mode requires a 32-byte secret, HTTPS URL, explicit CIDR
+and host allowlists, and `LOGFILTER_RESPONSE_KILL_SWITCH=false`. Optional private
+CA and mTLS paths are available in `.env.example`. Direct `/score` clients that
+need retry idempotency must reuse a 64-character SHA-256 `raw_log_ref`; Kafka
+router calls receive this stable reference from topic/partition/offset.
 
 ## Local Setup
 

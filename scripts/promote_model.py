@@ -47,11 +47,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    registry = (
-        ModelRegistry(args.registry_path)
-        if args.registry_path
-        else ModelRegistry()
-    )
+    registry = ModelRegistry(args.registry_path) if args.registry_path else ModelRegistry()
 
     run = registry.get_run(args.run_id)
     if run is None:

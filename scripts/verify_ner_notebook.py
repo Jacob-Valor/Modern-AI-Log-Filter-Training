@@ -327,9 +327,12 @@ def gate_9_tokenize_align_labels(nb: dict) -> GateResult:
             _ = (tokens, is_split_into_words, truncation, max_length)
             return FakeEncoding([101, 201, 202, 301, 302, 102], [None, 0, 0, 1, 1, None])
 
-    result = func([
-        {"tokens": ["Alpha", "Beta"], "tags": ["B-Malware", "B-Indicator"]},
-    ], FakeTokenizer())
+    result = func(
+        [
+            {"tokens": ["Alpha", "Beta"], "tags": ["B-Malware", "B-Indicator"]},
+        ],
+        FakeTokenizer(),
+    )
     assert isinstance(result, list) and result, "expected a non-empty list"
     encoded = result[0]
     assert "input_ids" in encoded and "labels" in encoded, "missing output keys"

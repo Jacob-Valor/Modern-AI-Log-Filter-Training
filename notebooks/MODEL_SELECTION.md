@@ -198,4 +198,4 @@ The primary value proposition of tier-2 is domain transfer. HDFS TraceBench is a
 
 - `training/text_dataset.py` — text window builder implementation
 - `training/train_transformer.py` — tier-2 training script
-- `notebooks/kaggle_train_transformer.ipynb` — Kaggle execution notebook
+- `notebooks/kaggle_train_transformer_READY.ipynb` — Kaggle execution notebook (Tier-2; replaces the earlier `kaggle_train_transformer.ipynb`)

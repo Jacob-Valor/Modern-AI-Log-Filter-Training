@@ -28,6 +28,7 @@ build/
 .env
 .env.*
 !.env.example
+k8s/secret.local.yaml
 
 # HuggingFace cache
 .cache/

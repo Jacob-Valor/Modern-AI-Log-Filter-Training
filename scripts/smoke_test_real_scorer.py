@@ -154,10 +154,7 @@ def test_real_scorer() -> bool:
         leef = enricher.enrich(scored, es_doc_id="smoke-test")
 
         tier2_flag = " [T2]" if scored.tier2_used else ""
-        print(
-            f"  {PASS if scored.ai_threat_score >= 0 else FAIL} "
-            f"{name}{tier2_flag}"
-        )
+        print(f"  {PASS if scored.ai_threat_score >= 0 else FAIL} {name}{tier2_flag}")
         print(
             f"    score={scored.ai_threat_score:.4f}  "
             f"priority={scored.ai_priority}  "

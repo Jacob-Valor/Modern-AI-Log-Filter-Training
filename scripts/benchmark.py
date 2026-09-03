@@ -46,8 +46,7 @@ DEFAULT_DURATION_SECONDS = 60
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_BATCH_COUNT = 10
 SYSLOG_PAYLOAD = (
-    "Jan 15 11:07:53 prod-srv01 sshd[123]: Failed password for root "
-    "from 10.0.0.5 port 44382 ssh2"
+    "Jan 15 11:07:53 prod-srv01 sshd[123]: Failed password for root from 10.0.0.5 port 44382 ssh2"
 )
 
 

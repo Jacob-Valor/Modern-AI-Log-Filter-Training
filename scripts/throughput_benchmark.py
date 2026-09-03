@@ -16,18 +16,14 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import numpy as np
 
-from logfilter.config import load_config
-from logfilter.models.classifier import LogClassifier
-from logfilter.models.ner import NERModel
-from logfilter.pipeline.normalizer import LogNormalizer
-from logfilter.pipeline.scorer import LogScorer
+from logfilter.config import load_config  # noqa: E402
+from logfilter.pipeline.normalizer import LogNormalizer  # noqa: E402
+from logfilter.pipeline.scorer import LogScorer  # noqa: E402
 
 SYSLOG_EVENTS = [
     "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for root from 10.0.0.5 port 44382 ssh2",
@@ -69,7 +65,7 @@ def run_benchmark(events: int, warmup: int, batch_size: int) -> None:
     raw_events = [SYSLOG_EVENTS[i % len(SYSLOG_EVENTS)] for i in range(events + warmup)]
 
     print(f"\n{'=' * 60}")
-    print(f"  Pipeline Throughput Benchmark")
+    print("  Pipeline Throughput Benchmark")
     print(f"{'=' * 60}")
     print(f"  events:     {events}")
     print(f"  warmup:     {warmup}")
@@ -84,7 +80,7 @@ def run_benchmark(events: int, warmup: int, batch_size: int) -> None:
         t0 = time.perf_counter()
         normalized = normalizer.normalize(raw)
         t1 = time.perf_counter()
-        scored = scorer.score(normalized)
+        scorer.score(normalized)
         t2 = time.perf_counter()
 
         if i >= warmup:

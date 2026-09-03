@@ -120,8 +120,7 @@ def gate_3_section_headers(nb: dict) -> GateResult:
     header_texts = [line.strip() for _, _, line in headers]
 
     top_ok = any(
-        line.startswith("# Kaggle Training:") and "BiEncoder" in line
-        for line in header_texts
+        line.startswith("# Kaggle Training:") and "BiEncoder" in line for line in header_texts
     )
     expected_sections = [f"## {i}." for i in range(1, 10)]
     missing = [
@@ -237,9 +236,7 @@ def gate_6_synthetic_pairs(_nb: dict) -> GateResult:
     green_pairs = _build_positive_pairs_fixture(keyword_map, mitre_techniques, windows)
     assert green_pairs, "expected real fixture to build positive pairs"
     assert all(
-        isinstance(pair, tuple)
-        and len(pair) == 2
-        and all(isinstance(item, str) for item in pair)
+        isinstance(pair, tuple) and len(pair) == 2 and all(isinstance(item, str) for item in pair)
         for pair in green_pairs
     )
     return GateResult(
@@ -278,8 +275,10 @@ def gate_7_inputexample(_nb: dict) -> GateResult:
 
 
 def gate_8_consume_block(nb: dict) -> GateResult:
-    source = _joined_code_source(nb) + "\n" + "\n".join(
-        line for _, _, line in _iter_cell_lines(nb, cell_type="markdown")
+    source = (
+        _joined_code_source(nb)
+        + "\n"
+        + "\n".join(line for _, _, line in _iter_cell_lines(nb, cell_type="markdown"))
     )
     if "models.biencoder.model_id" not in source:
         raise AssertionError("missing models.biencoder.model_id consume block line")

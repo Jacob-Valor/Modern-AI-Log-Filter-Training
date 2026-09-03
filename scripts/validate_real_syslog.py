@@ -87,32 +87,30 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
     ),
     (
         "web_attack",
-        "10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "
-        "\"GET /../../../etc/passwd HTTP/1.1\" 400 342",
+        '10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "GET /../../../etc/passwd HTTP/1.1" 400 342',
         set(),
         "Path traversal attempt",
     ),
     (
         "web_attack",
         "10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "
-        "\"POST /api/login HTTP/1.1\" 200 128 "
-        "\"-\" \"sqlmap/1.5\"",
+        '"POST /api/login HTTP/1.1" 200 128 '
+        '"-" "sqlmap/1.5"',
         set(),
         "SQL injection tool detected in UA",
     ),
     # ── Normal web traffic ───────────────────────────────────────────────────
     (
         "web_normal",
-        "10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] "
-        "\"GET /index.html HTTP/1.1\" 200 5120",
+        '10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] "GET /index.html HTTP/1.1" 200 5120',
         set(),
         "Normal HTTP GET for index.html",
     ),
     (
         "web_normal",
         "10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] "
-        "\"GET /api/health HTTP/1.1\" 200 16 "
-        "\"-\" \"ELB-HealthChecker/2.0\"",
+        '"GET /api/health HTTP/1.1" 200 16 '
+        '"-" "ELB-HealthChecker/2.0"',
         set(),
         "Health check from load balancer",
     ),
@@ -152,30 +150,33 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
     # ── Windows events ───────────────────────────────────────────────────────
     (
         "windows_event",
-        json.dumps({
-            "EventID": "4625",
-            "Computer": "DC01",
-            "Message": (
-                "An account failed to log on. Subject: SYSTEM. "
-                "Target: admin. Logon Type: 3. Failure Reason: "
-                "Unknown user or bad password."
-            ),
-            "TimeCreated": "2026-01-15T11:07:53Z",
-        }),
+        json.dumps(
+            {
+                "EventID": "4625",
+                "Computer": "DC01",
+                "Message": (
+                    "An account failed to log on. Subject: SYSTEM. "
+                    "Target: admin. Logon Type: 3. Failure Reason: "
+                    "Unknown user or bad password."
+                ),
+                "TimeCreated": "2026-01-15T11:07:53Z",
+            }
+        ),
         set(),
         "Windows Event 4625 - failed logon",
     ),
     (
         "windows_event",
-        json.dumps({
-            "EventID": "4720",
-            "Computer": "DC01",
-            "Message": (
-                "A user account was created. Subject: "
-                "administrator. New Account: backdoor"
-            ),
-            "TimeCreated": "2026-01-15T11:07:53Z",
-        }),
+        json.dumps(
+            {
+                "EventID": "4720",
+                "Computer": "DC01",
+                "Message": (
+                    "A user account was created. Subject: administrator. New Account: backdoor"
+                ),
+                "TimeCreated": "2026-01-15T11:07:53Z",
+            }
+        ),
         set(),
         "Windows Event 4720 - user account created",
     ),
@@ -319,10 +320,7 @@ def main() -> None:
         status = PASS if ratio >= 0.5 else WARN
         print(f"  {status} {cat}: {n_pass}/{n_total} passed ({ratio:.0%})")
         for f in cat_results["fail"]:
-            print(
-                f"      {FAIL} {f['desc']} "
-                f"(score={f['score']:.4f}, priority={f['priority']})"
-            )
+            print(f"      {FAIL} {f['desc']} (score={f['score']:.4f}, priority={f['priority']})")
 
     print(f"\n{'─' * 60}")
     print("  Latency")

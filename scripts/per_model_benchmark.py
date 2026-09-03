@@ -11,8 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import importlib
-import json
 import statistics
 import sys
 import time
@@ -22,16 +20,16 @@ from typing import Any
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import numpy as np
-import structlog
+import numpy as np  # noqa: E402
+import structlog  # noqa: E402
 
-from logfilter.config import load_config
-from logfilter.models.classifier import LogClassifier
-from logfilter.models.syslog_classifier import SyslogClassifier
-from logfilter.models.tier2_classifier import Tier2Classifier
-from logfilter.models.ner import NERModel
-from logfilter.models.biencoder import BiEncoderModel
-from logfilter.models.cross_encoder import CrossEncoderModel
+from logfilter.config import load_config  # noqa: E402
+from logfilter.models.biencoder import BiEncoderModel  # noqa: E402
+from logfilter.models.classifier import LogClassifier  # noqa: E402
+from logfilter.models.cross_encoder import CrossEncoderModel  # noqa: E402
+from logfilter.models.ner import NERModel  # noqa: E402
+from logfilter.models.syslog_classifier import SyslogClassifier  # noqa: E402
+from logfilter.models.tier2_classifier import Tier2Classifier  # noqa: E402
 
 logger = structlog.get_logger(__name__)
 
@@ -55,9 +53,21 @@ N_FEATURES_SYSLOG = 110  # actual feature count — read from model at runtime
 
 # MITRE technique candidates for CrossEncoder benchmark
 CANDIDATES = [
-    {"id": "T1078", "name": "Valid Accounts", "description": "Adversaries may steal credentials to access valid accounts."},
-    {"id": "T1059", "name": "Command and Scripting Interpreter", "description": "Adversaries may abuse command interpreters to execute commands."},
-    {"id": "T1190", "name": "Exploit Public-Facing Application", "description": "Adversaries may exploit a software vulnerability to gain access."},
+    {
+        "id": "T1078",
+        "name": "Valid Accounts",
+        "description": "Adversaries may steal credentials to access valid accounts.",
+    },
+    {
+        "id": "T1059",
+        "name": "Command and Scripting Interpreter",
+        "description": "Adversaries may abuse command interpreters to execute commands.",
+    },
+    {
+        "id": "T1190",
+        "name": "Exploit Public-Facing Application",
+        "description": "Adversaries may exploit a software vulnerability to gain access.",
+    },
 ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -109,9 +119,7 @@ def generate_classifier_features(n: int, n_features: int) -> np.ndarray:
 # ── Model benchmarks ───────────────────────────────────────────────────────────
 
 
-def bench_log_classifier(
-    events: int, warmup: int, batch_size: int
-) -> list[str]:
+def bench_log_classifier(events: int, warmup: int, batch_size: int) -> list[str]:
     print(f"\n  Loading LogClassifier (Tier-1, ONNX XGBoost, {N_FEATURES_CLASSIFIER} features)...")
     model = LogClassifier()
     _ = model.is_ready()
@@ -129,9 +137,7 @@ def bench_log_classifier(
     return format_result("LogClassifier", latencies, events, batch_size)
 
 
-def bench_syslog_classifier(
-    events: int, warmup: int, batch_size: int
-) -> list[str]:
+def bench_syslog_classifier(events: int, warmup: int, batch_size: int) -> list[str]:
     model = SyslogClassifier()
     _ = model.is_ready()
     n_features = len(model.feature_names) or N_FEATURES_SYSLOG
@@ -150,10 +156,8 @@ def bench_syslog_classifier(
     return format_result("SyslogClassifier", latencies, events, batch_size)
 
 
-def bench_tier2_classifier(
-    events: int, warmup: int, batch_size: int
-) -> list[str]:
-    print(f"\n  Loading Tier2Classifier (SecureBERT2.0 → ONNX)...")
+def bench_tier2_classifier(events: int, warmup: int, batch_size: int) -> list[str]:
+    print("\n  Loading Tier2Classifier (SecureBERT2.0 → ONNX)...")
     model = Tier2Classifier()
     _ = model.is_ready()
 
@@ -170,7 +174,7 @@ def bench_tier2_classifier(
 
 
 def bench_ner(events: int, warmup: int, batch_size: int) -> list[str]:
-    print(f"\n  Loading NERModel (SecureBERT2.0-NER)...")
+    print("\n  Loading NERModel (SecureBERT2.0-NER)...")
     model = NERModel(device="cpu", batch_size=batch_size)
 
     latencies: list[float] = []
@@ -186,10 +190,7 @@ def bench_ner(events: int, warmup: int, batch_size: int) -> list[str]:
 
 
 def bench_biencoder(events: int, warmup: int, batch_size: int) -> list[str]:
-    print(f"\n  Loading BiEncoderModel (SecureBERT2.0-biencoder)...")
-    config = load_config(ROOT / "config" / "config.yaml")
-    models_cfg = config.get("models", {})
-    biencoder_cfg = models_cfg.get("biencoder", {})
+    print("\n  Loading BiEncoderModel (SecureBERT2.0-biencoder)...")
     model = BiEncoderModel(
         device="cpu",
         batch_size=batch_size,
@@ -211,10 +212,8 @@ def bench_biencoder(events: int, warmup: int, batch_size: int) -> list[str]:
     return format_result("BiEncoderModel", latencies, events, batch_size)
 
 
-def bench_cross_encoder(
-    events: int, warmup: int, batch_size: int
-) -> list[str]:
-    print(f"\n  Loading CrossEncoderModel (SecureBERT2.0-cross_encoder)...")
+def bench_cross_encoder(events: int, warmup: int, batch_size: int) -> list[str]:
+    print("\n  Loading CrossEncoderModel (SecureBERT2.0-cross_encoder)...")
     model = CrossEncoderModel(device="cpu", batch_size=batch_size)
 
     candidates_per_event = [CANDIDATES] * batch_size
@@ -233,15 +232,14 @@ def bench_cross_encoder(
 # ── Pipeline reference ─────────────────────────────────────────────────────────
 
 
-def bench_full_pipeline(
-    events: int, warmup: int, batch_size: int
-) -> list[str]:
-    from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
+def bench_full_pipeline(events: int, warmup: int, batch_size: int) -> list[str]:
+    from logfilter.pipeline.normalizer import LogNormalizer
 
-    print(f"\n  Loading full pipeline (all models + normalizer + scorer)...")
+    print("\n  Loading full pipeline (all models + normalizer + scorer)...")
     config = load_config(ROOT / "config" / "config.yaml")
     normalizer = LogNormalizer()
     from logfilter.pipeline.scorer import LogScorer
+
     scorer = LogScorer(config=config)
 
     latencies: list[float] = []
@@ -272,21 +270,21 @@ BENCHMARKS = [
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Per-model throughput benchmark for LogFilter"
+    parser = argparse.ArgumentParser(description="Per-model throughput benchmark for LogFilter")
+    parser.add_argument("--events", type=int, default=100, help="Scoring iterations (default: 100)")
+    parser.add_argument(
+        "--warmup", type=int, default=10, help="Warmup iterations (not counted, default: 10)"
     )
-    parser.add_argument("--events", type=int, default=100,
-                        help="Scoring iterations (default: 100)")
-    parser.add_argument("--warmup", type=int, default=10,
-                        help="Warmup iterations (not counted, default: 10)")
-    parser.add_argument("--batch-size", type=int, default=32,
-                        help="Batch size per iteration (default: 32)")
-    parser.add_argument("--models", type=str, default="",
-                        help="Comma-separated models to benchmark (default: all)")
+    parser.add_argument(
+        "--batch-size", type=int, default=32, help="Batch size per iteration (default: 32)"
+    )
+    parser.add_argument(
+        "--models", type=str, default="", help="Comma-separated models to benchmark (default: all)"
+    )
     args = parser.parse_args()
 
     print(f"{'=' * 72}")
-    print(f"  Per-Model Throughput Benchmark")
+    print("  Per-Model Throughput Benchmark")
     print(f"{'=' * 72}")
     print(f"  events:       {args.events}")
     print(f"  warmup:       {args.warmup}")
@@ -296,10 +294,7 @@ def main() -> None:
     selected: list[tuple[str, Any]] = BENCHMARKS
     if args.models:
         names = [n.strip().lower() for n in args.models.split(",")]
-        selected = [
-            (name, fn) for name, fn in BENCHMARKS
-            if any(s in name.lower() for s in names)
-        ]
+        selected = [(name, fn) for name, fn in BENCHMARKS if any(s in name.lower() for s in names)]
         if not selected:
             available = ", ".join(n for n, _ in BENCHMARKS)
             print(f"  No models matched '{args.models}'. Available: {available}")
@@ -314,12 +309,13 @@ def main() -> None:
             print()
         except Exception as e:
             import traceback
+
             print(f"  FAILED: {e}")
             traceback.print_exc()
             print()
 
     print(f"{'=' * 72}")
-    print(f"  Benchmark complete.")
+    print("  Benchmark complete.")
     print(f"{'=' * 72}")
 
 
