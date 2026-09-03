@@ -290,6 +290,7 @@ def test_classifier_falls_back_to_xgb_when_onnx_fails(tmp_path, monkeypatch) -> 
     class BrokenRT:
         class SessionOptions:
             pass
+
         class InferenceSession:
             def __init__(self, *args, **kwargs):
                 del args, kwargs

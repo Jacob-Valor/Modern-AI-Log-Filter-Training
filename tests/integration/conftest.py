@@ -77,6 +77,7 @@ def compose_stack():
 
 # ── Service clients ─────────────────────────────────────────────────────────
 
+
 @pytest.fixture(scope="session")
 def kafka_bootstrap() -> str:
     return "localhost:19092"

@@ -7,9 +7,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
+import pytest  # type: ignore[import-not-found]
 
-from training.thresholds import summarize_threshold_sweep, threshold_metrics, threshold_sweep
+from training.thresholds import (
+    benign_thresholds_at_fixed_fpr,
+    summarize_threshold_sweep,
+    threshold_metrics,
+    threshold_sweep,
+    thresholds_at_fixed_fpr,
+)
 
 ROOT = Path(__file__).parent.parent
 
@@ -48,6 +54,45 @@ def test_threshold_metrics_validate_shapes() -> None:
 
     with pytest.raises(ValueError, match="at least one sample"):
         threshold_metrics(np.array([]), np.array([]), threshold=0.5)
+
+
+def test_fixed_fpr_thresholds_use_conservative_validation_order_statistics() -> None:
+    benign = np.linspace(0.0, 0.999, 1000, dtype=np.float64)
+    positive = np.array([0.95, 0.9999], dtype=np.float64)
+    labels = np.concatenate((np.zeros(1000, dtype=np.int32), np.ones(2, dtype=np.int32)))
+    scores = np.concatenate((benign, positive))
+
+    calibrated = thresholds_at_fixed_fpr(labels, scores)
+
+    assert calibrated["0.001"]["status"] == "calibrated"
+    false_positives = [
+        calibrated[target]["false_positives"] for target in ("0.001", "0.01", "0.05")
+    ]
+    assert all(isinstance(value, int) for value in false_positives)
+    assert false_positives == [1, 10, 50]
+
+
+def test_benign_only_fixed_fpr_calibration() -> None:
+    scores = np.linspace(0.0, 0.999, 1000)
+    calibrated = benign_thresholds_at_fixed_fpr(scores)
+    assert calibrated["0.001"]["false_positives"] == 1
+    assert calibrated["0.01"]["false_positives"] == 10
+    assert calibrated["0.05"]["false_positives"] == 50
+
+
+def test_fixed_fpr_reports_insufficient_validation_resolution() -> None:
+    labels = np.array([0] * 100 + [1], dtype=np.int32)
+    scores = np.linspace(0.0, 1.0, 101)
+
+    calibrated = thresholds_at_fixed_fpr(labels, scores)
+
+    assert calibrated["0.001"]["status"] == "insufficient_benign_samples"
+    assert calibrated["0.01"]["status"] == "calibrated"
+
+
+def test_fixed_fpr_rejects_invalid_validation_scores() -> None:
+    with pytest.raises(ValueError, match="finite probabilities"):
+        thresholds_at_fixed_fpr(np.array([0, 1]), np.array([np.nan, 0.9]))
 
 
 def test_threshold_cli_help_commands_import_cleanly() -> None:

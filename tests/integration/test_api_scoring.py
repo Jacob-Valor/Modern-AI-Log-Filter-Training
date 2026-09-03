@@ -14,7 +14,6 @@ def api_client(kafka_bootstrap: str, es_host: str):
     # Point the API at our integration test services
     os.environ["KAFKA_BOOTSTRAP_SERVERS"] = kafka_bootstrap
     os.environ["ES_HOST"] = es_host
-    os.environ["LOGFILTER_ADMIN_TOKEN"] = "test-admin-token"
     os.environ["LOGFILTER_API_TOKEN"] = "test-api-token"
     os.environ["LOGFILTER_METRICS_TOKEN"] = "test-metrics-token"
     os.environ["LOGFILTER_ENABLE_DOCS"] = "0"
@@ -67,12 +66,7 @@ def test_api_score_event_with_token(api_client):
 @pytest.mark.integration
 def test_api_score_batch_with_token(api_client):
     """/score/batch accepts multiple events."""
-    payload = {
-        "events": [
-            {"raw": f"test event {i}", "source_type": "syslog"}
-            for i in range(3)
-        ]
-    }
+    payload = {"events": [{"raw": f"test event {i}", "source_type": "syslog"} for i in range(3)]}
     resp = api_client.post(
         "/score/batch",
         json=payload,

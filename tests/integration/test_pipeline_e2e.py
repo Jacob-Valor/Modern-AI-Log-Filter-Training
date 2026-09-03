@@ -53,7 +53,6 @@ def test_e2e_full_pipeline(
 
     os.environ["KAFKA_BOOTSTRAP_SERVERS"] = kafka_bootstrap
     os.environ["ES_HOST"] = es_host
-    os.environ["LOGFILTER_ADMIN_TOKEN"] = "test-admin-token"
     os.environ["LOGFILTER_API_TOKEN"] = "test-api-token"
     os.environ["LOGFILTER_METRICS_TOKEN"] = "test-metrics-token"
     os.environ["LOGFILTER_ENABLE_DOCS"] = "0"
