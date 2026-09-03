@@ -16,7 +16,6 @@ from logfilter.config import load_config  # noqa: E402
 from logfilter.pipeline.normalizer import LogNormalizer  # noqa: E402
 from logfilter.pipeline.scorer import LogScorer  # noqa: E402
 
-
 DATASET_PATH = ROOT / "scripts" / "eval_dataset.csv"
 CONFIG_PATH = ROOT / "config" / "config.yaml"
 OUTPUT_PATH = ROOT / "models" / "detection_evaluation.json"
@@ -147,8 +146,7 @@ def print_summary(report: dict[str, Any]) -> None:
     print(f"Precision: {report['precision']:.4f}")
     print(f"F1: {report['f1']:.4f}")
     print(
-        "Confusion Matrix: "
-        f"TP={matrix['tp']} FP={matrix['fp']} TN={matrix['tn']} FN={matrix['fn']}"
+        f"Confusion Matrix: TP={matrix['tp']} FP={matrix['fp']} TN={matrix['tn']} FN={matrix['fn']}"
     )
 
 
