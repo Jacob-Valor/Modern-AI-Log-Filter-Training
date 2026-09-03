@@ -18,9 +18,7 @@ class CIDRAllowlist:
     @classmethod
     def from_csv(cls, value: str) -> CIDRAllowlist:
         networks = tuple(
-            ip_network(item.strip(), strict=False)
-            for item in value.split(",")
-            if item.strip()
+            ip_network(item.strip(), strict=False) for item in value.split(",") if item.strip()
         )
         if not networks:
             raise ValueError("CIDR allowlist must contain at least one network")

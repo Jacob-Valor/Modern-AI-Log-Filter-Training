@@ -55,9 +55,7 @@ def test_prometheus_exporter_scrapes_have_matching_compose_services() -> None:
     assert services["elasticsearch-exporter"]["image"].startswith(
         "quay.io/prometheuscommunity/elasticsearch-exporter:"
     )
-    assert jobs["elasticsearch"]["static_configs"][0]["targets"] == [
-        "elasticsearch-exporter:9114"
-    ]
+    assert jobs["elasticsearch"]["static_configs"][0]["targets"] == ["elasticsearch-exporter:9114"]
     assert "elasticsearch-exporter" in services["prometheus"]["depends_on"]
 
 

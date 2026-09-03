@@ -183,9 +183,10 @@ def test_tcp_connection_slots_reject_when_full() -> None:
 
     connection = FakeTCPConnection([])
 
-    assert collector._start_tcp_client_if_slot_available(
-        cast(socket.socket, connection), "10.0.0.5"
-    ) is None
+    assert (
+        collector._start_tcp_client_if_slot_available(cast(socket.socket, connection), "10.0.0.5")
+        is None
+    )
     assert connection.closed is True
 
 
@@ -331,6 +332,7 @@ def _reset_collector_counters() -> None:
         _collector_published_total,
         _collector_received_total,
     )
+
     for c in (_collector_received_total, _collector_published_total):
         c._metrics.clear()
     _collector_dropped_total._metrics.clear()

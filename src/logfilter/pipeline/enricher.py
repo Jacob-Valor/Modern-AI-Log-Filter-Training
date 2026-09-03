@@ -162,9 +162,7 @@ class LEEFEnricher:
         attr_string = _LEEF_ATTR_SEP.join(f"{k}={v}" for k, v in attrs.items() if v)
         return header + attr_string
 
-    def enrich_batch(
-        self, scored_events: list[ScoredEvent], es_doc_ids: list[str]
-    ) -> list[str]:
+    def enrich_batch(self, scored_events: list[ScoredEvent], es_doc_ids: list[str]) -> list[str]:
         """Enrich a batch of events. es_doc_ids must match scored_events length (B8)."""
         if len(es_doc_ids) != len(scored_events):
             raise ValueError(

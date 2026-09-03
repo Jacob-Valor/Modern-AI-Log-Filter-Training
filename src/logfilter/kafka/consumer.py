@@ -80,8 +80,8 @@ class ArchiveConsumer:
         """Signal the run loop to exit after the current poll cycle."""
         self._stop_event.set()
 
-    def _index_name(self) -> str:
-        date_str = time.strftime("%Y.%m.%d")
+    def _index_name(self, ingest_ts: float) -> str:
+        date_str = time.strftime("%Y.%m.%d", time.gmtime(ingest_ts))
         return f"{self.index_prefix}-{date_str}"
 
     def run(self) -> None:
@@ -125,10 +125,11 @@ class ArchiveConsumer:
                                 payload = msg.value
                                 original_messages.append(payload)
                                 raw = str(payload.get("raw", ""))
+                                ingest_ts = float(payload.get("ingest_ts", time.time()))
                                 bulk_body.append(
                                     {
                                         "index": {
-                                            "_index": self._index_name(),
+                                            "_index": self._index_name(ingest_ts),
                                             "_id": compute_kafka_raw_log_ref(
                                                 self.raw_topic,
                                                 msg.partition,
@@ -142,7 +143,7 @@ class ArchiveConsumer:
                                         "raw": redact(raw, config=self._redaction_config),
                                         "source_type": payload.get("source_type", "generic"),
                                         "host": payload.get("host", "unknown"),
-                                        "ingest_ts": payload.get("ingest_ts", time.time()),
+                                        "ingest_ts": ingest_ts,
                                         "kafka_offset": msg.offset,
                                         "kafka_partition": msg.partition,
                                     }
@@ -170,9 +171,7 @@ class ArchiveConsumer:
                             logger.debug("Archived to ES", n=n, total=archived_total)
                         except Exception as exc:  # noqa: BLE001
                             telemetry.record_exception(span, exc)
-                            logger.error(
-                                "ES bulk write failed; sending to DLQ", error=str(exc)
-                            )
+                            logger.error("ES bulk write failed; sending to DLQ", error=str(exc))
                             if self._dlq_producer:
                                 for original in original_messages:
                                     retry_count = original.get("_dlq_retry_count", 0) + 1

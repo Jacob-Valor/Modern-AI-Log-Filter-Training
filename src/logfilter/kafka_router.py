@@ -20,7 +20,8 @@ from logfilter import telemetry
 from logfilter.config import load_config
 from logfilter.kafka.config import kafka_security_kwargs
 from logfilter.kafka.producer import LogProducer
-from logfilter.pipeline.router import SyslogSender
+from logfilter.pipeline.archive import compute_kafka_raw_log_ref
+from logfilter.pipeline.router import RoutingMode, build_qradar_sender, decide_routing
 from logfilter.utils.circuit_breaker import CircuitBreaker
 
 logger = structlog.get_logger(__name__)
@@ -49,6 +50,8 @@ class RouterSettings:
     qradar_host: str
     qradar_port: int
     qradar_protocol: str
+    qradar_mode: str
+    qradar_gateway: dict[str, Any]
     kafka_config: dict[str, Any]
 
 
@@ -78,8 +81,33 @@ def _settings() -> RouterSettings:
         qradar_host=qradar_cfg.get("syslog_host", "localhost"),
         qradar_port=int(qradar_cfg.get("syslog_port", 514)),
         qradar_protocol=qradar_cfg.get("syslog_protocol", "tcp"),
+        qradar_gateway=dict(qradar_cfg.get("gateway", {})),
+        qradar_mode=qradar_cfg.get("mode", "enrich_only"),
         kafka_config=kafka_cfg,
     )
+
+
+class RouteBatchError(RuntimeError):
+    """Routing failed after every event before ``failed_index`` completed."""
+
+    def __init__(self, failed_index: int, message: str) -> None:
+        super().__init__(message)
+        self.failed_index = failed_index
+
+
+def _event_with_archive_ref(message: Any) -> dict[str, Any]:
+    """Copy one Kafka payload and attach its replay-stable archive reference."""
+    event = (
+        dict(message.value)
+        if isinstance(message.value, dict)
+        else {"raw": str(message.value), "source_type": "generic"}
+    )
+    event["raw_log_ref"] = compute_kafka_raw_log_ref(
+        str(message.topic),
+        int(message.partition),
+        int(message.offset),
+    )
+    return event
 
 
 class KafkaQRadarRouter:
@@ -88,10 +116,13 @@ class KafkaQRadarRouter:
     def __init__(self, settings: RouterSettings) -> None:
         self.settings = settings
         self.running = True
-        self.sender = SyslogSender(
-            host=settings.qradar_host,
-            port=settings.qradar_port,
-            protocol=settings.qradar_protocol,
+        self.sender = build_qradar_sender(
+            {
+                "syslog_host": settings.qradar_host,
+                "syslog_port": settings.qradar_port,
+                "syslog_protocol": settings.qradar_protocol,
+                "gateway": settings.qradar_gateway,
+            }
         )
         self.http = httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0))
         self.consumer = KafkaConsumer(
@@ -140,6 +171,7 @@ class KafkaQRadarRouter:
                         {
                             "raw": str(event.get("raw", "")),
                             "source_type": event.get("source_type"),
+                            "raw_log_ref": event.get("raw_log_ref"),
                         }
                         for event in events
                     ]
@@ -184,27 +216,43 @@ class KafkaQRadarRouter:
         ) as span:
             token = telemetry.attach_span_context(span, self._current_batch_context)
             try:
-                for scored in scored_events:
-                    leef = scored.get("leef_payload", "")
-                    priority = scored.get("ai_priority", "INFO")
-                    if not leef:
-                        raise RuntimeError("Scoring API response missing leef_payload")
-                    with telemetry.start_as_current_span(
-                        "router.qradar.send",
-                        {
-                            "logfilter.priority": priority,
-                            "server.address": self.settings.qradar_host,
-                            "server.port": self.settings.qradar_port,
-                            "network.transport": self.settings.qradar_protocol,
-                        },
-                    ):
-                        self.sender.send(leef, priority)
-                    self.producer.send(
-                        self.settings.scored_topic,
-                        value=scored,
-                        key=scored.get("host", "unknown"),
-                        headers=telemetry.inject_kafka_headers(span=span),
-                    )
+                mode = RoutingMode(self.settings.qradar_mode)
+                for index, scored in enumerate(scored_events):
+                    try:
+                        leef = scored.get("leef_payload", "")
+                        priority = scored.get("ai_priority", "INFO")
+                        if not leef:
+                            raise RuntimeError("Scoring API response missing leef_payload")
+                        decision = decide_routing(
+                            mode,
+                            priority,
+                            float(scored.get("ai_threat_score", 0.0)),
+                        )
+                        scored["qradar_forwarded"] = decision.forward_to_qradar
+                        scored["qradar_routing_reason"] = decision.reason
+                        if decision.forward_to_qradar:
+                            with telemetry.start_as_current_span(
+                                "router.qradar.send",
+                                {
+                                    "logfilter.priority": priority,
+                                    "server.address": self.settings.qradar_host,
+                                    "server.port": self.settings.qradar_port,
+                                    "network.transport": self.settings.qradar_protocol,
+                                },
+                            ):
+                                self.sender.send(
+                                    leef,
+                                    priority,
+                                    event_id=scored.get("raw_log_ref"),
+                                )
+                        self.producer.send(
+                            self.settings.scored_topic,
+                            value=scored,
+                            key=scored.get("raw_log_ref") or scored.get("host", "unknown"),
+                            headers=telemetry.inject_kafka_headers(span=span),
+                        )
+                    except Exception as exc:
+                        raise RouteBatchError(index, str(exc)) from exc
                 self.producer.flush(timeout=30)
             except Exception as exc:
                 telemetry.record_exception(span, exc)
@@ -230,10 +278,7 @@ class KafkaQRadarRouter:
                             self._current_batch_context = telemetry.extract_kafka_context(
                                 getattr(msg, "headers", None)
                             )
-                        if isinstance(msg.value, dict):
-                            batch.append(msg.value)
-                        else:
-                            batch.append({"raw": str(msg.value), "source_type": "generic"})
+                        batch.append(_event_with_archive_ref(msg))
 
                 if not batch:
                     continue
@@ -256,9 +301,16 @@ class KafkaQRadarRouter:
                         logger.info("Batch routed", count=len(scored))
                     except Exception as exc:  # noqa: BLE001
                         telemetry.record_exception(span, exc)
-                        logger.error("Batch routing failed; sending to DLQ", error=str(exc))
+                        failed_index = exc.failed_index if isinstance(exc, RouteBatchError) else 0
+                        failed_events = batch[failed_index:]
+                        logger.error(
+                            "Batch routing failed; sending unfinished suffix to DLQ",
+                            error=str(exc),
+                            completed=failed_index,
+                            failed=len(failed_events),
+                        )
                         if self.dlq_producer:
-                            for event in batch:
+                            for event in failed_events:
                                 retry_count = event.get("_dlq_retry_count", 0) + 1
                                 self.dlq_producer.send_dlq(
                                     original_message=event,

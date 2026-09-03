@@ -219,16 +219,24 @@ def test_setup_tracing_with_otel_available(monkeypatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
     fake_resource = type("Resource", (), {"create": staticmethod(lambda d: d)})()
-    fake_provider = type("TracerProvider", (), {
-        "add_span_processor": lambda self, p: None,
-        "resource": None,
-    })()
+    fake_provider = type(
+        "TracerProvider",
+        (),
+        {
+            "add_span_processor": lambda self, p: None,
+            "resource": None,
+        },
+    )()
     fake_exporter = type("OTLPSpanExporter", (), {})()
     fake_processor = type("BatchSpanProcessor", (), {})()
-    fake_trace = type("trace", (), {
-        "set_tracer_provider": lambda p: None,
-        "set_span_in_context": lambda span, context=None: None,
-    })()
+    fake_trace = type(
+        "trace",
+        (),
+        {
+            "set_tracer_provider": lambda p: None,
+            "set_span_in_context": lambda span, context=None: None,
+        },
+    )()
     fake_propagate = type(
         "propagate", (), {"inject": lambda *a, **k: None, "extract": lambda *a, **k: None}
     )()
@@ -365,21 +373,29 @@ def test_start_as_current_span_with_otel_and_exception(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "_TRACING_INITIALIZED", False)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
-    fake_span = type("Span", (), {
-        "set_attribute": lambda self, k, v: None,
-        "set_attributes": lambda self, d: None,
-        "record_exception": lambda self, e: None,
-        "set_status": lambda self, s: None,
-        "__enter__": lambda self: self,
-        "__exit__": lambda self, *a: None,
-    })()
+    fake_span = type(
+        "Span",
+        (),
+        {
+            "set_attribute": lambda self, k, v: None,
+            "set_attributes": lambda self, d: None,
+            "record_exception": lambda self, e: None,
+            "set_status": lambda self, s: None,
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: None,
+        },
+    )()
 
     class FakeTracer:
         def start_as_current_span(self, name, context=None):
-            return type("CtxMgr", (), {
-                "__enter__": lambda self: fake_span,
-                "__exit__": lambda self, *a: None,
-            })()
+            return type(
+                "CtxMgr",
+                (),
+                {
+                    "__enter__": lambda self: fake_span,
+                    "__exit__": lambda self, *a: None,
+                },
+            )()
 
     fake_trace = type(
         "trace", (), {"get_tracer": lambda name, instrumenting_module_version=None: FakeTracer()}

@@ -40,6 +40,11 @@ class ScoredEvent:
 
     # Final score components
     classifier_score: float = 0.0
+    flow_score: float = 0.0
+    bot_score: float = 0.0
+    ddos_window_score: float = 0.0
+    endpoint_score: float = 0.0
+    http_score: float = 0.0
     tier2_score: float = 0.0
     tier2_used: bool = False
     entity_boost: float = 0.0
@@ -78,6 +83,11 @@ class ScoredEvent:
             "entities": self.entities,
             "cross_encoder_scores": self.cross_encoder_scores,
             "classifier_score": round(self.classifier_score, 4),
+            "flow_score": round(self.flow_score, 4),
+            "bot_score": round(self.bot_score, 4),
+            "ddos_window_score": round(self.ddos_window_score, 4),
+            "endpoint_score": round(self.endpoint_score, 4),
+            "http_score": round(self.http_score, 4),
             "tier2_score": round(self.tier2_score, 4),
             "tier2_used": self.tier2_used,
             "entity_boost": round(self.entity_boost, 4),
@@ -89,5 +99,6 @@ class ScoredEvent:
             "ai_mitre_technique": self.ai_mitre_technique,
             "ai_confidence": round(self.ai_confidence, 4),
             "ai_entities": self.ai_entities,
+            "score_degraded": self.score_degraded,
             "scoring_latency_ms": round(self.scoring_latency_ms, 2),
         }

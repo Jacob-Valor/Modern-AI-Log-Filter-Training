@@ -435,6 +435,7 @@ class SyslogCollector:
     def _drain_spool(self) -> int:
         if self._spool is None:
             return 0
+
         def _replay(record: dict[str, Any]) -> None:
             self.producer.send(
                 raw_log=record["raw"],
@@ -442,6 +443,7 @@ class SyslogCollector:
                 host=record.get("host", "unknown"),
                 metadata=record.get("metadata", {}),
             )
+
         replayed = self._spool.drain(_replay)
         if replayed:
             logger.info("Replayed spooled events", replayed=replayed)
@@ -468,9 +470,7 @@ class SyslogCollector:
             threading.Thread(target=self.serve_tcp, daemon=True),
         ]
         if self._spool is not None:
-            threads.append(
-                threading.Thread(target=self._spool_drain_loop, daemon=True)
-            )
+            threads.append(threading.Thread(target=self._spool_drain_loop, daemon=True))
         for thread in threads:
             thread.start()
 

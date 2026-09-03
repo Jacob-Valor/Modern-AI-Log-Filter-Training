@@ -133,9 +133,7 @@ def test_kafka_security_kwargs_security_not_mapping() -> None:
 
 def test_kafka_security_kwargs_sasl_not_mapping() -> None:
     with pytest.raises(ValueError, match="sasl must be a mapping"):
-        kafka_security_kwargs(
-            {"security": {"protocol": "SASL_PLAINTEXT", "sasl": "bad"}}
-        )
+        kafka_security_kwargs({"security": {"protocol": "SASL_PLAINTEXT", "sasl": "bad"}})
 
 
 def test_kafka_security_kwargs_ssl_not_mapping() -> None:
@@ -145,9 +143,7 @@ def test_kafka_security_kwargs_ssl_not_mapping() -> None:
 
 def test_kafka_security_kwargs_sasl_missing_mechanism() -> None:
     with pytest.raises(ValueError, match="mechanism"):
-        kafka_security_kwargs(
-            {"security": {"protocol": "SASL_PLAINTEXT", "sasl": {}}}
-        )
+        kafka_security_kwargs({"security": {"protocol": "SASL_PLAINTEXT", "sasl": {}}})
 
 
 def test_kafka_security_kwargs_sasl_plain_missing_password() -> None:

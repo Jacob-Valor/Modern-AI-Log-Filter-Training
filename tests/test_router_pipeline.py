@@ -22,16 +22,16 @@ def _scored(priority: str = "HIGH", score: float = 0.9) -> ScoredEvent:
 class FakeSender:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
-        self.sent: list[tuple[str, str]] = []
+        self.sent: list[tuple[str, str, str | None]] = []
         self.closed = False
 
-    def send(self, message: str, priority: str) -> None:
+    def send(self, message: str, priority: str, *, event_id: str | None = None) -> None:
         if self.fail:
             raise OSError("send failed")
-        self.sent.append((message, priority))
+        self.sent.append((message, priority, event_id))
 
     def send_batch(self, messages: list[tuple[str, str]]) -> int:
-        self.sent.extend(messages)
+        self.sent.extend((message, priority, None) for message, priority in messages)
         return len(messages)
 
     def close(self) -> None:
@@ -45,7 +45,7 @@ def test_route_forwards_in_enrich_only_mode() -> None:
     decision = router.route("leef", _scored("INFO", 0.01))
 
     assert decision.forward_to_qradar
-    assert sender.sent == [("leef", "INFO")]
+    assert sender.sent == [("leef", "INFO", None)]
 
 
 def test_route_suppresses_info_in_suppress_low_mode() -> None:
@@ -76,7 +76,7 @@ def test_route_batch_sends_only_forwarded_events() -> None:
     )
 
     assert [decision.forward_to_qradar for decision in decisions] == [False, True]
-    assert sender.sent == [("high", "HIGH")]
+    assert sender.sent == [("high", "HIGH", None)]
 
 
 def test_router_close_closes_sender() -> None:

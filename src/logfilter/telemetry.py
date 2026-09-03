@@ -105,8 +105,8 @@ def setup_tracing(service_name: str | None = None, endpoint: str | None = None) 
     if not OTEL_AVAILABLE:
         return False
 
-    resolved_endpoint = endpoint if endpoint is not None else os.environ.get(
-        "OTEL_EXPORTER_OTLP_ENDPOINT"
+    resolved_endpoint = (
+        endpoint if endpoint is not None else os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     )
     if not resolved_endpoint:
         return False
@@ -222,7 +222,6 @@ if OTEL_AVAILABLE:
             carrier[:] = [(k, v) for k, v in carrier if k.lower() != key.lower()]
             carrier.append((key, encoded))
 
-
     class _KafkaHeaderGetter:
         def get(self, carrier: list[tuple[str, bytes]], key: str) -> list[str] | None:
             values = [
@@ -234,7 +233,6 @@ if OTEL_AVAILABLE:
 
         def keys(self, carrier: list[tuple[str, bytes]]) -> list[str]:
             return [key for key, _ in carrier]
-
 
     _kafka_setter = _KafkaHeaderSetter()
     _kafka_getter = _KafkaHeaderGetter()

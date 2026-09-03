@@ -220,8 +220,7 @@ class LogArchive:
             host = str(event.get("host", "unknown"))
             ingest_ts = float(event.get("ingest_ts", time.time()))
             doc_id = str(
-                event.get("raw_log_ref")
-                or compute_raw_log_ref(raw, source_type, host, ingest_ts)
+                event.get("raw_log_ref") or compute_raw_log_ref(raw, source_type, host, ingest_ts)
             )
             doc = {
                 "_index": self._index_for_ts(ingest_ts),
@@ -258,8 +257,7 @@ class LogArchive:
                     failure_count=failure_count,
                 )
                 raise BulkArchiveError(
-                    f"{failure_count} bulk archive operation(s) failed; "
-                    "raw logs were not persisted"
+                    f"{failure_count} bulk archive operation(s) failed; raw logs were not persisted"
                 )
             logger.debug(
                 "ES bulk create conflicts ignored (already archived)", conflicts=conflict_count

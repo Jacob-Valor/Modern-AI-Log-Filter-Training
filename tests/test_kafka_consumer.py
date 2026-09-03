@@ -67,6 +67,7 @@ def test_archive_consumer_writes_bulk_and_commits() -> None:
     assert fake.commits == 1
     assert fake.closed
     assert es.bulk_calls[0][1]["raw"] == "raw"
+    assert es.bulk_calls[0][0]["index"]["_index"] == "raw-logs-1970.01.01"
 
 
 def test_archive_consumer_redacts_raw_and_uses_kafka_offset_document_id(monkeypatch) -> None:
@@ -102,9 +103,7 @@ def test_archive_consumer_redacts_raw_and_uses_kafka_offset_document_id(monkeypa
     with pytest.raises(KeyboardInterrupt):
         consumer.run()
 
-    assert es.bulk_calls[0][0]["index"]["_id"] == compute_kafka_raw_log_ref(
-        "raw-logs", 2, 7
-    )
+    assert es.bulk_calls[0][0]["index"]["_id"] == compute_kafka_raw_log_ref("raw-logs", 2, 7)
     assert es.bulk_calls[0][1]["raw"] == "email=<EMAIL> password=<REDACTED>"
 
 
@@ -256,12 +255,14 @@ def test_archive_consumer_sends_to_dlq_on_bulk_failure() -> None:
             self.dlq_sent: list[dict] = []
 
         def send_dlq(self, original_message, error, original_topic, retry_count=0):
-            self.dlq_sent.append({
-                "original_message": original_message,
-                "error": error,
-                "original_topic": original_topic,
-                "retry_count": retry_count,
-            })
+            self.dlq_sent.append(
+                {
+                    "original_message": original_message,
+                    "error": error,
+                    "original_topic": original_topic,
+                    "retry_count": retry_count,
+                }
+            )
 
     dlq = FakeDLQProducer()
     consumer = ArchiveConsumer(
@@ -308,12 +309,14 @@ def test_scorer_consumer_sends_to_dlq_on_score_failure() -> None:
             self.dlq_sent: list[dict] = []
 
         def send_dlq(self, original_message, error, original_topic, retry_count=0):
-            self.dlq_sent.append({
-                "original_message": original_message,
-                "error": error,
-                "original_topic": original_topic,
-                "retry_count": retry_count,
-            })
+            self.dlq_sent.append(
+                {
+                    "original_message": original_message,
+                    "error": error,
+                    "original_topic": original_topic,
+                    "retry_count": retry_count,
+                }
+            )
 
     dlq = FakeDLQProducer()
     consumer = ScorerConsumer(

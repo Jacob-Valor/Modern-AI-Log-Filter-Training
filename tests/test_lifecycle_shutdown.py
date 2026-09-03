@@ -52,17 +52,13 @@ class TestApiLifespanCleanup:
         lifespan_block = _extract_lifespan_shutdown(_APP_SRC)
         assert "redis" in lifespan_block.lower() and (
             "close" in lifespan_block.lower() or "aclose" in lifespan_block.lower()
-        ), (
-            "Lifespan shutdown must close the redis client to release connections"
-        )
+        ), "Lifespan shutdown must close the redis client to release connections"
 
     def test_lifespan_closes_archiver(self) -> None:
         lifespan_block = _extract_lifespan_shutdown(_APP_SRC)
         assert "archiver" in lifespan_block.lower() and (
             "close" in lifespan_block.lower() or "aclose" in lifespan_block.lower()
-        ), (
-            "Lifespan shutdown must close the ES archiver to release connections"
-        )
+        ), "Lifespan shutdown must close the ES archiver to release connections"
 
 
 class TestCollectorThreadJoin:

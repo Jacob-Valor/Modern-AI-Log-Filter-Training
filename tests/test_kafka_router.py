@@ -25,6 +25,8 @@ def _settings() -> kafka_router.RouterSettings:
         qradar_host="qradar",
         qradar_port=514,
         qradar_protocol="tcp",
+        qradar_gateway={},
+        qradar_mode="enrich_only",
         kafka_config={},
     )
 
@@ -59,8 +61,8 @@ class FakeSender:
         self.sent = []
         self.closed = False
 
-    def send(self, leef: str, priority: str) -> None:
-        self.sent.append((leef, priority))
+    def send(self, leef: str, priority: str, *, event_id: str | None = None) -> None:
+        self.sent.append((leef, priority, event_id))
 
     def close(self) -> None:
         self.closed = True
@@ -128,7 +130,7 @@ class FakeDLQConsumer:
 def fake_router(monkeypatch):
     FakeKafkaProducer.instances = []
     FakeKafkaConsumer.instances = []
-    monkeypatch.setattr(kafka_router, "SyslogSender", FakeSender)
+    monkeypatch.setattr(kafka_router, "build_qradar_sender", lambda config: FakeSender())
     monkeypatch.setattr(kafka_router, "KafkaProducer", FakeKafkaProducer)
     monkeypatch.setattr(kafka_router, "KafkaConsumer", FakeKafkaConsumer)
     monkeypatch.setattr(kafka_router.httpx, "Client", lambda *args, **kwargs: FakeHTTPClient())
@@ -155,7 +157,12 @@ def test_settings_reads_config_and_environment(monkeypatch) -> None:
                 "topics": {"raw_logs": "raw", "scored_logs": "scored"},
                 "security": {"protocol": "SSL", "ssl": {"cafile": "/etc/kafka/ca.pem"}},
             },
-            "qradar": {"syslog_host": "qradar", "syslog_port": 1514, "syslog_protocol": "udp"},
+            "qradar": {
+                "syslog_host": "qradar",
+                "syslog_port": 1514,
+                "syslog_protocol": "udp",
+                "mode": "suppress_low",
+            },
         },
     )
 
@@ -164,6 +171,7 @@ def test_settings_reads_config_and_environment(monkeypatch) -> None:
     assert settings.api_token == "env-token"
     assert settings.api_url == "http://api"
     assert settings.qradar_port == 1514
+    assert settings.qradar_mode == "suppress_low"
     assert settings.consumer_group == "logfilter-router"
     assert settings.auto_offset_reset == "earliest"
     assert settings.kafka_config["security"]["protocol"] == "SSL"
@@ -195,7 +203,7 @@ def test_router_consumer_uses_settings_offset_reset(fake_router) -> None:
 def test_router_passes_kafka_security_config(monkeypatch) -> None:
     FakeKafkaProducer.instances = []
     FakeKafkaConsumer.instances = []
-    monkeypatch.setattr(kafka_router, "SyslogSender", FakeSender)
+    monkeypatch.setattr(kafka_router, "build_qradar_sender", lambda config: FakeSender())
     monkeypatch.setattr(kafka_router, "KafkaProducer", FakeKafkaProducer)
     monkeypatch.setattr(kafka_router, "KafkaConsumer", FakeKafkaConsumer)
     monkeypatch.setattr(kafka_router.httpx, "Client", lambda *args, **kwargs: FakeHTTPClient())
@@ -212,7 +220,7 @@ def test_router_passes_kafka_security_config(monkeypatch) -> None:
                 },
                 "ssl": {"cafile": "/etc/kafka/ca.pem"},
             }
-        }
+        },
     )
 
     kafka_router.KafkaQRadarRouter(settings)
@@ -232,10 +240,11 @@ def test_score_batch_posts_api_token(fake_router) -> None:
 
     assert results == [{"leef_payload": "leef", "ai_priority": "HIGH"}]
     assert fake_router.http.posts[0][1]["headers"]["X-API-Token"] == "token"
+    assert fake_router.http.posts[0][1]["json"]["events"][0]["raw_log_ref"] is None
 
 
 def test_score_batch_rejects_result_count_mismatch(monkeypatch) -> None:
-    monkeypatch.setattr(kafka_router, "SyslogSender", FakeSender)
+    monkeypatch.setattr(kafka_router, "build_qradar_sender", lambda config: FakeSender())
     monkeypatch.setattr(kafka_router, "KafkaProducer", FakeKafkaProducer)
     monkeypatch.setattr(kafka_router, "KafkaConsumer", FakeKafkaConsumer)
     monkeypatch.setattr(
@@ -250,11 +259,75 @@ def test_score_batch_rejects_result_count_mismatch(monkeypatch) -> None:
 
 
 def test_route_scored_sends_leef_and_publishes(fake_router) -> None:
-    fake_router._route_scored([{"leef_payload": "leef", "ai_priority": "HIGH", "host": "host"}])
+    fake_router._route_scored(
+        [
+            {
+                "leef_payload": "leef",
+                "ai_priority": "HIGH",
+                "host": "host",
+                "raw_log_ref": "a" * 64,
+            }
+        ]
+    )
 
-    assert fake_router.sender.sent == [("leef", "HIGH")]
+    assert fake_router.sender.sent == [("leef", "HIGH", "a" * 64)]
     assert fake_router.producer.sent[0][0][0] == "scored-logs"
     assert fake_router.producer.flushed
+
+
+def test_suppress_low_publishes_without_forwarding_to_qradar(fake_router) -> None:
+    fake_router.settings = replace(fake_router.settings, qradar_mode="suppress_low")
+
+    fake_router._route_scored(
+        [
+            {
+                "leef_payload": "leef",
+                "ai_priority": "INFO",
+                "ai_threat_score": 0.1,
+                "host": "host",
+            }
+        ]
+    )
+
+    assert fake_router.sender.sent == []
+    assert fake_router.producer.sent[0][1]["value"]["qradar_forwarded"] is False
+
+
+def test_route_error_identifies_only_unfinished_suffix(fake_router) -> None:
+    calls = 0
+
+    def fail_second(leef: str, priority: str, *, event_id: str | None = None) -> None:
+        nonlocal calls
+        del leef, priority, event_id
+        calls += 1
+        if calls == 2:
+            raise OSError("qradar unavailable")
+
+    fake_router.sender.send = fail_second
+    scored = [
+        {"leef_payload": "first", "ai_priority": "HIGH", "host": "one"},
+        {"leef_payload": "second", "ai_priority": "HIGH", "host": "two"},
+        {"leef_payload": "third", "ai_priority": "HIGH", "host": "three"},
+    ]
+
+    with pytest.raises(kafka_router.RouteBatchError) as exc_info:
+        fake_router._route_scored(scored)
+
+    assert exc_info.value.failed_index == 1
+    assert len(fake_router.producer.sent) == 1
+
+
+def test_kafka_event_receives_replay_stable_archive_reference() -> None:
+    message = SimpleNamespace(
+        value={"raw": "raw", "source_type": "syslog"},
+        topic="raw-logs",
+        partition=2,
+        offset=7,
+    )
+
+    event = kafka_router._event_with_archive_ref(message)
+
+    assert event["raw_log_ref"] == kafka_router.compute_kafka_raw_log_ref("raw-logs", 2, 7)
 
 
 def test_route_scored_requires_leef_payload(fake_router) -> None:
