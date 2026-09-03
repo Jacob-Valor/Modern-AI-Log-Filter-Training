@@ -14,16 +14,101 @@ Supported input formats:
 
 from __future__ import annotations
 
+import importlib
 import json
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-import structlog
+import structlog  # type: ignore[import-not-found]
+
+from logfilter.security.redaction import redact
+
+_http_features: Any = importlib.import_module("logfilter.pipeline.http_features")
 
 logger = structlog.get_logger(__name__)
+
+_MAX_MODEL_BODY_CHARS = 8192
+_SENSITIVE_BODY_KEYS = re.compile(
+    r"password|passwd|secret|token|authorization|cookie|api[_-]?key|session", re.IGNORECASE
+)
+
+
+def _redact_structured(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "<REDACTED>" if _SENSITIVE_BODY_KEYS.search(str(key)) else _redact_structured(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structured(item) for item in value[:100]]
+    return value
+
+
+def _redact_body_text(value: str) -> str:
+    redacted = redact(value)
+    redacted = re.sub(
+        r"(?i)(authorization\s*[:=]\s*)[^\r\n,}&]+",
+        r"\1<REDACTED>",
+        redacted,
+    )
+    return re.sub(
+        r"(?i)([\"']?(?:password|passwd|secret|token|authorization|cookie|"
+        r"api[_-]?key|session)[\"']?\s*(?::|=|\s)\s*)[\"']?[^&,\s}\"']+",
+        r"\1<REDACTED>",
+        redacted,
+    )
+
+
+def _safe_uri(value: str) -> str:
+    """Return a decoded URI with sensitive query parameter values removed."""
+    raw = value[:16384]
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=100)
+    except ValueError:
+        return urllib.parse.unquote(raw.split("?", 1)[0])[:4096]
+    safe_query = "&".join(
+        f"{urllib.parse.unquote_plus(key)}="
+        f"{'<REDACTED>' if _SENSITIVE_BODY_KEYS.search(key) else urllib.parse.unquote_plus(item)}"
+        for key, item in pairs
+    )
+    decoded_path = urllib.parse.unquote(parsed.path or "/")
+    rendered = decoded_path + (f"?{safe_query}" if safe_query else "")
+    return rendered[:4096]
+
+
+def _safe_request_body(value: Any, content_type: str) -> str:
+    lowered_type = content_type.lower()
+    allowed = ("application/json", "application/x-www-form-urlencoded", "text/")
+    if isinstance(value, (dict, list)):
+        rendered = json.dumps(_redact_structured(value), ensure_ascii=False, separators=(",", ":"))
+    elif not any(marker in lowered_type for marker in allowed):
+        return ""
+    elif "application/json" in lowered_type:
+        try:
+            parsed = json.loads(str(value))
+        except (json.JSONDecodeError, TypeError):
+            rendered = _redact_body_text(str(value))
+        else:
+            rendered = json.dumps(
+                _redact_structured(parsed), ensure_ascii=False, separators=(",", ":")
+            )
+    elif "application/x-www-form-urlencoded" in lowered_type:
+        pairs = urllib.parse.parse_qsl(str(value), keep_blank_values=True, max_num_fields=100)
+        safe_pairs = [
+            (key, "<REDACTED>" if _SENSITIVE_BODY_KEYS.search(key) else item) for key, item in pairs
+        ]
+        rendered = urllib.parse.urlencode(safe_pairs)
+    else:
+        rendered = _redact_body_text(str(value))
+    return rendered[:_MAX_MODEL_BODY_CHARS]
+
 
 # ── RFC 3164 syslog regex ─────────────────────────────────────────────────────
 _SYSLOG_3164 = re.compile(
@@ -149,6 +234,7 @@ class LogNormalizer:
         parsers = [
             (LogSourceType.WINEVENT, self._try_winevent),
             (LogSourceType.CLOUDTRAIL, self._try_cloudtrail),
+            (LogSourceType.FIREWALL, self._try_waf_json),
             (LogSourceType.ENDPOINT, self._try_endpoint),
             (LogSourceType.FIREWALL, self._try_cef),
             (LogSourceType.WEB, self._try_apache),
@@ -222,7 +308,7 @@ class LogNormalizer:
             return None
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return None
 
         # Support NXLog schema and direct WEF schema
@@ -253,6 +339,104 @@ class LogNormalizer:
             text=text.strip(),
             raw=raw,
             fields={"event_id": str(event_id), "host": str(host), "user": str(user)},
+        )
+
+    # ── Structured WAF JSON ────────────────────────────────────────────────────
+    def _try_waf_json(self, raw: str) -> NormalizedEvent | None:
+        if not raw.startswith("{"):
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        transaction = data.get("transaction")
+        transaction = transaction if isinstance(transaction, dict) else {}
+        request = transaction.get("request") or data.get("request") or data.get("httpRequest")
+        request = request if isinstance(request, dict) else {}
+        marker = " ".join(
+            str(data.get(key, "")) for key in ("event_type", "type", "producer", "service")
+        ).lower()
+        if not request or not (
+            transaction
+            or "waf" in marker
+            or any(key in data for key in ("ruleId", "rule_id", "webaclId", "messages"))
+        ):
+            return None
+
+        headers = request.get("headers", {})
+        headers = headers if isinstance(headers, dict) else {}
+        content_type = str(
+            headers.get("content-type")
+            or headers.get("Content-Type")
+            or request.get("content_type", "")
+        )
+        method = str(request.get("method") or request.get("httpMethod") or "UNKNOWN")
+        uri = str(request.get("uri") or request.get("path") or request.get("requestUri") or "/")
+        decoded_uri = _safe_uri(uri)
+        body_value = request.get("body", data.get("requestBody", ""))
+        body = _safe_request_body(body_value, content_type)
+        http_features = _http_features.extract_http_features(uri, body_value)
+        http_score = _http_features.http_lexical_score(http_features)
+
+        messages = data.get("messages", [])
+        first_message = messages[0] if isinstance(messages, list) and messages else {}
+        first_message = first_message if isinstance(first_message, dict) else {}
+        details = first_message.get("details", {})
+        details = details if isinstance(details, dict) else {}
+        rule_id = str(
+            data.get("ruleId")
+            or data.get("rule_id")
+            or details.get("ruleId")
+            or first_message.get("rule_id")
+            or ""
+        )
+        response = transaction.get("response", {})
+        response = response if isinstance(response, dict) else {}
+        action = str(data.get("action") or response.get("http_code", ""))
+        source_ip = str(
+            request.get("clientIp")
+            or transaction.get("client_ip")
+            or data.get("source_ip")
+            or "unknown"
+        )
+        host = str(
+            request.get("host")
+            or headers.get("host")
+            or headers.get("Host")
+            or transaction.get("host_ip")
+            or "unknown"
+        )
+        timestamp = str(
+            transaction.get("time_stamp")
+            or data.get("timestamp")
+            or data.get("@timestamp")
+            or datetime.now(timezone.utc).isoformat()
+        )
+        summary = f"WAF {action} {method} {decoded_uri} rule {rule_id} src {source_ip}"
+        if body:
+            summary = f"{summary} body {body}"
+        fields = {
+            "src_ip": source_ip,
+            "method": method,
+            "uri": decoded_uri,
+            "action": action,
+            "rule_id": rule_id,
+            "content_type": content_type,
+            "request_body_redacted": body,
+            "request_body_truncated": bool(body and len(str(body_value)) > len(body)),
+            "http_lexical_features": http_features,
+            "http_lexical_score": http_score,
+        }
+        return NormalizedEvent(
+            source_type=LogSourceType.FIREWALL,
+            timestamp=timestamp,
+            host=host,
+            text=summary.strip(),
+            raw=raw,
+            fields=fields,
         )
 
     # ── CEF (firewall / IDS) ───────────────────────────────────────────────────
@@ -293,13 +477,16 @@ class LogNormalizer:
             return None
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return None
 
         # Require at least one endpoint-specific key
         endpoint_keys = {
             "ProcessName",
             "process_name",
+            "processName",
+            "processId",
+            "eventName",
             "ParentProcessName",
             "ImageFileName",
             "CommandLine",
@@ -310,14 +497,29 @@ class LogNormalizer:
         if not endpoint_keys.intersection(data.keys()):
             return None
 
-        host = data.get("ComputerName") or data.get("hostname") or data.get("host", "unknown")
-        process = (
-            data.get("ProcessName") or data.get("process_name") or data.get("ImageFileName", "")
+        host = (
+            data.get("ComputerName")
+            or data.get("hostname")
+            or data.get("hostName")
+            or data.get("host", "unknown")
         )
-        parent = data.get("ParentProcessName") or data.get("parent_process_name", "")
-        cmdline = data.get("CommandLine") or data.get("command_line", "")
-        user = data.get("UserName") or data.get("user", "")
-        event_type = data.get("event_type") or data.get("EventType", "")
+        process = (
+            data.get("ProcessName")
+            or data.get("process_name")
+            or data.get("processName")
+            or data.get("ImageFileName", "")
+        )
+        parent = (
+            data.get("ParentProcessName")
+            or data.get("parent_process_name")
+            or data.get("parentProcessName")
+            or data.get("parentProcessId", "")
+        )
+        cmdline = redact(
+            str(data.get("CommandLine") or data.get("command_line") or data.get("args", ""))
+        )[:4096]
+        user = data.get("UserName") or data.get("user") or data.get("userId", "")
+        event_type = data.get("event_type") or data.get("EventType") or data.get("eventName", "")
         ts = data.get("@timestamp") or data.get("timestamp", "")
 
         text = (
@@ -336,6 +538,14 @@ class LogNormalizer:
                 "cmdline": cmdline,
                 "user": user,
                 "event_type": event_type,
+                "process_id": data.get("processId", data.get("ProcessId", 0)),
+                "thread_id": data.get("threadId", data.get("ThreadId", 0)),
+                "parent_process_id": data.get("parentProcessId", data.get("ParentProcessId", 0)),
+                "user_id": data.get("userId", data.get("UserId", 0)),
+                "mount_namespace": data.get("mountNamespace", 0),
+                "event_id": data.get("eventId", data.get("EventID", 0)),
+                "args_count": data.get("argsNum", 0),
+                "return_value": data.get("returnValue", 0),
             },
         )
 
@@ -345,7 +555,7 @@ class LogNormalizer:
             return None
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return None
 
         # CloudTrail events have eventSource + eventName
@@ -400,8 +610,15 @@ class LogNormalizer:
         status = d.get("status", "")
         ua = d.get("ua", "")
         ts = d.get("timestamp", "")
+        safe_uri = _safe_uri(uri)
+        d["uri"] = safe_uri
+        d["decoded_uri"] = safe_uri
+        safe_user_agent = redact(ua)
 
-        text = f"Web request {method} {uri} from {src_ip} status {status} user-agent '{ua}'"
+        text = (
+            f"Web request {method} {safe_uri} from {src_ip} status {status} "
+            f"user-agent '{safe_user_agent}'"
+        )
         return NormalizedEvent(
             source_type=LogSourceType.WEB,
             timestamp=ts,

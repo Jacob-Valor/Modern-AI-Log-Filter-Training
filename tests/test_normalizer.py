@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType, normalize
 
@@ -184,6 +184,125 @@ class TestWeb:
         assert ev.source_type == LogSourceType.WEB
         assert "POST" in ev.text
         assert "403" in ev.text
+
+    def test_apache_decodes_percent_encoded_security_payload(self, normalizer):
+        raw = (
+            "192.0.2.1 - - [01/Jan/2010:00:00:00 +0000] "
+            '"GET /search?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E HTTP/1.1" '
+            '200 0 "-" "Mozilla/5.0"'
+        )
+        ev = normalizer.normalize(raw)
+        assert ev.source_type == LogSourceType.WEB
+        assert "<script>alert(1)</script>" in ev.text
+        assert ev.fields["decoded_uri"] == "/search?q=<script>alert(1)</script>"
+
+    def test_apache_query_string_credentials_are_redacted(self, normalizer):
+        raw = (
+            "192.0.2.1 - - [01/Jan/2010:00:00:00 +0000] "
+            '"GET /login?token=VERYSECRET123&next=%2Fadmin HTTP/1.1" '
+            '200 0 "-" "Mozilla/5.0"'
+        )
+        event = normalizer.normalize(raw)
+        assert "VERYSECRET123" not in event.text
+        assert "VERYSECRET123" not in event.fields["uri"]
+        assert "token=<REDACTED>" in event.fields["uri"]
+        assert "next=/admin" in event.fields["uri"]
+
+
+# ── Structured WAF JSON ────────────────────────────────────────────────────────
+
+
+class TestWafJson:
+    def test_modsecurity_post_body_is_redacted_and_model_visible(self, normalizer):
+        raw = json.dumps(
+            {
+                "transaction": {
+                    "time_stamp": "2026-07-30T00:00:00Z",
+                    "client_ip": "192.0.2.50",
+                    "request": {
+                        "method": "POST",
+                        "uri": "/login%3Fnext%3D%2Fadmin",
+                        "headers": {"Host": "app.example", "Content-Type": "application/json"},
+                        "body": {
+                            "username": "admin",
+                            "password": "do-not-expose",
+                            "query": "' OR '1'='1",
+                        },
+                    },
+                },
+                "messages": [{"details": {"ruleId": "942100"}}],
+            }
+        )
+        event = normalizer.normalize(raw)
+        assert event.source_type == LogSourceType.FIREWALL
+        assert event.fields["method"] == "POST"
+        assert event.fields["rule_id"] == "942100"
+        assert "OR" in event.text
+        assert "do-not-expose" not in event.text
+        assert "<REDACTED>" in event.fields["request_body_redacted"]
+
+    @pytest.mark.parametrize(
+        ("content_type", "body"),
+        [
+            ("application/json", '{"password":"secret123","query":"x"}'),
+            ("text/plain", "password secret123 query x"),
+            ("text/plain", "Authorization: Basic dXNlcjpwYXNzd29yZA=="),
+            ("text/plain", "Authorization: Bearer eyJhbGciOiJub25lIn0.payload"),
+            ("application/x-www-form-urlencoded", "username=admin&password=secret123"),
+        ],
+    )
+    def test_string_waf_body_redacts_credentials(self, normalizer, content_type, body):
+        raw = json.dumps(
+            {
+                "event_type": "waf",
+                "request": {
+                    "method": "POST",
+                    "uri": "/login",
+                    "headers": {"Content-Type": content_type},
+                    "body": body,
+                },
+            }
+        )
+        event = normalizer.normalize(raw)
+        assert "secret123" not in event.text
+        assert "secret123" not in event.fields["request_body_redacted"]
+        assert "dXNlcjpwYXNzd29yZA==" not in event.text
+        assert "eyJhbGciOiJub25lIn0.payload" not in event.text
+        assert "REDACTED" in event.fields["request_body_redacted"]
+
+    def test_waf_query_string_credentials_are_redacted(self, normalizer):
+        raw = json.dumps(
+            {
+                "event_type": "waf",
+                "request": {
+                    "method": "GET",
+                    "uri": "/login?token=VERYSECRET123&next=%2Fadmin",
+                    "headers": {"Host": "app.example"},
+                },
+            }
+        )
+        event = normalizer.normalize(raw)
+        assert "VERYSECRET123" not in event.text
+        assert "VERYSECRET123" not in event.fields["uri"]
+        assert "token=<REDACTED>" in event.fields["uri"]
+        assert "next=/admin" in event.fields["uri"]
+
+    def test_binary_waf_body_is_not_model_visible(self, normalizer):
+        raw = json.dumps(
+            {
+                "event_type": "waf",
+                "action": "BLOCK",
+                "request": {
+                    "method": "POST",
+                    "uri": "/upload",
+                    "headers": {"Content-Type": "application/octet-stream"},
+                    "body": "binary-secret",
+                },
+            }
+        )
+        event = normalizer.normalize(raw)
+        assert event.fields["request_body_redacted"] == ""
+        assert "binary-secret" not in event.text
 
 
 # ── Generic fallback ───────────────────────────────────────────────────────────
