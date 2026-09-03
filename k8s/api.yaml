@@ -61,11 +61,6 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 2
           env:
-            - name: LOGFILTER_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: logfilter-secrets
-                  key: LOGFILTER_ADMIN_TOKEN
             - name: LOGFILTER_API_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -76,6 +71,36 @@ spec:
                 secretKeyRef:
                   name: logfilter-secrets
                   key: LOGFILTER_METRICS_TOKEN
+            - name: LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET
+            - name: LOGFILTER_RESPONSE_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: LOGFILTER_RESPONSE_MODE
+            - name: LOGFILTER_RESPONSE_KILL_SWITCH
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: LOGFILTER_RESPONSE_KILL_SWITCH
+            - name: LOGFILTER_RESPONSE_ALLOWED_NETWORKS
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: LOGFILTER_RESPONSE_ALLOWED_NETWORKS
+            - name: LOGFILTER_RESPONSE_ALLOWED_HOSTS
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: LOGFILTER_RESPONSE_ALLOWED_HOSTS
+            - name: LOGFILTER_RESPONSE_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: LOGFILTER_RESPONSE_GATEWAY_URL
             - name: ES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -89,6 +114,14 @@ spec:
               value: "0"
             - name: LOGFILTER_MODEL_VERSION
               value: "0.1.0"
+            - name: LOGFILTER_MODELS_STRICT
+              value: "1"
+            - name: LOGFILTER_FLOW_ENABLED
+              value: "true"
+            - name: LOGFILTER_ENDPOINT_NOVELTY_ENABLED
+              value: "true"
+            - name: LOGFILTER_BOT_FLOW_ENABLED
+              value: "false"
           resources:
             requests:
               memory: "2Gi"

@@ -10,8 +10,7 @@ data:
       topics:
         raw_logs: "raw-logs"
         scored_logs: "scored-logs"
-        archived: "archived-logs"
-      consumer_group: "logfilter-scorer"
+        dlq: "logfilter-dlq"
       auto_offset_reset: "latest"
       max_poll_records: 500
       security:
@@ -75,17 +74,28 @@ data:
       mode: "enrich_only"
       syslog_host: "${QRADAR_HOST:localhost}"
       syslog_port: 514
-      syslog_protocol: "tcp"
+      syslog_protocol: "${QRADAR_PROTOCOL:https_ack}"
+      gateway:
+        url: "${QRADAR_GATEWAY_URL:}"
+        hmac_secret: "${QRADAR_GATEWAY_HMAC_SECRET:}"
+        timeout_seconds: 10
       leef_vendor: "YourCo"
       leef_product: "AIPreprocessor"
       leef_version: "1.0"
+    response:
+      mode: "${LOGFILTER_RESPONSE_MODE:dry_run}"
+      kill_switch: "${LOGFILTER_RESPONSE_KILL_SWITCH:false}"
+      block_threshold: 0.85
+      quarantine_priorities: ["HIGH"]
+      allowed_networks: "${LOGFILTER_RESPONSE_ALLOWED_NETWORKS:}"
+      allowed_hosts: "${LOGFILTER_RESPONSE_ALLOWED_HOSTS:}"
+      max_actions_per_minute: 60
+      gateway:
+        url: "${LOGFILTER_RESPONSE_GATEWAY_URL:}"
+        hmac_secret: "${LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET:}"
+        timeout_seconds: 10
     api:
-      host: "0.0.0.0"
-      port: 8080
-      workers: 4
-      log_level: "info"
       max_batch_size: 200
-      admin_token: "${LOGFILTER_ADMIN_TOKEN:}"
       scoring_token: "${LOGFILTER_API_TOKEN:}"
       metrics_token: "${LOGFILTER_METRICS_TOKEN:}"
       rate_limit_per_minute: 60
@@ -99,3 +109,10 @@ data:
   KAFKA_SSL_CERTFILE: ""
   KAFKA_SSL_KEYFILE: ""
   KAFKA_SSL_CHECK_HOSTNAME: "true"
+  QRADAR_PROTOCOL: "https_ack"
+  QRADAR_GATEWAY_URL: "https://qradar-gateway.example.com/v1/events"
+  LOGFILTER_RESPONSE_MODE: "dry_run"
+  LOGFILTER_RESPONSE_KILL_SWITCH: "false"
+  LOGFILTER_RESPONSE_ALLOWED_NETWORKS: ""
+  LOGFILTER_RESPONSE_ALLOWED_HOSTS: ""
+  LOGFILTER_RESPONSE_GATEWAY_URL: "https://response-gateway.example.com/v1/actions"

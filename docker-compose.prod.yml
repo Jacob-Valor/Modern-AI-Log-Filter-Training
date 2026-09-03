@@ -87,7 +87,6 @@ services:
       - |
         kafka-topics --create --if-not-exists --bootstrap-server kafka:29092,kafka-2:29092,kafka-3:29092 --replication-factor 3 --partitions 12 --topic raw-logs
         kafka-topics --create --if-not-exists --bootstrap-server kafka:29092,kafka-2:29092,kafka-3:29092 --replication-factor 3 --partitions 12 --topic scored-logs
-        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092,kafka-2:29092,kafka-3:29092 --replication-factor 3 --partitions 4 --topic archived-logs
         kafka-topics --create --if-not-exists --bootstrap-server kafka:29092,kafka-2:29092,kafka-3:29092 --replication-factor 3 --partitions 4 --topic logfilter-dlq
         echo "Kafka topics created with replication factor 3."
 
@@ -158,6 +157,11 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
       ES_HOST: http://elasticsearch:9200
+      LOGFILTER_MODELS_STRICT: "1"
+      LOGFILTER_FLOW_ENABLED: "true"
+      LOGFILTER_ENDPOINT_NOVELTY_ENABLED: "true"
+      LOGFILTER_BOT_FLOW_ENABLED: "false"
+      LOGFILTER_RESPONSE_MODE: "${LOGFILTER_RESPONSE_MODE:-dry_run}"
 
   collector:
     environment:
@@ -171,6 +175,9 @@ services:
   router:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
+      QRADAR_PROTOCOL: "https_ack"
+      QRADAR_GATEWAY_URL: "${QRADAR_GATEWAY_URL:?QRADAR_GATEWAY_URL must be set in .env}"
+      QRADAR_GATEWAY_HMAC_SECRET: "${QRADAR_GATEWAY_HMAC_SECRET:?QRADAR_GATEWAY_HMAC_SECRET must be set in .env}"
 
 volumes:
   kafka-data-2:

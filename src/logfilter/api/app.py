@@ -7,23 +7,21 @@ Endpoints:
   GET  /health             — Liveness + readiness check
   GET  /metrics            — Prometheus metrics (text/plain)
   GET  /metrics/snapshot   — JSON metrics snapshot
-  POST /admin/reload       — Trigger model reload (admin only)
 """
 
 from __future__ import annotations
 
 import importlib
 import os
-import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import structlog
+import structlog  # type: ignore[import-not-found]
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.concurrency import run_in_threadpool
+from fastapi.concurrency import run_in_threadpool  # type: ignore[import-not-found]
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -42,6 +40,7 @@ from logfilter.api.schemas import (
     EntitySummary,
     HealthResponse,
     MetricsSnapshot,
+    ResponseActionSummary,
     ScoreRequest,
     ScoreResponse,
 )
@@ -53,11 +52,13 @@ from logfilter.api.security import (
     require_configured_token,
 )
 from logfilter.config import load_config
+from logfilter.http_gateway import SignedHttpGatewayClient
 from logfilter.monitoring.drift_detector import DriftStatus
 from logfilter.pipeline.archive import LogArchive, compute_raw_log_ref
 from logfilter.pipeline.enricher import LEEFEnricher
 from logfilter.pipeline.normalizer import LogNormalizer, LogSourceType
 from logfilter.pipeline.scorer import LogScorer
+from logfilter.response.auto_response import AutoResponseEngine, SignedResponseGateway
 from logfilter.security.redaction import RedactionConfig
 
 logger = structlog.get_logger(__name__)
@@ -70,6 +71,12 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _events_total = Counter("logfilter_events_total", "Total log events scored", ["priority"])
 _events_duplicate = Counter("logfilter_events_duplicate_total", "Duplicate events detected")
 _events_sigma = Counter("logfilter_events_sigma_total", "Sigma rule matches")
+_events_by_technique = Counter(
+    "logfilter_events_technique_total", "Events by MITRE technique", ["technique"]
+)
+_events_by_source = Counter(
+    "logfilter_events_source_total", "Events by source type", ["source_type"]
+)
 _score_histogram = Histogram(
     "logfilter_threat_score",
     "Threat score distribution",
@@ -90,6 +97,13 @@ _drift_psi = Gauge("logfilter_drift_psi", "Population Stability Index for classi
 _drift_detected = Gauge("logfilter_drift_detected", "1 if model drift is currently detected")
 
 
+def _config_int(value: Any, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
 # ── Application state ──────────────────────────────────────────────────────────
 class AppState:
     def __init__(self) -> None:
@@ -98,6 +112,8 @@ class AppState:
         self.scorer: LogScorer | None = None
         self.enricher: LEEFEnricher | None = None
         self.archiver: LogArchive | None = None
+        self.response_engine = AutoResponseEngine(dry_run=True)
+        self.response_gateway: SignedResponseGateway | None = None
         self.start_time: float = time.monotonic()
         self.redis_client: Any | None = None
         self.rate_limiter: RedisRateLimiter | None = None
@@ -113,11 +129,58 @@ class AppState:
 
 
 _state = AppState()
-_RELOAD_LOCK = threading.Lock()
 
 
 def _env_enabled(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_VALUES
+
+
+def _config_enabled(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() in _TRUE_VALUES)
+
+
+def _config_values(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def _configure_response_engine() -> None:
+    cfg = _state.config.get("response", {})
+    mode = str(cfg.get("mode", "dry_run")).strip().lower()
+    if mode not in {"dry_run", "armed"}:
+        raise ValueError("response.mode must be dry_run or armed")
+    dry_run = mode == "dry_run"
+    gateway: SignedResponseGateway | None = None
+    if not dry_run:
+        gateway_cfg = cfg.get("gateway", {})
+        client = SignedHttpGatewayClient(
+            url=str(gateway_cfg.get("url", "")),
+            hmac_secret=str(gateway_cfg.get("hmac_secret", "")),
+            timeout_seconds=float(gateway_cfg.get("timeout_seconds", 10.0)),
+            ca_file=str(gateway_cfg.get("ca_file", "")),
+            client_cert_file=str(gateway_cfg.get("client_cert_file", "")),
+            client_key_file=str(gateway_cfg.get("client_key_file", "")),
+        )
+        gateway = SignedResponseGateway(client)
+    _state.response_gateway = gateway
+    _state.response_engine = AutoResponseEngine(
+        firewall=gateway,
+        notifier=gateway,
+        dry_run=dry_run,
+        block_threshold=float(cfg.get("block_threshold", 0.85)),
+        quarantine_priorities=frozenset(
+            _config_values(cfg.get("quarantine_priorities", ("HIGH",)))
+        ),
+        allowed_networks=_config_values(cfg.get("allowed_networks", ())),
+        allowed_hosts=frozenset(_config_values(cfg.get("allowed_hosts", ()))),
+        kill_switch=_config_enabled(cfg.get("kill_switch", False)),
+        max_actions_per_minute=_config_int(
+            cfg.get("max_actions_per_minute", 60), "response max actions per minute"
+        ),
+    )
 
 
 def _configure_rate_limiter() -> None:
@@ -221,6 +284,12 @@ def _collect_model_health() -> dict[str, bool]:
         cross_encoder = getattr(_state.scorer, "cross_encoder", None)
         if cross_encoder is not None:
             models_loaded["cross_encoder"] = _is_loaded_model(cross_encoder, "_model")
+        if getattr(_state.scorer, "flow_enabled", False):
+            models_loaded["flow_classifier"] = _state.scorer.flow_classifier.is_loaded()
+        if getattr(_state.scorer, "bot_flow_enabled", False):
+            models_loaded["bot_flow_classifier"] = _state.scorer.bot_flow_classifier.is_loaded()
+        if getattr(_state.scorer, "endpoint_novelty_enabled", False):
+            models_loaded["endpoint_novelty"] = _state.scorer.endpoint_novelty_model.is_ready()
     return models_loaded
 
 
@@ -260,6 +329,7 @@ async def lifespan(app: FastAPI):
             logger.warning("config.yaml not found or empty — using defaults")
 
         _configure_rate_limiter()
+        _configure_response_engine()
         _configure_archiver()
 
         # Block production startup with localhost CORS origins
@@ -309,6 +379,12 @@ async def lifespan(app: FastAPI):
             except Exception:  # noqa: BLE001
                 pass
             _state.redis_client = None
+        if _state.response_gateway is not None:
+            try:
+                _state.response_gateway.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _state.response_gateway = None
         if _state.archiver is not None:
             try:
                 _state.archiver.close()
@@ -396,25 +472,23 @@ def _ingest_ts(normalized_timestamp: str) -> float:
 
 def _archive_then_score(normalized, caller_ref: str | None) -> str:
     """
-    Resolve the chain-of-custody ref and best-effort archive to ES (B8).
+    Resolve one chain-of-custody ref without duplicating upstream archives.
 
-    Resolution order:
-      1. caller-supplied ref (e.g. already-archived upstream)
-      2. local sha256 of (raw + source + host + ingest_ts)
-      3. attempt ES ``write_with_id`` if archiver is configured
-
-    If archiver is None or ES write fails, we still return a deterministic
-    ref so the LEEF payload carries valid chain-of-custody — but the caller
-    is responsible for ensuring the raw log is archived somewhere reachable
-    by this ref.
+    Kafka callers supply the ArchiveConsumer's stable topic/partition/offset
+    reference. The API trusts that reference and does not write a second raw
+    document. Direct API callers receive a locally computed reference and a
+    best-effort Elasticsearch archive when the archiver is configured.
     """
+    if caller_ref is not None:
+        return caller_ref
+
     ingest_ts = _ingest_ts(normalized.timestamp)
     source_type = (
         normalized.source_type.value
         if hasattr(normalized.source_type, "value")
         else str(normalized.source_type)
     )
-    raw_log_ref = caller_ref or compute_raw_log_ref(
+    raw_log_ref = compute_raw_log_ref(
         normalized.raw,
         source_type,
         normalized.host,
@@ -440,12 +514,11 @@ def _archive_then_score(normalized, caller_ref: str | None) -> str:
 
 def _do_score_sync(raw: str, source_type: str | None, raw_log_ref: str | None):
     """
-    Synchronous helper: normalize → archive → score → enrich.
+    Synchronous helper: normalize → archive → score → enrich → respond.
 
-    Returns ``(scored, leef)`` and is invoked from async handlers via
-    ``run_in_threadpool`` so the CPU-bound scorer and the blocking ES
-    write do not stall the FastAPI event loop (AGENTS.md: never block
-    the loop with sync CPU or I/O).
+    Returns ``(scored, leef, raw_log_ref, response_actions)`` and is invoked
+    from async handlers via ``run_in_threadpool`` so model inference, archive
+    I/O, and acknowledged gateway calls do not stall the FastAPI event loop.
     """
     if _state.scorer is None or _state.enricher is None:
         raise RuntimeError("Scoring service not initialised")
@@ -454,7 +527,8 @@ def _do_score_sync(raw: str, source_type: str | None, raw_log_ref: str | None):
     es_doc_id = _archive_then_score(normalized, raw_log_ref)
     scored = _state.scorer.score(normalized)
     leef = _state.enricher.enrich(scored, es_doc_id=es_doc_id)
-    return scored, leef
+    response_actions = _state.response_engine.handle(scored, es_doc_id)
+    return scored, leef, es_doc_id, response_actions
 
 
 def _do_score_batch_sync(
@@ -473,15 +547,23 @@ def _do_score_batch_sync(
         for r, st in zip(raws, source_types)
     ]
     es_doc_ids = [
-        _archive_then_score(norm, ref)
-        for norm, ref in zip(normalized_events, raw_log_refs)
+        _archive_then_score(norm, ref) for norm, ref in zip(normalized_events, raw_log_refs)
     ]
     scored_events = _state.scorer.score_batch(normalized_events)
     leef_payloads = _state.enricher.enrich_batch(scored_events, es_doc_ids=es_doc_ids)
-    return scored_events, leef_payloads
+    response_actions = [
+        _state.response_engine.handle(scored, event_ref)
+        for scored, event_ref in zip(scored_events, es_doc_ids)
+    ]
+    return scored_events, leef_payloads, es_doc_ids, response_actions
 
 
-def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
+def _build_response(
+    scored_event,
+    leef_payload: str,
+    raw_log_ref: str,
+    response_actions,
+) -> ScoreResponse:
     entities_dict = scored_event.entities or {}
     entity_summary = EntitySummary(
         indicators=entities_dict.get("indicators", []),
@@ -500,6 +582,16 @@ def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
         )
         for ce in scored_event.cross_encoder_scores
     ]
+    recommended_actions = [
+        ResponseActionSummary(
+            action=action.action.value,
+            target=action.target,
+            reason=action.reason,
+            action_id=action.action_id,
+            status=action.status,
+        )
+        for action in response_actions
+    ]
     return ScoreResponse(
         ai_threat_score=scored_event.ai_threat_score,
         ai_priority=scored_event.ai_priority,
@@ -512,6 +604,11 @@ def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
         entities=entity_summary,
         attack_matches=attack_matches,
         classifier_score=scored_event.classifier_score,
+        flow_score=scored_event.flow_score,
+        bot_score=scored_event.bot_score,
+        ddos_window_score=scored_event.ddos_window_score,
+        endpoint_score=scored_event.endpoint_score,
+        http_score=scored_event.http_score,
         tier2_score=scored_event.tier2_score,
         tier2_used=scored_event.tier2_used,
         entity_boost=scored_event.entity_boost,
@@ -523,19 +620,25 @@ def _build_response(scored_event, leef_payload: str) -> ScoreResponse:
         scoring_latency_ms=scored_event.scoring_latency_ms,
         score_degraded=scored_event.score_degraded,
         leef_payload=leef_payload,
+        raw_log_ref=raw_log_ref,
+        response_mode="dry_run" if _state.response_engine.dry_run else "armed",
+        recommended_actions=recommended_actions,
     )
 
 
 def _update_metrics(scored_event) -> None:
     _events_total.labels(priority=scored_event.ai_priority).inc()
     _score_histogram.observe(scored_event.ai_threat_score)
-    _latency_histogram.observe(scored_event.scoring_latency_ms)
     if scored_event.is_duplicate:
         _events_duplicate.inc()
         _state.events_duplicate += 1
     if scored_event.sigma_matched:
         _events_sigma.inc()
         _state.events_sigma += 1
+    # Attack-specific metrics
+    technique = scored_event.ai_mitre_technique or "none"
+    _events_by_technique.labels(technique=technique).inc()
+    _events_by_source.labels(source_type=scored_event.source_type).inc()
     _state.events_scored += 1
     if scored_event.ai_priority == "HIGH":
         _state.events_high += 1
@@ -547,32 +650,6 @@ def _update_metrics(scored_event) -> None:
         status = drift_detector.check_drift()
         _drift_psi.set(status.psi)
         _drift_detected.set(1.0 if status.drift_detected else 0.0)
-
-
-async def _require_admin(x_admin_token: str | None = Header(default=None)) -> None:
-    token = _configured_admin_token()
-    try:
-        require_configured_token(
-            x_admin_token,
-            token,
-            not_configured_detail="Admin token is not configured",
-            invalid_detail="Invalid admin token",
-        )
-    except AccessDenied as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-
-def _configured_admin_token() -> str:
-    env_token = os.environ.get("LOGFILTER_ADMIN_TOKEN", "")
-    if env_token:
-        return env_token
-    cfg_token = _state.config.get("api", {}).get("admin_token", "")
-    if cfg_token:
-        logger.warning(
-            "Admin token sourced from config.yaml — "
-            "prefer LOGFILTER_ADMIN_TOKEN env var"
-        )
-    return cfg_token
 
 
 def _configured_api_token() -> str:
@@ -592,8 +669,7 @@ def _configured_metrics_token() -> str:
     cfg_token = _state.config.get("api", {}).get("metrics_token", "")
     if cfg_token:
         logger.warning(
-            "Metrics token sourced from config.yaml — "
-            "prefer LOGFILTER_METRICS_TOKEN env var"
+            "Metrics token sourced from config.yaml — prefer LOGFILTER_METRICS_TOKEN env var"
         )
     return cfg_token
 
@@ -609,7 +685,7 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 
 def _enforce_rate_limit(request: Request) -> None:
     api_cfg = _state.config.get("api", {})
-    limit = int(api_cfg.get("rate_limit_per_minute", 60))
+    limit = _config_int(api_cfg.get("rate_limit_per_minute", 60), "API rate limit")
     remote_addr = request.client.host if request.client else "unknown"
     client_host = client_ip_from_request(
         remote_addr=remote_addr,
@@ -701,7 +777,7 @@ async def score_event(
             )
 
         try:
-            scored, leef = await run_in_threadpool(
+            scored, leef, raw_log_ref, response_actions = await run_in_threadpool(
                 _do_score_sync, payload.raw, payload.source_type, payload.raw_log_ref
             )
         except (ValueError, TypeError, KeyError) as exc:
@@ -719,7 +795,7 @@ async def score_event(
             },
         )
         _update_metrics(scored)
-        return _build_response(scored, leef)
+        return _build_response(scored, leef, raw_log_ref, response_actions)
 
 
 @app.post("/score/batch", response_model=BatchScoreResponse, tags=["Scoring"])
@@ -744,7 +820,9 @@ async def score_batch(
             )
 
         # Enforce configured batch size cap (config: api.max_batch_size, default 200).
-        max_batch = int(_state.config.get("api", {}).get("max_batch_size", 200))
+        max_batch = _config_int(
+            _state.config.get("api", {}).get("max_batch_size", 200), "maximum batch size"
+        )
         if len(payload.events) > max_batch:
             raise HTTPException(
                 status_code=413,
@@ -757,7 +835,12 @@ async def score_batch(
         _batch_size_histogram.observe(len(payload.events))
 
         try:
-            scored_events, leef_payloads = await run_in_threadpool(
+            (
+                scored_events,
+                leef_payloads,
+                raw_log_refs,
+                response_action_batches,
+            ) = await run_in_threadpool(
                 _do_score_batch_sync,
                 [ev.raw for ev in payload.events],
                 [ev.source_type for ev in payload.events],
@@ -771,13 +854,18 @@ async def score_batch(
         responses = []
         high_count = 0
         medium_count = 0
-        for scored, leef in zip(scored_events, leef_payloads):
+        for scored, leef, raw_log_ref, response_actions in zip(
+            scored_events,
+            leef_payloads,
+            raw_log_refs,
+            response_action_batches,
+        ):
             _update_metrics(scored)
             if scored.ai_priority == "HIGH":
                 high_count += 1
             elif scored.ai_priority == "MEDIUM":
                 medium_count += 1
-            responses.append(_build_response(scored, leef))
+            responses.append(_build_response(scored, leef, raw_log_ref, response_actions))
 
         elapsed = (time.perf_counter() - t0) * 1000.0
         telemetry.set_span_attributes(
@@ -833,7 +921,7 @@ async def metrics(_: None = Depends(_require_metrics_access)) -> Response:
 
 
 @app.get("/metrics/snapshot", response_model=MetricsSnapshot, tags=["Operations"])
-async def metrics_snapshot(_: None = Depends(_require_admin)) -> MetricsSnapshot:
+async def metrics_snapshot(_: None = Depends(_require_metrics_access)) -> MetricsSnapshot:
     """JSON snapshot of in-process metrics counters."""
     n = max(_state.events_scored, 1)
     drift_status = DriftStatus()
@@ -873,44 +961,13 @@ async def health_drift() -> DriftHealthResponse:
     )
 
 
-@app.post("/admin/reload", tags=["Operations"])
-async def reload_models(_: None = Depends(_require_admin)) -> dict[str, str]:
-    """
-    Trigger a hot reload of the scoring pipeline.
-    Useful after retraining the classifier without restarting the service.
-    The reload is atomic — concurrent score requests see either the old or
-    new scorer, never a partially initialised one.
-    """
-    if _state.scorer is None:
-        raise HTTPException(status_code=503, detail="Scorer not initialised")
-
-    with _RELOAD_LOCK:
-        new_config = load_config(_CONFIG_PATH)
-        if not new_config:
-            logger.warning("config.yaml not found or empty — using defaults")
-
-        model_version = os.environ.get("LOGFILTER_MODEL_VERSION", "")
-        try:
-            new_scorer = LogScorer(config=new_config, model_version=model_version)
-            new_scorer.preload_models()
-            new_enricher = LEEFEnricher(
-                vendor=new_config.get("qradar", {}).get("leef_vendor", "YourCo"),
-                product=new_config.get("qradar", {}).get("leef_product", "AIPreprocessor"),
-                version=new_config.get("qradar", {}).get("leef_version", "1.0"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Model reload prewarm failed; keeping existing scorer", error=str(exc))
-            raise HTTPException(status_code=503, detail="Model reload failed") from exc
-
-        _state.config = new_config
-        _state.scorer = new_scorer
-        _state.enricher = new_enricher
-        logger.info("Models reloaded via /admin/reload")
-        return {"status": "reloaded"}
-
-
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":  # pragma: no cover
     uvicorn = importlib.import_module("uvicorn")
 
-    uvicorn.run("logfilter.api.app:app", host="0.0.0.0", port=8080, reload=False)
+    # Pass the app object directly (not the "module:attr" string) — the string
+    # form makes uvicorn re-import this file under the "logfilter.api.app"
+    # module name in addition to the "__main__" name Python already used to
+    # run it, executing all top-level code (including Prometheus Counter/Gauge
+    # registration) twice and raising "Duplicated timeseries in CollectorRegistry".
+    uvicorn.run(app, host="127.0.0.1", port=8080, reload=False)

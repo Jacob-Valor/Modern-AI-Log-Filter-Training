@@ -1,29 +1,24 @@
-"""
-Log router — forwards enriched LEEF events to IBM QRadar via syslog.
+"""Route enriched LEEF events to IBM QRadar.
 
-Routing modes (set in config.yaml qradar.mode):
-  enrich_only  — forward ALL events to QRadar, regardless of ai_priority.
-                 QRadar custom rules use ai_threat_score to filter/prioritise.
-                 Zero false-negative risk. Recommended for compliance environments.
-  suppress_low — suppress events with ai_priority=INFO from QRadar forwarding.
-                 Reduces EPS license cost but risks false negatives.
-
-In both modes, ALL raw logs have already been archived to Elasticsearch
-by the archive consumer BEFORE scoring (archive-first pattern).
+Production can use an acknowledged HTTPS gateway with receiver-side idempotency.
+Legacy UDP/TCP/TLS syslog remains available but only provides at-least-once
+delivery because those transports do not acknowledge a durable event identity.
 """
 
 from __future__ import annotations
 
+import hashlib
 import socket
 import ssl
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from logfilter.http_gateway import SignedHttpGatewayClient
 from logfilter.pipeline.events import ScoredEvent
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +34,31 @@ class RoutingDecision:
     forward_to_qradar: bool
     reason: str
     priority: str
+
+
+def decide_routing(
+    mode: RoutingMode,
+    priority: str,
+    threat_score: float,
+) -> RoutingDecision:
+    """Return the shared routing decision used by every production entrypoint."""
+    if mode == RoutingMode.ENRICH_ONLY:
+        return RoutingDecision(
+            forward_to_qradar=True,
+            reason="enrich_only mode — all events forwarded",
+            priority=priority,
+        )
+    if priority == "INFO":
+        return RoutingDecision(
+            forward_to_qradar=False,
+            reason=f"score {threat_score:.3f} below low threshold",
+            priority=priority,
+        )
+    return RoutingDecision(
+        forward_to_qradar=True,
+        reason=f"priority={priority}",
+        priority=priority,
+    )
 
 
 class SyslogSender:
@@ -96,8 +116,9 @@ class SyslogSender:
         wait=wait_exponential(multiplier=0.5, max=4),
         reraise=True,
     )
-    def send(self, message: str, priority: str = "INFO") -> None:
-        """Send a single syslog message."""
+    def send(self, message: str, priority: str = "INFO", event_id: str | None = None) -> None:
+        """Send one syslog message; legacy syslog cannot use ``event_id``."""
+        del event_id
         sev = self.SEVERITY_MAP.get(priority, 6)
         pri = self.FACILITY * 8 + sev
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -120,11 +141,7 @@ class SyslogSender:
             raise  # tenacity will retry
 
     def send_batch(self, messages: list[tuple[str, str]]) -> int:
-        """
-        Send a batch of (message, priority) tuples.
-
-        Returns the number of successfully sent messages.
-        """
+        """Send a batch and return the number accepted by the socket."""
         sent = 0
         for msg, prio in messages:
             try:
@@ -136,6 +153,72 @@ class SyslogSender:
 
     def close(self) -> None:
         self._disconnect()
+
+
+class QRadarSender(Protocol):
+    def send(self, message: str, priority: str = "INFO", event_id: str | None = None) -> None: ...
+
+    def send_batch(self, messages: list[tuple[str, str]]) -> int: ...
+
+    def close(self) -> None: ...
+
+
+class AcknowledgedHttpSender:
+    """Deliver LEEF only after a gateway durably accepts its event id."""
+
+    def __init__(self, client: SignedHttpGatewayClient) -> None:
+        self.client = client
+
+    def send(
+        self,
+        message: str,
+        priority: str = "INFO",
+        event_id: str | None = None,
+    ) -> None:
+        stable_id = event_id or hashlib.sha256(message.encode()).hexdigest()
+        self.client.send(
+            request_id=stable_id,
+            payload={
+                "destination": "qradar",
+                "encoding": "leef",
+                "event_id": stable_id,
+                "priority": priority,
+                "message": message,
+            },
+        )
+
+    def send_batch(self, messages: list[tuple[str, str]]) -> int:
+        sent = 0
+        for message, priority in messages:
+            self.send(message, priority)
+            sent += 1
+        return sent
+
+    def close(self) -> None:
+        self.client.close()
+
+
+def build_qradar_sender(qradar_cfg: dict[str, Any]) -> QRadarSender:
+    """Build the configured QRadar transport and fail closed on bad gateway config."""
+    protocol = str(qradar_cfg.get("syslog_protocol", "tcp")).strip().lower()
+    if protocol == "https_ack":
+        gateway = qradar_cfg.get("gateway", {})
+        client = SignedHttpGatewayClient(
+            url=str(gateway.get("url", "")),
+            hmac_secret=str(gateway.get("hmac_secret", "")),
+            timeout_seconds=float(gateway.get("timeout_seconds", 10.0)),
+            ca_file=str(gateway.get("ca_file", "")),
+            client_cert_file=str(gateway.get("client_cert_file", "")),
+            client_key_file=str(gateway.get("client_key_file", "")),
+        )
+        return AcknowledgedHttpSender(client)
+    if protocol not in {"udp", "tcp", "tls"}:
+        raise ValueError("qradar.syslog_protocol must be udp, tcp, tls, or https_ack")
+    return SyslogSender(
+        host=str(qradar_cfg.get("syslog_host", "localhost")),
+        port=int(qradar_cfg.get("syslog_port", 514)),
+        protocol=protocol,
+    )
 
 
 class LogRouter:
@@ -153,37 +236,18 @@ class LogRouter:
     def __init__(
         self,
         config: dict[str, Any],
-        sender: SyslogSender | None = None,
+        sender: QRadarSender | None = None,
     ) -> None:
         qradar_cfg = config.get("qradar", config)  # tolerate full or section-only config
         self.mode = RoutingMode(qradar_cfg.get("mode", "enrich_only"))
-        self.sender = sender or SyslogSender(
-            host=qradar_cfg.get("syslog_host", "localhost"),
-            port=int(qradar_cfg.get("syslog_port", 514)),
-            protocol=qradar_cfg.get("syslog_protocol", "tcp"),
-        )
+        self.sender = sender or build_qradar_sender(qradar_cfg)
 
     def decide(self, scored: ScoredEvent) -> RoutingDecision:
         """Determine whether this event should be forwarded to QRadar."""
-        if self.mode == RoutingMode.ENRICH_ONLY:
-            return RoutingDecision(
-                forward_to_qradar=True,
-                reason="enrich_only mode — all events forwarded",
-                priority=scored.ai_priority,
-            )
-
-        # suppress_low mode
-        if scored.ai_priority == "INFO":
-            return RoutingDecision(
-                forward_to_qradar=False,
-                reason=f"score {scored.ai_threat_score:.3f} below low threshold",
-                priority=scored.ai_priority,
-            )
-
-        return RoutingDecision(
-            forward_to_qradar=True,
-            reason=f"priority={scored.ai_priority}",
-            priority=scored.ai_priority,
+        return decide_routing(
+            self.mode,
+            scored.ai_priority,
+            scored.ai_threat_score,
         )
 
     def route(self, leef_message: str, scored: ScoredEvent) -> RoutingDecision:
@@ -231,14 +295,12 @@ class LogRouter:
         """Route a batch of enriched events."""
         decisions = []
         forward_pairs: list[tuple[str, str]] = []
-        forward_indices: list[int] = []
 
         for i, (msg, scored) in enumerate(zip(leef_messages, scored_events)):
             decision = self.decide(scored)
             decisions.append(decision)
             if decision.forward_to_qradar:
                 forward_pairs.append((msg, decision.priority))
-                forward_indices.append(i)
 
         if forward_pairs:
             sent = self.sender.send_batch(forward_pairs)

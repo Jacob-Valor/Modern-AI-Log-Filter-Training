@@ -6,9 +6,7 @@ kafka:
   topics:
     raw_logs: "raw-logs"
     scored_logs: "scored-logs"
-    archived: "archived-logs"
     dlq: "logfilter-dlq"
-  consumer_group: "logfilter-scorer"
   auto_offset_reset: "earliest"
   max_poll_records: 500
   security:
@@ -54,13 +52,39 @@ models:
   classifier:
     path: "${LOGFILTER_CLASSIFIER_PATH:models/log_classifier.onnx}"
 
+  # Leakage-safe numeric CICFlowMeter classifier. The model is trained only on
+  # observed flow values; labels, categories, IPs and timestamps are excluded.
+  flow:
+    enabled: "${LOGFILTER_FLOW_ENABLED:false}"
+    path: "${LOGFILTER_FLOW_MODEL_PATH:models/flow/flow_classifier.onnx}"
+    scaler_path: "${LOGFILTER_FLOW_SCALER_PATH:models/flow/scaler.json}"
+    feature_names_path: "${LOGFILTER_FLOW_FEATURES_PATH:models/flow/feature_names.json}"
+    fusion_calibration_path: "${LOGFILTER_FLOW_FUSION_CALIBRATION:models/flow/fusion_calibration.json}"
+    fusion_target_fpr: "${LOGFILTER_FLOW_FUSION_TARGET_FPR:0.01}"
+    bot:
+      enabled: "${LOGFILTER_BOT_FLOW_ENABLED:false}"
+      path: "${LOGFILTER_BOT_FLOW_MODEL_PATH:models/flow/bot_classifier.onnx}"
+      scaler_path: "${LOGFILTER_BOT_FLOW_SCALER_PATH:models/flow/bot_scaler.json}"
+      feature_names_path: "${LOGFILTER_BOT_FLOW_FEATURES_PATH:models/flow/bot_feature_names.json}"
+      calibration_path: "${LOGFILTER_BOT_FLOW_CALIBRATION:models/flow/bot_calibration.json}"
+      target_fpr: "${LOGFILTER_BOT_FLOW_TARGET_FPR:0.01}"
+      alert_floor: "${LOGFILTER_BOT_FLOW_ALERT_FLOOR:0.65}"
+
+  # BETH one-class novelty model: trained with zero evil-labelled samples and
+  # calibrated on a separate validation split. This is an open-set proxy only.
+  endpoint_novelty:
+    enabled: "${LOGFILTER_ENDPOINT_NOVELTY_ENABLED:false}"
+    path: "${LOGFILTER_ENDPOINT_NOVELTY_PATH:models/endpoint/endpoint_novelty.onnx}"
+    config_path: "${LOGFILTER_ENDPOINT_NOVELTY_CONFIG:models/endpoint/novelty_config.json}"
+    score_scale: "${LOGFILTER_ENDPOINT_NOVELTY_SCALE:0.03}"
+
   # SecureBERT 2.0 family (downloaded from Hugging Face)
   # cache_dir: shared local cache for offline/air-gapped deployments
   # revision: exact git commit hash / tag to pin (empty = default/main)
   ner:
     enabled: "${LOGFILTER_NER_ENABLED:true}"
     model_id: "models/ner/final"
-    device: "cpu"          # or "cuda"
+    device: "cpu" # or "cuda"
     batch_size: 32
     min_confidence: 0.80
 
@@ -69,9 +93,9 @@ models:
     model_id: "models/biencoder/final"
     device: "cpu"
     batch_size: 64
-    dedup_threshold: 0.95  # cosine sim above this = duplicate
+    dedup_threshold: 0.95 # cosine sim above this = duplicate
     dedup_window_minutes: 5
-    faiss_top_k: 3         # ATT&CK candidate retrieval
+    faiss_top_k: 3 # ATT&CK candidate retrieval
 
   cross_encoder:
     enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"
@@ -91,34 +115,93 @@ scoring:
   entity_boost_value: 0.20
   dedup_penalty: 0.30
 
+  sigma:
+    enabled: "${LOGFILTER_SIGMA_ENABLED:true}"
+
   routing:
-    high:   "${LOGFILTER_SCORE_HIGH:0.80}"   # ai_priority=HIGH
+    high: "${LOGFILTER_SCORE_HIGH:0.80}" # ai_priority=HIGH
     medium: "${LOGFILTER_SCORE_MEDIUM:0.50}" # ai_priority=MEDIUM
-    low:    "${LOGFILTER_SCORE_LOW:0.20}"    # ai_priority=LOW (forward, sampled at 10%)
-    # below low → archive only (enrichment-only mode: always forward)
+    low: "${LOGFILTER_SCORE_LOW:0.20}" # ai_priority=LOW
+    # below low → INFO; qradar.mode decides whether INFO is forwarded
+
+  # Source-specific fusion is calibrated independently because flow, endpoint,
+  # and lexical model scores do not share a probability distribution.
+  source_profiles:
+    firewall_flow:
+      weights:
+        classifier: 1.0
+        entity_boost: 0.0
+        cross_encoder: 0.0
+        novelty: 0.0
+      routing:
+        high: "${LOGFILTER_FLOW_SCORE_HIGH:0.80}"
+        medium: "${LOGFILTER_FLOW_SCORE_MEDIUM:0.50}"
+        low: "${LOGFILTER_FLOW_SCORE_LOW:0.20}"
+    firewall_http:
+      weights:
+        classifier: 1.0
+        entity_boost: 0.0
+        cross_encoder: 0.0
+        novelty: 0.0
+      routing:
+        high: "${LOGFILTER_HTTP_SCORE_HIGH:0.80}"
+        medium: "${LOGFILTER_HTTP_SCORE_MEDIUM:0.50}"
+        low: "${LOGFILTER_HTTP_SCORE_LOW:0.20}"
 
   tier2:
     uncertainty_low: "${LOGFILTER_TIER2_UNCERTAINTY_LOW:0.10}"
     uncertainty_high: "${LOGFILTER_TIER2_UNCERTAINTY_HIGH:0.90}"
 
+  # In-process DDoS signal for single-worker/local deployments. Distributed
+  # deployments must externalize this state (Kafka Streams/Redis) before using
+  # the signal for automated enforcement.
+  flow_window:
+    enabled: "${LOGFILTER_FLOW_WINDOW_ENABLED:false}"
+    window_seconds: "${LOGFILTER_FLOW_WINDOW_SECONDS:10}"
+    max_keys: "${LOGFILTER_FLOW_WINDOW_MAX_KEYS:10000}"
+    max_events_per_key: "${LOGFILTER_FLOW_WINDOW_MAX_EVENTS:5000}"
+    flow_threshold: "${LOGFILTER_DDOS_FLOW_THRESHOLD:200}"
+    packet_threshold: "${LOGFILTER_DDOS_PACKET_THRESHOLD:20000}"
+    byte_threshold: "${LOGFILTER_DDOS_BYTE_THRESHOLD:10000000}"
+    source_threshold: "${LOGFILTER_DDOS_SOURCE_THRESHOLD:50}"
+
 # ── Forwarding to QRadar ─────────────────────────────────────────────────────
 qradar:
-  mode: "enrich_only"          # enrich_only | suppress_low
+  mode: "enrich_only" # enrich_only | suppress_low
   syslog_host: "${QRADAR_HOST:localhost}"
   syslog_port: "${QRADAR_PORT:514}"
-  syslog_protocol: "${QRADAR_PROTOCOL:tcp}"       # tcp | udp | tls
+  syslog_protocol: "${QRADAR_PROTOCOL:tcp}" # tcp | udp | tls | https_ack
+  gateway:
+    url: "${QRADAR_GATEWAY_URL:}"
+    hmac_secret: "${QRADAR_GATEWAY_HMAC_SECRET:}"
+    timeout_seconds: "${QRADAR_GATEWAY_TIMEOUT_SECONDS:10}"
+    ca_file: "${QRADAR_GATEWAY_CA_FILE:}"
+    client_cert_file: "${QRADAR_GATEWAY_CLIENT_CERT_FILE:}"
+    client_key_file: "${QRADAR_GATEWAY_CLIENT_KEY_FILE:}"
   leef_vendor: "YourCo"
   leef_product: "AIPreprocessor"
   leef_version: "1.0"
 
+# ── Automated response ───────────────────────────────────────────────────────
+response:
+  mode: "${LOGFILTER_RESPONSE_MODE:dry_run}" # dry_run | armed
+  kill_switch: "${LOGFILTER_RESPONSE_KILL_SWITCH:false}"
+  block_threshold: "${LOGFILTER_RESPONSE_BLOCK_THRESHOLD:0.85}"
+  quarantine_priorities: ["HIGH"]
+  allowed_networks: "${LOGFILTER_RESPONSE_ALLOWED_NETWORKS:}"
+  allowed_hosts: "${LOGFILTER_RESPONSE_ALLOWED_HOSTS:}"
+  max_actions_per_minute: "${LOGFILTER_RESPONSE_MAX_ACTIONS_PER_MINUTE:60}"
+  gateway:
+    url: "${LOGFILTER_RESPONSE_GATEWAY_URL:}"
+    hmac_secret: "${LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET:}"
+    timeout_seconds: "${LOGFILTER_RESPONSE_GATEWAY_TIMEOUT_SECONDS:10}"
+    ca_file: "${LOGFILTER_RESPONSE_GATEWAY_CA_FILE:}"
+    client_cert_file: "${LOGFILTER_RESPONSE_GATEWAY_CLIENT_CERT_FILE:}"
+    client_key_file: "${LOGFILTER_RESPONSE_GATEWAY_CLIENT_KEY_FILE:}"
+
 # ── API ──────────────────────────────────────────────────────────────────────
 api:
-  host: "0.0.0.0"
-  port: 8080
-  workers: 4
-  log_level: "info"
   max_batch_size: 200
-  admin_token: "${LOGFILTER_ADMIN_TOKEN:}"
   scoring_token: "${LOGFILTER_API_TOKEN:}"
   metrics_token: "${LOGFILTER_METRICS_TOKEN:}"
   rate_limit_per_minute: 60
@@ -127,7 +210,8 @@ api:
 # ── Monitoring ───────────────────────────────────────────────────────────────
 monitoring:
   prometheus_port: 9090
-  score_histogram_buckets: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
+  score_histogram_buckets:
+    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
 
   drift:
     enabled: "${LOGFILTER_DRIFT_ENABLED:false}"

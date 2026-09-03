@@ -81,11 +81,6 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 2
           env:
-            - name: LOGFILTER_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: logfilter-secrets
-                  key: LOGFILTER_ADMIN_TOKEN
             - name: LOGFILTER_API_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -109,6 +104,14 @@ spec:
               value: "0"
             - name: LOGFILTER_MODEL_VERSION
               value: "canary"
+            - name: LOGFILTER_MODELS_STRICT
+              value: "1"
+            - name: LOGFILTER_FLOW_ENABLED
+              value: "true"
+            - name: LOGFILTER_ENDPOINT_NOVELTY_ENABLED
+              value: "true"
+            - name: LOGFILTER_BOT_FLOW_ENABLED
+              value: "false"
           resources:
             requests:
               memory: "2Gi"

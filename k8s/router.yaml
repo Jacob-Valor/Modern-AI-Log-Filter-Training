@@ -66,6 +66,21 @@ spec:
                 secretKeyRef:
                   name: logfilter-secrets
                   key: LOGFILTER_API_TOKEN
+            - name: QRADAR_GATEWAY_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: logfilter-secrets
+                  key: QRADAR_GATEWAY_HMAC_SECRET
+            - name: QRADAR_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: QRADAR_PROTOCOL
+            - name: QRADAR_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: logfilter-config
+                  key: QRADAR_GATEWAY_URL
             - name: ES_PASSWORD
               valueFrom:
                 secretKeyRef:

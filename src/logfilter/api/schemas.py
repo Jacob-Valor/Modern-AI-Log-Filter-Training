@@ -75,6 +75,16 @@ class ATTACKMatch(BaseModel):
     score: float
 
 
+class ResponseActionSummary(BaseModel):
+    """Policy-selected response action and its execution state."""
+
+    action: str
+    target: str
+    reason: str
+    action_id: str
+    status: str = Field(description="recommended in dry-run; acknowledged in armed mode")
+
+
 class ScoreResponse(BaseModel):
     """Scoring result for a single event."""
 
@@ -96,6 +106,13 @@ class ScoreResponse(BaseModel):
 
     # Score components
     classifier_score: float
+    flow_score: float = Field(default=0.0, description="Numeric network-flow model score")
+    bot_score: float = Field(default=0.0, description="Bot-vs-rest flow model probability")
+    ddos_window_score: float = Field(
+        default=0.0, description="Bounded local DDoS aggregation signal"
+    )
+    endpoint_score: float = Field(default=0.0, description="Endpoint open-set novelty score")
+    http_score: float = Field(default=0.0, description="HTTP/WAF lexical risk score")
     tier2_score: float
     tier2_used: bool
     entity_boost: float
@@ -116,8 +133,16 @@ class ScoreResponse(BaseModel):
     normalized_text: str
     scoring_latency_ms: float
 
+    raw_log_ref: str = Field(
+        description="Stable 64-character archive and event idempotency reference"
+    )
     # LEEF-formatted enriched event
     leef_payload: str
+
+    response_mode: str = Field(
+        default="dry_run", description="dry_run recommends; armed requires gateway acknowledgement"
+    )
+    recommended_actions: list[ResponseActionSummary] = Field(default_factory=list)
 
     model_config = {
         "json_schema_extra": {
@@ -143,6 +168,11 @@ class ScoreResponse(BaseModel):
                     {"technique_id": "T1110.001", "name": "Password Guessing", "score": 0.82}
                 ],
                 "classifier_score": 0.76,
+                "flow_score": 0.0,
+                "bot_score": 0.0,
+                "ddos_window_score": 0.0,
+                "endpoint_score": 0.0,
+                "http_score": 0.0,
                 "tier2_score": 0.0,
                 "tier2_used": False,
                 "entity_boost": 0.20,
@@ -156,8 +186,7 @@ class ScoreResponse(BaseModel):
                 ),
                 "scoring_latency_ms": 45.3,
                 "leef_payload": (
-                    "LEEF:2.0|YourCo|AIPreprocessor|1.0|LOG_EVENT|\t|"
-                    "ai_threat_score=0.8700\t..."
+                    "LEEF:2.0|YourCo|AIPreprocessor|1.0|LOG_EVENT|\t|ai_threat_score=0.8700\t..."
                 ),
             }
         }
