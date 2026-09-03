@@ -167,9 +167,7 @@ def build_windows_from_dataframe(
     the CSV headers were generated together by ``data_process.py``).
     """
     if df.shape[1] != len(vocab):
-        raise ValueError(
-            f"DataFrame has {df.shape[1]} columns but vocab has {len(vocab)} entries"
-        )
+        raise ValueError(f"DataFrame has {df.shape[1]} columns but vocab has {len(vocab)} entries")
 
     counts_matrix = df.to_numpy(dtype=np.int64, copy=False)
     windows: list[TextWindow] = []

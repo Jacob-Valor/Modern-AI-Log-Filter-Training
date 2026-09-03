@@ -1,0 +1,145 @@
+title: SQL Injection Pattern
+id: e1a2b3c4-0001-4a11-8b11-000000000001
+status: experimental
+description: >
+  Signature-based detection of common SQL injection substrings in web request
+  logs. Represents the kind of static pattern a traditional rule-based SIEM
+  (no ML) would ship out of the box.
+logsource:
+    category: application
+detection:
+    selection:
+        CommandLine|contains:
+            - "OR 1=1"
+            - "or 1=1"
+            - "UNION SELECT"
+            - "union select"
+            - "SQL injection"
+    condition: selection
+level: high
+tags:
+    - attack.initial_access
+    - attack.t1190
+---
+title: Cross-Site Scripting (XSS) Pattern
+id: e1a2b3c4-0002-4a11-8b11-000000000002
+status: experimental
+description: Static substring match for reflected/stored XSS payloads.
+logsource:
+    category: application
+detection:
+    selection:
+        CommandLine|contains:
+            - "<script>"
+            - "onerror=alert"
+            - "XSS attack"
+    condition: selection
+level: high
+tags:
+    - attack.initial_access
+    - attack.t1190
+---
+title: SYN Flood / DDoS Pattern
+id: e1a2b3c4-0003-4a11-8b11-000000000003
+status: experimental
+description: Signature match for flood/DoS indicators emitted by kernel or edge firewalls.
+logsource:
+    category: firewall
+detection:
+    selection:
+        CommandLine|contains:
+            - "SYN flood"
+            - "Connection flood"
+            - "DoS threshold exceeded"
+    condition: selection
+level: high
+tags:
+    - attack.impact
+    - attack.t1498
+---
+title: Port / Network Scan Pattern
+id: e1a2b3c4-0004-4a11-8b11-000000000004
+status: experimental
+description: Signature match for scanning tool fingerprints and SYN-scan behavior.
+logsource:
+    category: firewall
+detection:
+    selection:
+        CommandLine|contains:
+            - "SYN scan"
+            - "Nmap Scripting Engine"
+            - "ET SCAN"
+    condition: selection
+level: medium
+tags:
+    - attack.discovery
+    - attack.t1046
+---
+title: Malware / C2 Communication Pattern
+id: e1a2b3c4-0005-4a11-8b11-000000000005
+status: experimental
+description: Signature match for known malware/C2 indicators (DNS beacon, AV hit, blocked outbound).
+logsource:
+    category: application
+detection:
+    selection:
+        CommandLine|contains:
+            - "malware C2"
+            - "Known malware hash"
+            - "Outbound connection to evil"
+    condition: selection
+level: high
+tags:
+    - attack.command_and_control
+    - attack.t1071
+---
+title: SSH Brute Force / Invalid User Pattern
+id: e1a2b3c4-0006-4a11-8b11-000000000006
+status: experimental
+description: Signature match for repeated failed SSH authentication attempts.
+logsource:
+    category: authentication
+detection:
+    selection:
+        CommandLine|contains:
+            - "Failed password"
+            - "Invalid user"
+            - "maximum authentication attempts exceeded"
+    condition: selection
+level: medium
+tags:
+    - attack.credential_access
+    - attack.t1110
+---
+title: Privilege Escalation via sudo
+id: e1a2b3c4-0007-4a11-8b11-000000000007
+status: experimental
+description: Signature match for sudo-to-root command execution.
+logsource:
+    category: authentication
+detection:
+    selection:
+        CommandLine|contains:
+            - "USER=root ; COMMAND"
+    condition: selection
+level: medium
+tags:
+    - attack.privilege_escalation
+    - attack.t1548
+---
+title: Command Injection Pattern
+id: e1a2b3c4-0008-4a11-8b11-000000000008
+status: experimental
+description: Signature match for shell command-injection attempts in web parameters.
+logsource:
+    category: application
+detection:
+    selection:
+        CommandLine|contains:
+            - "Command injection attempt"
+            - "/bin/sh -c"
+    condition: selection
+level: high
+tags:
+    - attack.execution
+    - attack.t1059

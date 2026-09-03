@@ -144,9 +144,7 @@ def build_hf_dataset(
     tokenizer: TrainTokenizer,
     max_length: int,
 ) -> Any:
-    dataset = dataset_cls.from_dict(
-        {"text": texts.tolist(), "labels": labels.astype(int).tolist()}
-    )
+    dataset = dataset_cls.from_dict({"text": texts.tolist(), "labels": labels.astype(int).tolist()})
 
     def tokenize_batch(batch: dict[str, list[str]]) -> dict[str, Any]:
         return tokenizer(
@@ -314,9 +312,7 @@ def main() -> None:
 
     X = np.array(texts, dtype=object)
     y = np.array(labels, dtype=np.int64)
-    X_train, X_val, X_test, y_train, y_val, y_test = split_dataset(
-        X, y, random_state=args.seed
-    )
+    X_train, X_val, X_test, y_train, y_val, y_test = split_dataset(X, y, random_state=args.seed)
 
     logger.info("Loading tokenizer/model: %s  revision=%s", args.model_id, args.revision)
     tokenizer = require_train_tokenizer(
@@ -334,13 +330,9 @@ def main() -> None:
     num_params = count_parameters(model)
     logger.info("Model parameters: %d", num_params)
 
-    train_dataset = build_hf_dataset(
-        X_train, y_train, dataset_cls, tokenizer, args.max_length
-    )
+    train_dataset = build_hf_dataset(X_train, y_train, dataset_cls, tokenizer, args.max_length)
     val_dataset = build_hf_dataset(X_val, y_val, dataset_cls, tokenizer, args.max_length)
-    test_dataset = build_hf_dataset(
-        X_test, y_test, dataset_cls, tokenizer, args.max_length
-    )
+    test_dataset = build_hf_dataset(X_test, y_test, dataset_cls, tokenizer, args.max_length)
 
     n_devices = torch.cuda.device_count() if torch.cuda.is_available() else 1
     eval_steps = compute_eval_steps(len(y_train), args.batch_size, args.epochs, n_devices)

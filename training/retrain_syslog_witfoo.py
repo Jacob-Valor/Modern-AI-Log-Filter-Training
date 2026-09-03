@@ -34,8 +34,29 @@ OUTPUT_DIR = ROOT / "models" / "syslog"
 _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
 _FEATURE_STOPWORDS = frozenset(
     {
-        "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her",
-        "was", "one", "our", "out", "has", "have", "been", "some", "same", "also", "its",
+        "the",
+        "and",
+        "for",
+        "are",
+        "but",
+        "not",
+        "you",
+        "all",
+        "any",
+        "can",
+        "had",
+        "her",
+        "was",
+        "one",
+        "our",
+        "out",
+        "has",
+        "have",
+        "been",
+        "some",
+        "same",
+        "also",
+        "its",
     }
 )
 
@@ -43,7 +64,7 @@ _FEATURE_STOPWORDS = frozenset(
 
 SEED = 42
 TEST_SIZE = 0.20
-MAX_TRAIN_EVENTS = 50000          # cap to keep training fast (~30s)
+MAX_TRAIN_EVENTS = 50000  # cap to keep training fast (~30s)
 RNG = np.random.default_rng(SEED)
 
 # ── Feature extraction (mirrors scorer._syslog_feature_vectors) ─────────────
@@ -56,8 +77,7 @@ def prepare_features(feature_names: list[str]) -> list[tuple[str, tuple[str, ...
         lowered = name.lower()
         normalized = lowered.replace("+", " ")
         tokens = tuple(
-            t for t in _TOKEN_RE.findall(normalized)
-            if len(t) > 2 and t not in _FEATURE_STOPWORDS
+            t for t in _TOKEN_RE.findall(normalized) if len(t) > 2 and t not in _FEATURE_STOPWORDS
         )
         prepared.append((normalized, tokens))
     return prepared
@@ -141,9 +161,11 @@ def load_witfoo_data(max_samples: int = 50000) -> tuple[np.ndarray, np.ndarray]:
     sample_df = pd.concat([benign_sample, malicious_sample], ignore_index=True)
     sample_df = sample_df.sample(frac=1, random_state=SEED).reset_index(drop=True)
 
-    print(f"  Training sample: {len(sample_df)} events "
-          f"({int((sample_df['y']==0).sum())} benign, "
-          f"{int((sample_df['y']==1).sum())} malicious)")
+    print(
+        f"  Training sample: {len(sample_df)} events "
+        f"({int((sample_df['y'] == 0).sum())} benign, "
+        f"{int((sample_df['y'] == 1).sum())} malicious)"
+    )
 
     # Load features
     feature_names: list[str] = json.loads(FEATURES_PATH.read_text())
@@ -168,9 +190,8 @@ def load_witfoo_data(max_samples: int = 50000) -> tuple[np.ndarray, np.ndarray]:
     elapsed = time.time() - t0
     nonzero_frac = np.count_nonzero(X.sum(axis=1)) / len(X)
     avg_features = np.mean(np.count_nonzero(X, axis=1))
-    print(f"  Feature extraction: {elapsed:.1f}s "
-          f"({len(X) / elapsed:.0f} events/sec)")
-    print(f"  Events with any feature activated: {nonzero_frac*100:.1f}%")
+    print(f"  Feature extraction: {elapsed:.1f}s ({len(X) / elapsed:.0f} events/sec)")
+    print(f"  Events with any feature activated: {nonzero_frac * 100:.1f}%")
     print(f"  Avg features per event: {avg_features:.2f}")
 
     return X, y, feature_names
@@ -208,9 +229,11 @@ def train_model(
     # ── Class distribution ──────────────────────────────────────────────────
     n_normal = int((y_train == 0).sum())
     n_failure = int((y_train == 1).sum())
-    print(f"\n  Train: {n_normal} benign, {n_failure} malicious "
-          f"(malicious rate: {n_failure/max(n_normal+n_failure,1)*100:.1f}%)")
-    print(f"  Test:  {(y_test==0).sum()} benign, {(y_test==1).sum()} malicious")
+    print(
+        f"\n  Train: {n_normal} benign, {n_failure} malicious "
+        f"(malicious rate: {n_failure / max(n_normal + n_failure, 1) * 100:.1f}%)"
+    )
+    print(f"  Test:  {(y_test == 0).sum()} benign, {(y_test == 1).sum()} malicious")
 
     # ── Train ──────────────────────────────────────────────────────────────
     print("\n  Training XGBoost (n_estimators=200, max_depth=6, lr=0.08)...")
@@ -227,7 +250,8 @@ def train_model(
         random_state=SEED,
     )
     model.fit(
-        X_train_s, y_train,
+        X_train_s,
+        y_train,
         eval_set=[(X_test_s, y_test)],
         verbose=50,
     )
@@ -241,16 +265,13 @@ def train_model(
     print(f"  ROC-AUC: {roc_auc_score(y_test, y_proba):.4f}")
 
     # Metrics
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y_test, y_pred, average="binary"
-    )
+    precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average="binary")
 
     # Zero-vector baseline
     zeros = np.zeros((1, X.shape[1]), dtype=np.float32)
     zero_s = scaler.transform(zeros).astype(np.float32)
     zero_proba = model.predict_proba(zero_s)[0]
-    print(f"  Zero-vector → P(benign)={zero_proba[0]:.4f} "
-          f"P(malicious)={zero_proba[1]:.4f}")
+    print(f"  Zero-vector → P(benign)={zero_proba[0]:.4f} P(malicious)={zero_proba[1]:.4f}")
 
     metrics = {
         "precision": float(precision),
@@ -270,8 +291,7 @@ def train_model(
 # ── Export ─────────────────────────────────────────────────────────────────
 
 
-def export_model(model, scaler: SafeMaxAbsScaler, feature_names: list[str],
-                 metrics: dict) -> None:
+def export_model(model, scaler: SafeMaxAbsScaler, feature_names: list[str], metrics: dict) -> None:
     """Export trained model to ONNX + scaler + metadata."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -302,7 +322,7 @@ def export_model(model, scaler: SafeMaxAbsScaler, feature_names: list[str],
         from onnxmltools.convert.common.data_types import FloatTensorType
 
         initial_type = [("float_input", FloatTensorType([None, len(feature_names)]))]
-        onnx_model =         convert_xgboost(model, initial_types=initial_type)
+        onnx_model = convert_xgboost(model, initial_types=initial_type)
         onnx_path = OUTPUT_DIR / "log_classifier_syslog.onnx"
         with open(onnx_path, "wb") as f:
             f.write(onnx_model.SerializeToString())
@@ -310,6 +330,7 @@ def export_model(model, scaler: SafeMaxAbsScaler, feature_names: list[str],
 
         # Verify ONNX
         import onnxruntime as rt
+
         n_feat = len(feature_names)
         sess = rt.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
         input_name = sess.get_inputs()[0].name
@@ -317,8 +338,10 @@ def export_model(model, scaler: SafeMaxAbsScaler, feature_names: list[str],
         zeros = scaler.transform(np.zeros((1, n_feat), dtype=np.float32)).astype(np.float32)
         outputs = sess.run(None, {input_name: zeros})
         proba = outputs[1][0]
-        print(f"  ONNX verification (zero-vector): "
-              f"P(benign)={proba[0]:.4f} P(malicious)={proba[1]:.4f}")
+        print(
+            f"  ONNX verification (zero-vector): "
+            f"P(benign)={proba[0]:.4f} P(malicious)={proba[1]:.4f}"
+        )
 
         # Test with a known feature active
         vec = np.zeros((1, n_feat), dtype=np.float32)
@@ -326,8 +349,10 @@ def export_model(model, scaler: SafeMaxAbsScaler, feature_names: list[str],
         vec_s = scaler.transform(vec).astype(np.float32)
         outputs2 = sess.run(None, {input_name: vec_s})
         proba2 = outputs2[1][0]
-        print(f"  ONNX verification (feature[0]=1): "
-              f"P(benign)={proba2[0]:.4f} P(malicious)={proba2[1]:.4f}")
+        print(
+            f"  ONNX verification (feature[0]=1): "
+            f"P(benign)={proba2[0]:.4f} P(malicious)={proba2[1]:.4f}"
+        )
 
     except Exception as e:
         print(f"  ONNX export failed: {e}")

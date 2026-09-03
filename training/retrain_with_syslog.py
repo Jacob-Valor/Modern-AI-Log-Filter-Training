@@ -48,31 +48,36 @@ PREPROCESSED_DIR = ROOT / "HDFS_v3_TraceBench" / "preprocessed"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Retrain Tier-1 with combined HDFS + syslog data"
+    parser = argparse.ArgumentParser(description="Retrain Tier-1 with combined HDFS + syslog data")
+    parser.add_argument(
+        "--syslog-normal",
+        type=int,
+        default=5000,
+        help="Number of syslog normal samples (default: 5000)",
     )
     parser.add_argument(
-        "--syslog-normal", type=int, default=5000,
-        help="Number of syslog normal samples (default: 5000)"
+        "--syslog-anomaly",
+        type=int,
+        default=1500,
+        help="Number of syslog anomaly samples (default: 1500)",
     )
     parser.add_argument(
-        "--syslog-anomaly", type=int, default=1500,
-        help="Number of syslog anomaly samples (default: 1500)"
+        "--sample-normal",
+        type=int,
+        default=None,
+        help="Subsample N HDFS normal traces (None = use all)",
     )
     parser.add_argument(
-        "--sample-normal", type=int, default=None,
-        help="Subsample N HDFS normal traces (None = use all)"
-    )
-    parser.add_argument(
-        "--sample-failure", type=int, default=None,
-        help="Subsample N HDFS failure traces (None = use all)"
+        "--sample-failure",
+        type=int,
+        default=None,
+        help="Subsample N HDFS failure traces (None = use all)",
     )
     parser.add_argument("--n-estimators", type=int, default=400)
     parser.add_argument("--max-depth", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument(
-        "--output-dir", type=Path, default=ROOT / "models",
-        help="Directory for model outputs"
+        "--output-dir", type=Path, default=ROOT / "models", help="Directory for model outputs"
     )
     return parser.parse_args()
 
@@ -90,24 +95,20 @@ def load_hdfs_data(
     df_failure = pd.read_csv(failure_path, index_col=0)
 
     if sample_normal is not None:
-        df_normal = df_normal.sample(
-            n=min(sample_normal, len(df_normal)), random_state=42
-        )
+        df_normal = df_normal.sample(n=min(sample_normal, len(df_normal)), random_state=42)
     if sample_failure is not None:
-        df_failure = df_failure.sample(
-            n=min(sample_failure, len(df_failure)), random_state=42
-        )
+        df_failure = df_failure.sample(n=min(sample_failure, len(df_failure)), random_state=42)
 
     # Combine
     X_hdfs = pd.concat([df_normal, df_failure], ignore_index=True)
-    y_hdfs = pd.Series(
-        [0] * len(df_normal) + [1] * len(df_failure),
-        name="label"
-    )
+    y_hdfs = pd.Series([0] * len(df_normal) + [1] * len(df_failure), name="label")
 
     logger.info(
         "HDFS: %d normal + %d failure = %d total, %d features",
-        len(df_normal), len(df_failure), len(X_hdfs), X_hdfs.shape[1]
+        len(df_normal),
+        len(df_failure),
+        len(X_hdfs),
+        X_hdfs.shape[1],
     )
     return X_hdfs, y_hdfs
 
@@ -124,6 +125,7 @@ def load_syslog_data(
     if not normal_path.exists() or not failure_path.exists():
         logger.info("Generating syslog training data...")
         from training.generate_syslog_data import generate_dataset
+
         df, y = generate_dataset(n_normal, n_anomaly)
         df.insert(0, "TaskID", range(len(df)))
         df[normal_path.name.replace(".csv", "")] = ...  # placeholder
@@ -140,14 +142,14 @@ def load_syslog_data(
 
     # Combine
     X_syslog = pd.concat([df_normal, df_failure], ignore_index=True)
-    y_syslog = pd.Series(
-        [0] * len(df_normal) + [1] * len(df_failure),
-        name="label"
-    )
+    y_syslog = pd.Series([0] * len(df_normal) + [1] * len(df_failure), name="label")
 
     logger.info(
         "Syslog: %d normal + %d failure = %d total, %d features",
-        len(df_normal), len(df_failure), len(X_syslog), X_syslog.shape[1]
+        len(df_normal),
+        len(df_failure),
+        len(X_syslog),
+        X_syslog.shape[1],
     )
     return X_syslog, y_syslog
 
@@ -167,7 +169,9 @@ def merge_datasets(
     all_features = sorted(hdfs_features | syslog_features)
     logger.info(
         "Unified vocabulary: %d HDFS + %d syslog = %d total features",
-        len(hdfs_features), len(syslog_features), len(all_features)
+        len(hdfs_features),
+        len(syslog_features),
+        len(all_features),
     )
 
     # Reindex both to unified feature set (fill missing with 0)
@@ -232,11 +236,13 @@ def evaluate(
 
     logger.info(
         "[%s]  Precision=%.4f  Recall=%.4f  F1=%.4f  ROC-AUC=%.4f",
-        split, precision, recall, f1, roc_auc
+        split,
+        precision,
+        recall,
+        f1,
+        roc_auc,
     )
-    logger.info("\n%s", classification_report(
-        y, y_pred, target_names=["normal", "failure"]
-    ))
+    logger.info("\n%s", classification_report(y, y_pred, target_names=["normal", "failure"]))
 
     return {
         "split": split,
@@ -258,8 +264,7 @@ def export_onnx(
         from onnxmltools.convert.common.data_types import FloatTensorType
     except ImportError as exc:
         raise RuntimeError(
-            "onnxmltools is required for ONNX export. "
-            "Install: pip install onnxmltools skl2onnx"
+            "onnxmltools is required for ONNX export. Install: pip install onnxmltools skl2onnx"
         ) from exc
 
     initial_type = [("float_input", FloatTensorType([None, n_features]))]
@@ -297,13 +302,17 @@ def main() -> None:
     scale_pos_weight = n_normal / max(n_failure, 1)
     logger.info(
         "Class balance — normal: %d  failure: %d  scale_pos_weight: %.2f",
-        n_normal, n_failure, scale_pos_weight
+        n_normal,
+        n_failure,
+        scale_pos_weight,
     )
 
     # ── 5. Train XGBoost ───────────────────────────────────────────────────────
     logger.info(
         "Training XGBoost — n_estimators=%d  max_depth=%d  lr=%.3f",
-        args.n_estimators, args.max_depth, args.learning_rate
+        args.n_estimators,
+        args.max_depth,
+        args.learning_rate,
     )
     model = xgb.XGBClassifier(
         n_estimators=args.n_estimators,
@@ -350,17 +359,22 @@ def main() -> None:
 
     # Metrics
     metrics_path = args.output_dir / "training_metrics.json"
-    metrics_path.write_text(json.dumps({
-        "val": val_metrics,
-        "test": test_metrics,
-        "training_data": {
-            "hdfs_normal": int((y_hdfs == 0).sum()),
-            "hdfs_failure": int((y_hdfs == 1).sum()),
-            "syslog_normal": int((y_syslog == 0).sum()),
-            "syslog_failure": int((y_syslog == 1).sum()),
-            "total_features": len(feature_names),
-        }
-    }, indent=2))
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "val": val_metrics,
+                "test": test_metrics,
+                "training_data": {
+                    "hdfs_normal": int((y_hdfs == 0).sum()),
+                    "hdfs_failure": int((y_hdfs == 1).sum()),
+                    "syslog_normal": int((y_syslog == 0).sum()),
+                    "syslog_failure": int((y_syslog == 1).sum()),
+                    "total_features": len(feature_names),
+                },
+            },
+            indent=2,
+        )
+    )
     logger.info("Metrics saved to %s", metrics_path)
 
     logger.info("Training complete!")

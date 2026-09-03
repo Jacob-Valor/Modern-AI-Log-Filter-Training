@@ -43,7 +43,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
     ("ssh", "sshd+connection reset peer", 0.4),
     ("ssh", "sshd+timeout waiting authentication", 0.3),
     ("ssh", "sshd+maximum authentication attempts exceeded", 0.7),
-
     # ── Web server events ──────────────────────────────────────────────────────
     # Use tokens from real access-log and error-log lines.
     ("web", "get+request+returned", 0.1),
@@ -65,7 +64,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
     ("web", "403+forbidden request", 0.3),
     ("web", "500+internal server error", 0.2),
     ("web", "503+service unavailable", 0.2),
-
     # ── Firewall / IDS events ─────────────────────────────────────────────────
     # Use tokens from real iptables/snort/CEF log lines.
     ("firewall", "iptables+DROP+INPUT", 0.6),
@@ -87,7 +85,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
     ("firewall", "paloalto+traffic+denied", 0.5),
     ("firewall", "fortigate+intrusion detected", 0.8),
     ("firewall", "fortigate+malware blocked", 0.9),
-
     # ── Authentication events ──────────────────────────────────────────────────
     # Use tokens from real auth.log / secure lines.
     ("auth", "sudo+COMMAND", 0.15),
@@ -105,7 +102,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
     ("auth", "radius+access reject", 0.6),
     ("auth", "oauth+token validation failed", 0.7),
     ("auth", "oauth+token refresh successful", 0.1),
-
     # ── Windows events ─────────────────────────────────────────────────────────
     # Use tokens from real Windows Event XML / text exports.
     ("windows", "eventid+4625+failed logon", 0.7),
@@ -122,7 +118,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
     ("windows", "eventid+4625+interactive logon", 0.7),
     ("windows", "eventid+4672+privileges assigned", 0.8),
     ("windows", "eventid+4719+security policy changed", 0.6),
-
     # ── System / infrastructure events ─────────────────────────────────────────
     # Use tokens from real syslog / journal lines.
     ("system", "systemd+Started", 0.05),
@@ -136,7 +131,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
     ("system", "named+query", 0.05),
     ("system", "sshd+connection established", 0.1),
     ("system", "sshd+connection closed", 0.1),
-
     # ── HDFS trace events (keep existing vocabulary overlap) ───────────────────
     ("hdfs", "getfileinfo+success", 0.1),
     ("hdfs", "getblocklocations+success", 0.1),
@@ -153,7 +147,6 @@ EVENT_TEMPLATES: list[tuple[str, str, float]] = [
 
 SCENARIOS: list[tuple[str, list[tuple[str, int, int]], bool]] = [
     # (name, [(event_name, min_count, max_count), ...], is_anomaly)
-
     # ── Benign scenarios (label=0) ─────────────────────────────────────────────
     (
         "normal_ssh_session",
@@ -224,7 +217,6 @@ SCENARIOS: list[tuple[str, list[tuple[str, int, int]], bool]] = [
         ],
         False,
     ),
-
     # ── Anomalous scenarios (label=1) ─────────────────────────────────────────
     (
         "ssh_brute_force",
@@ -420,25 +412,26 @@ def generate_dataset(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate synthetic syslog training data"
+    parser = argparse.ArgumentParser(description="Generate synthetic syslog training data")
+    parser.add_argument(
+        "--n-normal",
+        type=int,
+        default=10000,
+        help="Number of normal (benign) samples (default: 10000)",
     )
     parser.add_argument(
-        "--n-normal", type=int, default=10000,
-        help="Number of normal (benign) samples (default: 10000)"
+        "--n-anomaly",
+        type=int,
+        default=2000,
+        help="Number of anomaly (attack) samples (default: 2000)",
     )
     parser.add_argument(
-        "--n-anomaly", type=int, default=2000,
-        help="Number of anomaly (attack) samples (default: 2000)"
+        "--output-dir",
+        type=str,
+        default="HDFS_v3_TraceBench/preprocessed",
+        help="Output directory for CSV files",
     )
-    parser.add_argument(
-        "--output-dir", type=str, default="HDFS_v3_TraceBench/preprocessed",
-        help="Output directory for CSV files"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed (default: 42)"
-    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
