@@ -47,10 +47,10 @@ You must provide one of the following before `kubectl apply -f k8s/`:
 
 ## Secrets
 
-`secret.yaml` ships with `REPLACE-ME` placeholders. Set real values
-before applying, or replace this file with an `ExternalSecret`,
-`SealedSecret`, or a `ServiceAccount`-bound IRSA/Workload Identity token
-in your cluster.
+Copy `secret.example.yaml` to the ignored `secret.local.yaml`, replace every
+required placeholder, then run `make k8s-secrets`. The validator refuses empty
+or placeholder API, metrics, and Elasticsearch credentials. Production clusters
+should instead use an `ExternalSecret`, `SealedSecret`, or workload identity.
 
 ## Network policies
 
