@@ -58,15 +58,18 @@ class SyslogClassifier:
             return
 
         import json as _json
+
         self._feature_names = _json.loads(features_path.read_text())
 
         if scaler_path.exists():
             from logfilter.models.classifier import SafeMaxAbsScaler
+
             self._scaler = SafeMaxAbsScaler.from_json(scaler_path)
 
         if onnx_path.exists():
             try:
                 import onnxruntime as rt
+
                 self._session = rt.InferenceSession(
                     str(onnx_path),
                     providers=["CPUExecutionProvider"],
@@ -79,6 +82,7 @@ class SyslogClassifier:
 
         if json_path.exists():
             import xgboost as xgb
+
             self._xgb_model = xgb.XGBClassifier()
             self._xgb_model.load_model(str(json_path))
             logger.info("Syslog XGBoost classifier loaded", path=str(json_path))

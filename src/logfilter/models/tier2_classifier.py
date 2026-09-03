@@ -46,12 +46,8 @@ class Tier2Classifier:
         uncertainty_high: float | str = 0.90,
     ) -> None:
         self.model_dir = Path(model_dir)
-        self.uncertainty_low = _probability_config(
-            uncertainty_low, "tier2 uncertainty_low"
-        )
-        self.uncertainty_high = _probability_config(
-            uncertainty_high, "tier2 uncertainty_high"
-        )
+        self.uncertainty_low = _probability_config(uncertainty_low, "tier2 uncertainty_low")
+        self.uncertainty_high = _probability_config(uncertainty_high, "tier2 uncertainty_high")
         if self.uncertainty_low > self.uncertainty_high:
             raise ValueError("tier2 uncertainty_low must be <= uncertainty_high")
         self.onnx_path = self.model_dir / "log_classifier_tier2.onnx"
@@ -128,10 +124,7 @@ class Tier2Classifier:
         )
         label_map_present = self.label_map_path.exists()
         ready = (
-            self.model_dir.exists()
-            and tokenizer_present
-            and model_present
-            and label_map_present
+            self.model_dir.exists() and tokenizer_present and model_present and label_map_present
         )
         if not ready:
             self._fail_or_warn(

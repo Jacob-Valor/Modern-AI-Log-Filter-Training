@@ -168,9 +168,7 @@ class NoveltyDetector:
         """Return detector statistics for monitoring."""
         with self._lock:
             avg_score = (
-                self._total_novelty_score / self._score_count
-                if self._score_count > 0
-                else 0.0
+                self._total_novelty_score / self._score_count if self._score_count > 0 else 0.0
             )
             return {
                 "window_size": self.window_size,

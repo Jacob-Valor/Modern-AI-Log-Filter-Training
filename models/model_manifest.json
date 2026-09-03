@@ -26,7 +26,7 @@
       "artifacts": {
         "log_classifier_syslog.onnx": {
           "sha256": "e08a7c3dbdeb9ace",
-          "size_mb": 0.10
+          "size_mb": 0.09
         }
       },
       "onnx_input_features": 110
@@ -82,6 +82,106 @@
           "size_mb": 571.25
         }
       }
+    },
+    "flow_classifier": {
+      "path": "models/flow",
+      "artifacts": {
+        "flow_classifier.onnx": {
+          "sha256": "16ff48e4504b859b",
+          "size_mb": 0.04
+        },
+        "flow_classifier.json": {
+          "sha256": "78bfd19086efc48a",
+          "size_mb": 0.27
+        },
+        "scaler.json": {
+          "sha256": "54b579909b042372",
+          "size_mb": 0.0
+        },
+        "feature_names.json": {
+          "sha256": "b44cbd8eb1ee9685",
+          "size_mb": 0.0
+        },
+        "metrics.json": {
+          "sha256": "e0a9ea83707337b9",
+          "size_mb": 0.01
+        },
+        "calibration.json": {
+          "sha256": "f790c5d0211b18b7",
+          "size_mb": 0.0
+        },
+        "development_feature_hashes.txt": {
+          "sha256": "e6fa1d3d1f5ac433",
+          "size_mb": 14.15
+        },
+        "fusion_calibration.json": {
+          "sha256": "2b095e127d8cc80a",
+          "size_mb": 0.0
+        },
+        "bot_classifier.onnx": {
+          "sha256": "5c55916f6f6e4dcf",
+          "size_mb": 0.29
+        },
+        "bot_classifier.json": {
+          "sha256": "cb984205ca8bf414",
+          "size_mb": 0.66
+        },
+        "bot_scaler.json": {
+          "sha256": "39c0dedd48035712",
+          "size_mb": 0.0
+        },
+        "bot_feature_names.json": {
+          "sha256": "b44cbd8eb1ee9685",
+          "size_mb": 0.0
+        },
+        "bot_metrics.json": {
+          "sha256": "9bb73a50a6d2932d",
+          "size_mb": 0.0
+        },
+        "bot_calibration.json": {
+          "sha256": "cdfa6d7ad988959f",
+          "size_mb": 0.0
+        },
+        "bot_development_feature_hashes.txt": {
+          "sha256": "c4f5d045df47e4b1",
+          "size_mb": 8.15
+        }
+      },
+      "onnx_input_features": 33,
+      "feature_names_count": 33,
+      "feature_count_match": true,
+      "bot_onnx_input_features": 33,
+      "bot_feature_names_count": 33,
+      "bot_feature_count_match": true,
+      "canonical_feature_order_match": true,
+      "bot_canonical_feature_order_match": true
+    },
+    "http_lexical": {
+      "path": "models/http",
+      "artifacts": {
+        "lexical_calibration.json": {
+          "sha256": "9f1c3803783bec50",
+          "size_mb": 0.0
+        }
+      }
+    },
+    "endpoint_novelty": {
+      "path": "models/endpoint",
+      "artifacts": {
+        "endpoint_novelty.onnx": {
+          "sha256": "7d1c45b49ff4b4be",
+          "size_mb": 5.71
+        },
+        "novelty_config.json": {
+          "sha256": "592955048a221dac",
+          "size_mb": 0.0
+        },
+        "novelty_metrics.json": {
+          "sha256": "49f4fc17e335f0b5",
+          "size_mb": 0.0
+        }
+      },
+      "onnx_input_features": 136
     }
   }
 }

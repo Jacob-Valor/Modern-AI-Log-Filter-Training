@@ -329,7 +329,7 @@ class BiEncoderModel:
     ) -> list[NoveltyResult]:
         """
         Compute novelty scores for a batch of texts using existing BiEncoder embeddings.
-        
+
         This method reuses embeddings already computed during dedup/ATT&CK retrieval
         to avoid redundant computation. Call after check_dedup_and_retrieve_batch().
         """

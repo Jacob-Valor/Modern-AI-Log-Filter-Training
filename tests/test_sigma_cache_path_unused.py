@@ -1,19 +1,12 @@
 """
-Defense-in-depth guard for CVE-2025-69872 (diskcache).
+Regression guard against reintroducing CVE-2025-69872 (`diskcache`).
 
-``pysigma`` (a transitive dependency) uses ``diskcache`` to cache MITRE
-ATT&CK and D3FEND data downloaded from GitHub. The diskcache library uses
-Python ``pickle`` for serialization by default, and CVE-2025-69872 (CVSS
-9.8) flags that as a remote-code-execution vector if an attacker can write
-to the cache directory.
+The runtime formerly depended on pySigma, which transitively installed
+`diskcache` and its pickle-backed cache. The scorer now uses a constrained
+`yaml.safe_load_all` parser and declares neither package.
 
-We accept the CVE because our runtime never imports the vulnerable
-modules (``sigma.data.mitre_attack`` / ``sigma.data.mitre_d3fend``). This
-test enforces that contract by AST-walking the source tree and asserting
-the vulnerable imports stay out.
-
-See ``SECURITY.md`` (Vulnerability Exceptions → CVE-2025-69872) for the
-full risk assessment and re-review trigger.
+These tests keep the old diskcache-backed MITRE loaders out of runtime code.
+See `SECURITY.md` for the resolved exception.
 """
 
 from __future__ import annotations
@@ -26,8 +19,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOTS = (REPO_ROOT / "src", REPO_ROOT / "tests")
 
-# Modules that touch diskcache. If you find a legitimate reason to import
-# them, document it in SECURITY.md and add the file to ALLOWED_FILES.
+# Modules that would reintroduce the removed diskcache attack surface.
 VULNERABLE_MODULES = frozenset(
     {
         "sigma.data.mitre_attack",
@@ -87,18 +79,16 @@ def test_vulnerable_pysigma_module_not_imported(vuln_module: str) -> None:
                 offenders.append(str(py_file.relative_to(REPO_ROOT)))
 
     assert not offenders, (
-        f"{vuln_module} is imported by files that should not touch the "
-        f"diskcache code path (CVE-2025-69872). Offending files: {offenders}. "
-        f"See SECURITY.md (Vulnerability Exceptions → CVE-2025-69872)."
+        f"{vuln_module} reintroduces the removed diskcache code path "
+        f"(CVE-2025-69872). Offending files: {offenders}."
     )
 
 
 def test_no_runtime_code_loads_mitre_stix_cache() -> None:
-    """Runtime src/ must not load the diskcache-backed MITRE data loader.
+    """Runtime code must not restore a diskcache-backed MITRE loader.
 
-    The project ships its own MITRE techniques file at
-    ``config/mitre_techniques.json``; any code path that pulls MITRE
-    STIX data through pysigma re-introduces the diskcache attack surface.
+    The project ships its own `config/mitre_techniques.json`; the scorer's
+    constrained Sigma parser does not need remote MITRE data.
     """
     for py_file in _iter_python_files(REPO_ROOT / "src"):
         text = py_file.read_text(encoding="utf-8", errors="ignore")
@@ -110,7 +100,6 @@ def test_no_runtime_code_loads_mitre_stix_cache() -> None:
             "from sigma.data import",
         ):
             assert needle not in text, (
-                f"{py_file.relative_to(REPO_ROOT)} references '{needle}' "
-                f"which routes through the diskcache CVE-2025-69872 code path. "
-                f"See SECURITY.md."
+                f"{py_file.relative_to(REPO_ROOT)} references '{needle}', "
+                "which reintroduces the removed diskcache code path."
             )

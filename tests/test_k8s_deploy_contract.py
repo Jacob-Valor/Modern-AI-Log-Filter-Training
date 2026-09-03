@@ -25,12 +25,10 @@ def _make_target(name: str) -> tuple[str, list[str]]:
     raise AssertionError(f"Make target {name!r} not found")
 
 
-def _k8s_apply_paths() -> list[str]:
-    _, recipe = _make_target("k8s-apply")
+def _kubectl_apply_paths(target: str) -> list[str]:
+    _, recipe = _make_target(target)
     return [
-        match.group(1)
-        for line in recipe
-        if (match := re.search(r"kubectl apply -f (\S+)", line))
+        match.group(1) for line in recipe if (match := re.search(r"kubectl apply -f (\S+)", line))
     ]
 
 
@@ -54,23 +52,22 @@ def _collect_secret_refs(node: Any) -> set[str]:
     return refs
 
 
-def test_k8s_apply_uses_declarative_secret() -> None:
+def test_k8s_apply_requires_validated_local_secret() -> None:
     header, recipe = _make_target("k8s-apply")
 
-    assert "k8s-secrets" not in header
-    assert "k8s/secret.yaml" in _k8s_apply_paths()
+    assert "k8s-secrets" in header
+    assert all("secret" not in path for path in _kubectl_apply_paths("k8s-apply"))
     assert "kubectl create secret" not in "\n".join(recipe)
 
 
-def test_k8s_apply_applies_namespace_before_secret() -> None:
-    applied = _k8s_apply_paths()
+def test_k8s_secret_target_applies_namespace_before_local_secret() -> None:
+    applied = _kubectl_apply_paths("k8s-secrets")
 
-    assert applied[0] == "k8s/namespace.yaml"
-    assert applied[1] == "k8s/secret.yaml"
+    assert applied == ["k8s/namespace.yaml", '"$(K8S_SECRET_FILE)"']
 
 
-def test_secret_manifest_covers_all_logfilter_secret_refs() -> None:
-    secret_docs = _load_yaml_documents(K8S_DIR / "secret.yaml")
+def test_secret_template_covers_all_logfilter_secret_refs() -> None:
+    secret_docs = _load_yaml_documents(K8S_DIR / "secret.example.yaml")
     secret_keys = set(secret_docs[0]["stringData"])
     referenced_keys: set[str] = set()
     for manifest in K8S_DIR.glob("*.yaml"):

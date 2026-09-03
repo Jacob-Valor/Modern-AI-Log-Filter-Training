@@ -185,9 +185,7 @@ class TestThreadSafety:
         def worker(n: int) -> None:
             try:
                 for i in range(10):
-                    tmp_registry.register_run(
-                        model_type="tier1", artifact_dir=f"dir{n}-{i}"
-                    )
+                    tmp_registry.register_run(model_type="tier1", artifact_dir=f"dir{n}-{i}")
             except Exception as exc:
                 errors.append(exc)
 

@@ -136,9 +136,7 @@ def test_cross_encoder_load_with_cache_dir_and_revision(monkeypatch) -> None:
     module = types.SimpleNamespace(CrossEncoder=FakeCrossEncoder)
     monkeypatch.setitem(sys.modules, "sentence_transformers", module)
 
-    model = CrossEncoderModel(
-        model_id="cross", device="cpu", cache_dir="/tmp/cache", revision="v1"
-    )
+    model = CrossEncoderModel(model_id="cross", device="cpu", cache_dir="/tmp/cache", revision="v1")
     model._load()
 
     assert calls[0][1]["cache_folder"] == "/tmp/cache"

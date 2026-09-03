@@ -60,6 +60,4 @@ def test_dockerfile_hf_cache_path_matches_k8s() -> None:
         f"docker-compose.yml must mount the hf-cache volume at {_EXPECTED_HF_CACHE_PATH}"
     )
     bad = compose_found - {_EXPECTED_HF_CACHE_PATH}
-    assert not bad, (
-        f"docker-compose.yml has non-canonical HF cache path(s): {sorted(bad)}."
-    )
+    assert not bad, f"docker-compose.yml has non-canonical HF cache path(s): {sorted(bad)}."

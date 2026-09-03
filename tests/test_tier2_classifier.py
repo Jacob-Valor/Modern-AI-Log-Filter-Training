@@ -149,9 +149,7 @@ def test_tier2_custom_uncertainty_band_accepts_config_strings() -> None:
         ("0.91", "0.90", "<= uncertainty_high"),
     ],
 )
-def test_tier2_invalid_uncertainty_band_fails_fast(
-    low: str, high: str, message: str
-) -> None:
+def test_tier2_invalid_uncertainty_band_fails_fast(low: str, high: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         Tier2Classifier(uncertainty_low=low, uncertainty_high=high)
 
@@ -309,14 +307,13 @@ def test_tier2_logits_with_unexpected_shape_returns_neutral(tmp_path) -> None:
     np.testing.assert_allclose(result, np.array([0.5], dtype=np.float32))
 
 
-def test_tier2_load_falls_back_to_neutral_when_transformers_missing(
-    tmp_path, monkeypatch
-) -> None:
+def test_tier2_load_falls_back_to_neutral_when_transformers_missing(tmp_path, monkeypatch) -> None:
     (tmp_path / "tokenizer.json").write_text("{}")
     (tmp_path / "log_classifier_tier2.onnx").write_bytes(b"fake")
     (tmp_path / "tier2_label_map.json").write_text('{"0": "normal", "1": "failure"}')
 
     import importlib as _importlib
+
     real_import_module = _importlib.import_module
 
     def fake_import_module(name: str, *args, **kwargs):  # noqa: ANN001

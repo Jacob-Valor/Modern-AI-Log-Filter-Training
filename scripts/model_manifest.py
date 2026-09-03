@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).parent.parent
 MODELS_DIR = ROOT / "models"
 MANIFEST_PATH = MODELS_DIR / "model_manifest.json"
+_flow_features: Any = importlib.import_module("logfilter.pipeline.flow_features")
+CANONICAL_FLOW_FEATURES = list(_flow_features.FLOW_FEATURE_NAMES)
 
 MODEL_DIRS = {
     "classifier": ROOT / "models",
@@ -28,6 +30,9 @@ MODEL_DIRS = {
     "biencoder": ROOT / "models" / "biencoder" / "final",
     "cross_encoder": ROOT / "models" / "cross_encoder" / "final",
     "tier2": ROOT / "models" / "tier2",
+    "flow_classifier": ROOT / "models" / "flow",
+    "http_lexical": ROOT / "models" / "http",
+    "endpoint_novelty": ROOT / "models" / "endpoint",
 }
 
 ARTIFACT_PATTERNS = {
@@ -37,15 +42,41 @@ ARTIFACT_PATTERNS = {
     "biencoder": ["config.json", "model.safetensors"],
     "cross_encoder": ["config.json", "model.safetensors"],
     "tier2": ["log_classifier_tier2.onnx"],
+    "flow_classifier": [
+        "flow_classifier.onnx",
+        "flow_classifier.json",
+        "scaler.json",
+        "feature_names.json",
+        "metrics.json",
+        "calibration.json",
+        "development_feature_hashes.txt",
+        "fusion_calibration.json",
+        "bot_classifier.onnx",
+        "bot_classifier.json",
+        "bot_scaler.json",
+        "bot_feature_names.json",
+        "bot_metrics.json",
+        "bot_calibration.json",
+        "bot_development_feature_hashes.txt",
+    ],
+    "http_lexical": ["lexical_calibration.json"],
+    "endpoint_novelty": [
+        "endpoint_novelty.onnx",
+        "novelty_config.json",
+        "novelty_metrics.json",
+    ],
 }
 
 
 def file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()[:16]
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot hash model artifact {path}") from exc
+    return digest.hexdigest()[:16]
 
 
 def file_size_mb(path: Path) -> float:
@@ -56,7 +87,7 @@ def count_onnx_features(model_path: Path) -> int | None:
     if not model_path.exists():
         return None
     try:
-        import onnxruntime as rt
+        import onnxruntime as rt  # type: ignore[import-not-found]
 
         sess = rt.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         shape = sess.get_inputs()[0].shape
@@ -107,6 +138,38 @@ def gather_model_info(model_key: str, model_dir: Path) -> dict[str, Any]:
         if onnx_features is not None:
             info["onnx_input_features"] = onnx_features
 
+    if model_key == "flow_classifier":
+        onnx_features = count_onnx_features(model_dir / "flow_classifier.onnx")
+        named_features = count_feature_names(model_dir / "feature_names.json")
+        if onnx_features is not None:
+            info["onnx_input_features"] = onnx_features
+        if named_features is not None:
+            info["feature_names_count"] = named_features
+        if onnx_features is not None and named_features is not None:
+            info["feature_count_match"] = onnx_features == named_features
+        bot_onnx_features = count_onnx_features(model_dir / "bot_classifier.onnx")
+        bot_named_features = count_feature_names(model_dir / "bot_feature_names.json")
+        if bot_onnx_features is not None:
+            info["bot_onnx_input_features"] = bot_onnx_features
+        if bot_named_features is not None:
+            info["bot_feature_names_count"] = bot_named_features
+        if bot_onnx_features is not None and bot_named_features is not None:
+            info["bot_feature_count_match"] = bot_onnx_features == bot_named_features
+        try:
+            flow_names = json.loads((model_dir / "feature_names.json").read_text())
+            bot_names = json.loads((model_dir / "bot_feature_names.json").read_text())
+        except (OSError, json.JSONDecodeError, TypeError):
+            info["canonical_feature_order_match"] = False
+            info["bot_canonical_feature_order_match"] = False
+        else:
+            info["canonical_feature_order_match"] = flow_names == CANONICAL_FLOW_FEATURES
+            info["bot_canonical_feature_order_match"] = bot_names == CANONICAL_FLOW_FEATURES
+
+    if model_key == "endpoint_novelty":
+        onnx_features = count_onnx_features(model_dir / "endpoint_novelty.onnx")
+        if onnx_features is not None:
+            info["onnx_input_features"] = onnx_features
+
     return info
 
 
@@ -117,7 +180,10 @@ def generate_manifest() -> dict[str, Any]:
         if model_dir.exists():
             manifest["models"][key] = gather_model_info(key, model_dir)
         else:
-            manifest["models"][key] = {"path": str(model_dir.relative_to(ROOT)), "status": "missing"}
+            manifest["models"][key] = {
+                "path": str(model_dir.relative_to(ROOT)),
+                "status": "missing",
+            }
 
     return manifest
 
@@ -142,9 +208,18 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
             actual_hash = file_sha256(artifact_path)
             if actual_hash != meta.get("sha256"):
                 errors.append(
-                    f"{key}: {pattern} hash mismatch "
-                    f"(expected {meta['sha256']}, got {actual_hash})"
+                    f"{key}: {pattern} hash mismatch (expected {meta['sha256']}, got {actual_hash})"
                 )
+
+        if key == "flow_classifier":
+            for artifact in ("feature_names.json", "bot_feature_names.json"):
+                try:
+                    names = json.loads((model_dir / artifact).read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, TypeError) as exc:
+                    errors.append(f"{key}: cannot read {artifact}: {exc}")
+                    continue
+                if names != CANONICAL_FLOW_FEATURES:
+                    errors.append(f"{key}: {artifact} order differs from runtime schema")
 
         if key == "classifier" and "feature_count_match" in expected:
             onnx_path = model_dir / "log_classifier.onnx"
@@ -181,7 +256,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: Manifest not found at {MANIFEST_PATH}")
             print("Run: python scripts/model_manifest.py generate")
             return 1
-        manifest = json.loads(MANIFEST_PATH.read_text())
+        try:
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: Cannot read manifest: {exc}")
+            return 1
         errors = validate_manifest(manifest)
         if errors:
             print("VALIDATION FAILED:")
