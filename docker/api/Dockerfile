@@ -13,11 +13,14 @@ WORKDIR /app
 # Install uv for reproducible, lockfile-driven installs
 COPY --from=ghcr.io/astral-sh/uv:0.11.4 /uv /usr/local/bin/uv
 
-# Install Python deps from lockfile (layer caching)
+# Install the API's lockfile-resolved runtime dependency group.
 COPY uv.lock pyproject.toml ./
-RUN uv pip install --system --no-cache --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
-COPY requirements-api.txt .
-RUN uv pip install --system --no-cache -r requirements-api.txt
+RUN uv export --frozen --no-dev --only-group api --no-emit-project \
+        --output-file /tmp/requirements.lock \
+    && uv pip install --system --no-cache \
+        --index https://download.pytorch.org/whl/cpu \
+        --index-strategy unsafe-best-match \
+        -r /tmp/requirements.lock
 
 # Copy source
 COPY src/ ./src/

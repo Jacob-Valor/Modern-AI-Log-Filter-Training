@@ -1,45 +1,11 @@
-# Git
-.git
-.gitignore
-
-# Python
-__pycache__
-*.pyc
-*.pyo
-*.egg-info
-.venv
-venv
-*.egg
-.pytest_cache
-.mypy_cache
-
-# Large data files (build context limit)
-artifacts/
-HDFS_v3_TraceBench/preprocessed/*.csv
-HDFS_v3_TraceBench/preprocessed/*.json
-HDFS_v3_TraceBench/tracebench/
-models/
-
-# IDE
-.vscode
-.idea
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Documentation (not needed at runtime)
-*.md
-notebooks/
-tests/
-training/
-
-# CI/ops (not needed at runtime)
-.github/
-k8s/
-# scripts/ excluded EXCEPT download_hf_models.py (required by docker/api/Dockerfile:22)
-scripts/*
+# Production images only consume these paths. Keep datasets, model artifacts,
+# local environments, reports, and developer state out of every build context.
+**
+!src/
+!src/**
+!config/
+!config/**
+!scripts/
 !scripts/download_hf_models.py
-agents/
+!pyproject.toml
+!uv.lock

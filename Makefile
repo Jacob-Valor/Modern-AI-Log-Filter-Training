@@ -4,12 +4,14 @@
 .PHONY: help install dev-install train evaluate test test-coverage lint format \
          verify audit security-check up up-dev down logs logs-api logs-router \
          build clean models-dir smoke-test smoke-pipeline benchmark \
+         download-beth download-cic train-flow train-endpoint train-all \
          k8s-apply k8s-delete k8s-secrets certs
 
 PYTHON     ?= python3
 PIP        ?= pip3
 COMPOSE    ?= docker compose
 SAMPLE_N   ?= 50000   # subsample for quick training (default 50K normal)
+K8S_SECRET_FILE ?= k8s/secret.local.yaml
 
 help:
 	@echo ""
@@ -19,7 +21,7 @@ help:
 	@echo "  dev-install    Install all deps including dev/test tools"
 	@echo ""
 	@echo "  train          Train XGBoost classifier on HDFS TraceBench data"
-	@echo "                 (set SAMPLE_N=0 to use all ~226K samples)"
+	@echo "  train-all      Train tier-1 with all available samples"
 	@echo "  evaluate       Evaluate saved model on test set"
 	@echo ""
 	@echo "  test           Run all unit tests (pytest)"
@@ -55,14 +57,42 @@ models-dir:
 
 train: models-dir
 	@echo "Training classifier (SAMPLE_N=$(SAMPLE_N)) …"
-	@if [ "$(SAMPLE_N)" = "0" ]; then \
-		PYTHONPATH=. $(PYTHON) training/train.py; \
-	else \
-		PYTHONPATH=. $(PYTHON) training/train.py --sample-normal $(SAMPLE_N) --sample-failure 10000; \
-	fi
+	PYTHONPATH=. $(PYTHON) training/train.py --sample-normal $(SAMPLE_N) --sample-failure 10000
+
+train-all: models-dir
+	@echo "Training classifier with all available samples …"
+	PYTHONPATH=. $(PYTHON) training/train.py
 
 evaluate:
 	PYTHONPATH=. $(PYTHON) training/evaluate.py
+
+# Domain-model artifacts are intentionally not committed. These reproducible
+# targets provision datasets and regenerate manifest-verified ONNX models.
+download-beth:
+	mkdir -p demo_data/BETH
+	kaggle datasets download -d katehighnam/beth-dataset -p demo_data/BETH --unzip
+
+# Downloads the official CIC-IDS2017 MachineLearningCSV archive to the exact
+# path consumed by training/train_flow_classifier.py.
+download-cic:
+	PYTHONPATH=src $(PYTHON) scripts/download_cic_ids2017.py 2017
+
+train-flow: models-dir
+	[ -f demo_data/CIC-IDS2017/MachineLearningCSV.zip ] || \
+		{ echo "CIC-IDS2017 missing; run 'make download-cic'"; exit 1; }
+	[ -f demo_data/CSIC-2010/normalTrafficTraining.txt ] || \
+		{ echo "CSIC-2010 benign training data missing"; exit 1; }
+	PYTHONPATH=src $(PYTHON) training/train_flow_classifier.py
+	PYTHONPATH=src $(PYTHON) training/train_bot_flow_classifier.py
+	PYTHONPATH=src $(PYTHON) training/calibrate_flow_fusion.py
+	PYTHONPATH=src $(PYTHON) training/calibrate_http_lexical.py
+	PYTHONPATH=src $(PYTHON) scripts/model_manifest.py generate
+
+train-endpoint: models-dir
+	[ -f demo_data/BETH/labelled_training_data.csv ] || \
+		{ echo "BETH missing; run 'make download-beth'"; exit 1; }
+	PYTHONPATH=src $(PYTHON) training/train_endpoint_novelty.py
+	PYTHONPATH=src $(PYTHON) scripts/model_manifest.py generate
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
@@ -95,21 +125,7 @@ model-manifest-validate:
 verify: lint test-coverage smoke-pipeline
 
 audit:
-	# CVE-2025-69872 (diskcache): vulnerability exception — see SECURITY.md.
-	# diskcache is a transitive dep of pysigma. pysigma is used ONLY for
-	# Sigma rule loading (sigma.collection). The vulnerable code path
-	# (sigma.data.mitre_attack) is never imported in this project — MITRE
-	# data comes from config/mitre_techniques.json. No upstream fix exists
-	# (Snyk: "no fixed version" as of audit date). Re-review when diskcache
-	# ships a patched release.
-	# CVE-2025-3000 (torch): vulnerability exception — see SECURITY.md.
-	# The current public torch index exposes 2.11.0 and 2.12.0 for this CI
-	# environment; both are flagged and pip-audit lists no fix version. Keep
-	# torch constrained below 2.12 to avoid the latest vulnerable release line,
-	# and re-review when PyTorch publishes a fixed compatible wheel.
-	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off \
-		--ignore-vuln CVE-2025-69872 \
-		--ignore-vuln CVE-2025-3000
+	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off
 
 security-check: verify audit
 
@@ -128,7 +144,7 @@ build:
 	$(COMPOSE) build
 
 up: models-dir
-	@test -f .env || (echo "ERROR: .env missing. Copy .env.example to .env and set required values." && exit 1)
+	[ -f .env ] || { echo "ERROR: .env missing. Copy .env.example to .env and set required values."; exit 1; }
 	$(COMPOSE) up -d
 	@echo ""
 	@echo "Services starting …"
@@ -160,10 +176,7 @@ logs-router:
 
 smoke-test:
 	@echo "Smoke-testing API …"
-	@if [ ! -f .env ]; then \
-		echo "ERROR: .env missing. Copy .env.example to .env and set required values."; \
-		exit 1; \
-	fi
+	[ -f .env ] || { echo "ERROR: .env missing. Copy .env.example to .env and set required values."; exit 1; }
 	@set -a; . ./.env; set +a; \
 	curl -fsS http://localhost:8080/health | python3 -m json.tool
 	@echo ""
@@ -180,12 +193,15 @@ benchmark:
 # ── Kubernetes ─────────────────────────────────────────────────────────────────
 
 k8s-secrets:
+	@test -f "$(K8S_SECRET_FILE)" || { \
+		echo "Missing $(K8S_SECRET_FILE). Copy k8s/secret.example.yaml and replace placeholders."; \
+		exit 1; \
+	}
+	$(PYTHON) scripts/validate_k8s_secret.py "$(K8S_SECRET_FILE)"
 	kubectl apply -f k8s/namespace.yaml
-	kubectl apply -f k8s/secret.yaml
+	kubectl apply -f "$(K8S_SECRET_FILE)"
 
-k8s-apply:
-	kubectl apply -f k8s/namespace.yaml
-	kubectl apply -f k8s/secret.yaml
+k8s-apply: k8s-secrets
 	kubectl apply -f k8s/configmap.yaml
 	kubectl apply -f k8s/pvc.yaml
 	kubectl apply -f k8s/network-policies.yaml

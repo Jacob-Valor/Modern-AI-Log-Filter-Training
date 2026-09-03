@@ -184,7 +184,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 6,
       "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
@@ -219,7 +219,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 7,
       "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
@@ -256,7 +256,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
       "id": 8,
       "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
@@ -288,7 +288,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "id": 9,
       "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
@@ -303,6 +303,304 @@
         }
       ],
       "title": "Threat Score Distribution (p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "HIGH priority events in the last 15 minutes",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "rgba(255, 0, 0, 0.15)", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 3, "w": 6, "x": 0, "y": 5},
+      "id": 15,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "sum(increase(logfilter_events_total{priority=\"HIGH\"}[15m]))",
+          "legendFormat": "HIGH",
+          "refId": "A"
+        }
+      ],
+      "title": "Critical Events (15m)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "MEDIUM priority events in the last 15 minutes",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "rgba(255, 165, 0, 0.15)", "value": null},
+              {"color": "orange", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 3, "w": 6, "x": 6, "y": 5},
+      "id": 16,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "sum(increase(logfilter_events_total{priority=\"MEDIUM\"}[15m]))",
+          "legendFormat": "MEDIUM",
+          "refId": "A"
+        }
+      ],
+      "title": "Suspicious Events (15m)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "LOW priority events in the last 15 minutes",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "rgba(0, 0, 255, 0.10)", "value": null},
+              {"color": "blue", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 3, "w": 6, "x": 12, "y": 5},
+      "id": 17,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "sum(increase(logfilter_events_total{priority=\"LOW\"}[15m]))",
+          "legendFormat": "LOW",
+          "refId": "A"
+        }
+      ],
+      "title": "Low-Risk Events (15m)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "INFO priority events in the last 15 minutes",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "rgba(0, 200, 0, 0.10)", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 3, "w": 6, "x": 18, "y": 5},
+      "id": 18,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "sum(increase(logfilter_events_total{priority=\"INFO\"}[15m]))",
+          "legendFormat": "INFO",
+          "refId": "A"
+        }
+      ],
+      "title": "Informational Events (15m)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 24},
+      "id": 10,
+      "panels": [],
+      "title": "Routing & Attack Intelligence",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 25},
+      "id": 11,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "single"}
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "rate(logfilter_events_technique_total[5m])",
+          "legendFormat": "{{ technique }}",
+          "refId": "A"
+        }
+      ],
+      "title": "MITRE ATT&CK Techniques / sec",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 4, "x": 8, "y": 25},
+      "id": 12,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "topk(6, sum by (technique) (rate(logfilter_events_technique_total[5m])))",
+          "legendFormat": "{{ technique }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Techniques (5m)",
+      "type": "piechart"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 25},
+      "id": 19,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "topk(4, sum by (priority) (increase(logfilter_events_total[15m])))",
+          "legendFormat": "{{ priority }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Priority Distribution (15m)",
+      "type": "piechart"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 25},
+      "id": 14,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "single"}
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "rate(logfilter_events_technique_total{technique!=\"none\"}[5m])",
+          "legendFormat": "attack events",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(logfilter_events_technique_total{technique=\"none\"}[5m])",
+          "legendFormat": "benign / unmatched",
+          "refId": "B"
+        }
+      ],
+      "title": "Attack Events vs Benign / sec",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 32},
+      "id": 13,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "single"}
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "rate(logfilter_events_source_total[5m])",
+          "legendFormat": "{{ source_type }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Events by Source Type / sec",
       "type": "timeseries"
     }
   ],
