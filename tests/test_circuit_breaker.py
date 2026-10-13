@@ -141,3 +141,85 @@ def test_cb_unexpected_exception_propagates() -> None:
     with pytest.raises(ValueError):
         cb.call(lambda: (_ for _ in ()).throw(ValueError("fail")))
     assert cb.state is State.CLOSED
+
+
+def test_cb_half_open_admits_at_most_max_calls_probes() -> None:
+    """The documented contract is "one probe request", not "unbounded probes"."""
+    import threading
+
+    cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=1)
+    with pytest.raises(RuntimeError):
+        cb.call(lambda: (_ for _ in ()).throw(RuntimeError("trip")))
+
+    lock = threading.Lock()
+    live = {"now": 0, "peak": 0}
+    barrier = threading.Barrier(5)
+
+    def slow_probe() -> int:
+        with lock:
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+        time.sleep(0.05)
+        with lock:
+            live["now"] -= 1
+        return 1
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            cb.call(slow_probe)
+        except (RuntimeError, CircuitBreakerOpen):
+            pass
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert live["peak"] == 1
+    assert cb.state is State.CLOSED, "the admitted probe succeeded, so the breaker closes"
+
+
+def test_cb_call_checked_counts_partial_failures_towards_threshold() -> None:
+    """A result-level failure must not decay away as if the call succeeded."""
+    cb = CircuitBreaker("test", failure_threshold=3)
+
+    for _ in range(3):
+        result = cb.call_checked(lambda: {"errors": True}, lambda r: bool(r.get("errors")))
+
+    assert result == {"errors": True}
+    assert cb.state is State.OPEN
+
+
+def test_cb_call_checked_treats_clean_results_as_successes() -> None:
+    cb = CircuitBreaker("test", failure_threshold=3)
+
+    for _ in range(10):
+        result = cb.call_checked(lambda: {"errors": False}, lambda r: bool(r.get("errors")))
+
+    assert result == {"errors": False}
+    assert cb.state is State.CLOSED
+    assert cb._failure_count == 0
+
+
+def test_cb_call_checked_still_records_raised_failures() -> None:
+    cb = CircuitBreaker("test", failure_threshold=2)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            cb.call_checked(
+                lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+                lambda r: False,
+            )
+
+    assert cb.state is State.OPEN
+
+
+def test_cb_record_failure_opens_the_circuit() -> None:
+    cb = CircuitBreaker("test", failure_threshold=2)
+
+    cb.record_failure()
+    assert cb.state is State.CLOSED
+    cb.record_failure()
+    assert cb.state is State.OPEN

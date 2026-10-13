@@ -33,7 +33,13 @@ sys.path.insert(0, str(ROOT))
 
 from logfilter.models.classifier import SafeMaxAbsScaler  # noqa: E402
 from training.data_loader import load_traces, split_dataset  # noqa: E402
-from training.thresholds import summarize_threshold_sweep, threshold_sweep  # noqa: E402
+from training.thresholds import (  # noqa: E402
+    FIXED_FPR_TARGETS,
+    summarize_threshold_sweep,
+    threshold_metrics,
+    threshold_sweep,
+    thresholds_at_fixed_fpr,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,10 +86,25 @@ def main() -> None:
 
     scaler = SafeMaxAbsScaler.from_json(args.model_dir / "scaler.json")
 
-    # Load data and reproduce the exact same test split
+    # Load data and reproduce the exact same train/val/test split used by train.py
     X, y, _ = load_traces()
-    _, _, X_test, _, _, y_test = split_dataset(X, y)
+    _, X_val, X_test, _, y_val, y_test = split_dataset(X, y)
+    X_val_s = scaler.transform(X_val)
     X_test_s = scaler.transform(X_test)
+
+    # Thresholds are calibrated on the validation split only; the test split is
+    # scored once, at cutoffs chosen without ever looking at it.
+    val_prob = model.predict_proba(X_val_s)[:, 1]
+    calibration = thresholds_at_fixed_fpr(y_val, val_prob, FIXED_FPR_TARGETS)
+    calibrated = [
+        (key, row) for key, row in calibration.items() if row.get("threshold") is not None
+    ]
+    if not calibrated:
+        raise RuntimeError("no validation-calibrated Tier-1 threshold could be selected")
+    selected_target, selected_threshold = calibrated[0]
+    logger.info(
+        "Validation-calibrated threshold %.4f at target FPR %s", selected_threshold, selected_target
+    )
 
     y_prob = model.predict_proba(X_test_s)[:, 1]
     y_pred = (y_prob >= args.threshold).astype(np.int32)
@@ -109,9 +130,19 @@ def main() -> None:
     print(f"  True Positives  (failure correctly flagged): {tp:,}")
     print(f"\n  False Negative Rate (missed failures): {fn / max(fn + tp, 1):.4f}")
 
-    sweep = threshold_sweep(y_test, y_prob)
+    selected_test = threshold_metrics(y_test, y_prob, selected_threshold)
+    print(f"\nTest metrics at the validation-calibrated threshold {selected_threshold:.4f}:")
+    print(
+        f"  Precision={selected_test['precision']:.4f}  "
+        f"Recall={selected_test['recall']:.4f}  F1={selected_test['f1']:.4f}  "
+        f"FPR={selected_test['false_positive_rate']:.4f}"
+    )
+
+    # Sweep validation only — sweeping test would make the winner a selection
+    # maximand rather than a generalisation estimate.
+    sweep = threshold_sweep(y_val, val_prob)
     summary = summarize_threshold_sweep(sweep, min_recall=args.min_recall)
-    print("\nThreshold strategy candidates:")
+    print("\nThreshold strategy candidates (validation sweep):")
     print(f"  Best F1: {summary['best_f1']}")
     print(
         f"  Best precision at recall>={args.min_recall:.2f}: "
@@ -120,8 +151,12 @@ def main() -> None:
     if args.threshold_report is not None:
         payload = {
             "model": "tier1_xgboost",
-            "split": "test",
-            "selected_threshold": round(float(args.threshold), 4),
+            "split": "val",
+            "operating_threshold": round(float(args.threshold), 4),
+            "val_fixed_fpr_calibration": calibration,
+            "selected_target_fpr": selected_target,
+            "selected_threshold": round(float(selected_threshold), 4),
+            "test_at_selected_threshold": selected_test,
             "summary": summary,
             "sweep": sweep,
         }

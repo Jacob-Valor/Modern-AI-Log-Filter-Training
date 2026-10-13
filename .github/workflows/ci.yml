@@ -7,6 +7,16 @@ on:
       - main
       - dev
 
+# Least privilege: nothing in this workflow writes to the repository or needs
+# package/identity access. CD holds its own write scopes.
+permissions:
+  contents: read
+
+# Superseded runs are cancelled so a push does not queue behind its own backlog.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   secret-scan:
     runs-on: ubuntu-latest
@@ -14,12 +24,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Scan for committed secrets
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -29,10 +39,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
@@ -51,6 +61,9 @@ jobs:
       - name: Lint
         run: python -m ruff check src/ tests/ training/
 
+      - name: Format check
+        run: python -m ruff format --check src/ tests/ training/
+
       - name: Type check
         run: |
           python -m pip install mypy
@@ -60,15 +73,18 @@ jobs:
         run: python -m pytest tests/ -m "not integration" --cov=src/logfilter --cov-report=term-missing
         env:
           LOGFILTER_API_TOKEN: ci-test-api-token
-          LOGFILTER_ADMIN_TOKEN: ci-test-admin-token
           LOGFILTER_METRICS_TOKEN: ci-test-metrics-token
+          # config/config.yaml declares ES_PASSWORD mandatory via "${ES_PASSWORD:?...}".
+          # load_config() fails closed when it is unset, so the fast jobs that read
+          # the tracked config (unit tests, smoke test) must supply it.
+          ES_PASSWORD: ci-test-es-password
 
       - name: Pipeline smoke test
         run: python scripts/smoke_test_pipeline.py
         env:
           LOGFILTER_API_TOKEN: ci-test-api-token
-          LOGFILTER_ADMIN_TOKEN: ci-test-admin-token
           LOGFILTER_METRICS_TOKEN: ci-test-metrics-token
+          ES_PASSWORD: ci-test-es-password
 
   dependency-audit:
     runs-on: ubuntu-latest
@@ -76,21 +92,33 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Audit dependency tree (same effective command as `make audit`)
+      - name: Audit the locked dependency set (same effective command as `make audit`)
         shell: bash
         run: |
           python -m pip install --upgrade pip pip-audit
-          python -m pip install -r requirements.txt
-          # Match `make audit` resolution so transitive CVEs are caught.
-          python -m pip_audit -r requirements.txt --progress-spinner off
+          # All four production images install from uv.lock via `uv export --frozen`,
+          # so requirements.txt (fully unpinned ranges) is NOT what ships. Audit the
+          # exact union of the image dependency groups, using the same uv version as
+          # the Dockerfiles so the export matches the shipped resolution.
+          python -m pip install "uv==0.11.4"
+          uv export --frozen \
+            --only-group api --only-group archive \
+            --only-group collector --only-group router \
+            --no-emit-project \
+            --output-file /tmp/locked.txt
+          # --no-deps --disable-pip: every pin is already exact, and the locked set
+          # contains a local-version torch (+cpu) from the PyTorch CPU index that
+          # pip cannot resolve without that index.
+          python -m pip_audit -r /tmp/locked.txt \
+            --no-deps --disable-pip --progress-spinner off
 
   integration-test:
     runs-on: ubuntu-latest
@@ -99,10 +127,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip

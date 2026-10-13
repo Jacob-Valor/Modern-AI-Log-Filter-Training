@@ -3,16 +3,38 @@ kind: ConfigMap
 metadata:
   name: logfilter-config
   namespace: logfilter
+  labels:
+    app.kubernetes.io/name: logfilter
+    app.kubernetes.io/component: config
 data:
+  # The mounted config document. Kept in sync with config/config.yaml — see the
+  # divergence policy at the top of this block.
   config.yaml: |
+    # AI Log Filter — in-cluster configuration
+    #
+    # Every workload in k8s/ mounts this ConfigMap at /app/config, which REPLACES
+    # that directory. The config and the data files the image bakes there are
+    # therefore shadowed, and anything not listed below is ABSENT in-cluster.
+    # Keep this file in sync with the tracked config/config.yaml.
+    #
+    # Divergence policy: config/config.yaml is the single source of truth. A value
+    # here may differ only where the cluster network topology or credential wiring
+    # forces it; every such deviation carries a `# K8S:` comment explaining why.
     kafka:
+      # K8S: in-cluster broker service. k8s/README.md requires the operator to
+      # provide logfilter-kafka (ExternalName, in-cluster chart, or operator).
       bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:logfilter-kafka:9092}"
       topics:
         raw_logs: "raw-logs"
         scored_logs: "scored-logs"
         dlq: "logfilter-dlq"
-      auto_offset_reset: "latest"
+      auto_offset_reset: "earliest"
       max_poll_records: 500
+      # Batches are large (max_poll_records) and a per-record DLQ path can retry
+      # three times, so the poll loop needs well over kafka-python's 300s default
+      # before the broker considers the consumer dead and rebalances the group.
+      max_poll_interval_ms: "${KAFKA_MAX_POLL_INTERVAL_MS:900000}"
+      session_timeout_ms: "${KAFKA_SESSION_TIMEOUT_MS:45000}"
       security:
         protocol: "${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}"
         sasl:
@@ -25,83 +47,627 @@ data:
           keyfile: "${KAFKA_SSL_KEYFILE:}"
           password: "${KAFKA_SSL_PASSWORD:}"
           check_hostname: "${KAFKA_SSL_CHECK_HOSTNAME:true}"
+
     elasticsearch:
+      # K8S: in-cluster/managed cluster service (see k8s/README.md — it is not
+      # defined by this directory and must be provided by the operator).
       hosts: ["${ES_HOST:http://logfilter-elasticsearch:9200}"]
       index_prefix: "raw-logs"
       username: "${ES_USER:elastic}"
-      password: "${ES_PASSWORD:}"
+      # No default. ES_PASSWORD must be set in the environment; api.yaml injects it
+      # from the logfilter-secrets Secret, so this fails closed if the Secret is
+      # missing or empty instead of authenticating with an empty password.
+      password: "${ES_PASSWORD:?ES_PASSWORD must be set in .env}"
       index_shards: 1
-      index_replicas: 0
+      # K8S default is 1, not the tracked 0. k8s/ ships no single-node
+      # Elasticsearch: k8s/README.md requires an external managed service or the
+      # Elastic operator chart, both of which are multi-node, so 0 would leave the
+      # raw-log archive with zero copies while 1 still fits a 2-data-node cluster.
+      # Point this at a 1-node ES (the docker-compose dev stack) and set
+      # LOGFILTER_ES_INDEX_REPLICAS=0 on BOTH logfilter-api and logfilter-archive —
+      # both provision the index from this same key and must agree.
+      index_replicas: "${LOGFILTER_ES_INDEX_REPLICAS:1}"
+      redaction:
+        enabled: "${LOGFILTER_REDACTION_ENABLED:true}"
+        redact_emails: "${LOGFILTER_REDACT_EMAILS:true}"
+        redact_credit_cards: "${LOGFILTER_REDACT_CREDIT_CARDS:true}"
+        redact_secrets: "${LOGFILTER_REDACT_SECRETS:true}"
+        # IPs and hostnames are critical SIEM investigation signals. Keep them by
+        # default; enable these in stricter privacy environments.
+        redact_ip_addresses: "${LOGFILTER_REDACT_IP_ADDRESSES:false}"
+        redact_hostnames: "${LOGFILTER_REDACT_HOSTNAMES:false}"
+
+    # Shared cache directory for downloaded transformer models.
+    # K8S: left empty on purpose — every model_id below is a local artifact on the
+    # logfilter-models PVC (mounted read-only at /app/models), so nothing is pulled
+    # from the hub at startup. Set HF_HOME to a writable cache if a deployment
+    # does use hub downloads.
+    cache_dir: "${HF_HOME:}"
+
     models:
+      # ONNX classifier trained on HDFS TraceBench
       classifier:
         path: "${LOGFILTER_CLASSIFIER_PATH:models/log_classifier.onnx}"
+
+      # Leakage-safe numeric CICFlowMeter classifier. The model is trained only on
+      # observed flow values; labels, categories, IPs and timestamps are excluded.
+      # K8S: k8s/api.yaml sets LOGFILTER_FLOW_ENABLED=true.
+      flow:
+        enabled: "${LOGFILTER_FLOW_ENABLED:false}"
+        path: "${LOGFILTER_FLOW_MODEL_PATH:models/flow/flow_classifier.onnx}"
+        scaler_path: "${LOGFILTER_FLOW_SCALER_PATH:models/flow/scaler.json}"
+        feature_names_path: "${LOGFILTER_FLOW_FEATURES_PATH:models/flow/feature_names.json}"
+        fusion_calibration_path: "${LOGFILTER_FLOW_FUSION_CALIBRATION:models/flow/fusion_calibration.json}"
+        fusion_target_fpr: "${LOGFILTER_FLOW_FUSION_TARGET_FPR:0.01}"
+        bot:
+          enabled: "${LOGFILTER_BOT_FLOW_ENABLED:false}"
+          path: "${LOGFILTER_BOT_FLOW_MODEL_PATH:models/flow/bot_classifier.onnx}"
+          scaler_path: "${LOGFILTER_BOT_FLOW_SCALER_PATH:models/flow/bot_scaler.json}"
+          feature_names_path: "${LOGFILTER_BOT_FLOW_FEATURES_PATH:models/flow/bot_feature_names.json}"
+          calibration_path: "${LOGFILTER_BOT_FLOW_CALIBRATION:models/flow/bot_calibration.json}"
+          target_fpr: "${LOGFILTER_BOT_FLOW_TARGET_FPR:0.01}"
+          alert_floor: "${LOGFILTER_BOT_FLOW_ALERT_FLOOR:0.65}"
+
+      # BETH one-class novelty model: trained with zero evil-labelled samples and
+      # calibrated on a separate validation split. This is an open-set proxy only.
+      # K8S: k8s/api.yaml sets LOGFILTER_ENDPOINT_NOVELTY_ENABLED=true.
+      endpoint_novelty:
+        enabled: "${LOGFILTER_ENDPOINT_NOVELTY_ENABLED:false}"
+        path: "${LOGFILTER_ENDPOINT_NOVELTY_PATH:models/endpoint/endpoint_novelty.onnx}"
+        config_path: "${LOGFILTER_ENDPOINT_NOVELTY_CONFIG:models/endpoint/novelty_config.json}"
+        score_scale: "${LOGFILTER_ENDPOINT_NOVELTY_SCALE:0.03}"
+
+      # SecureBERT 2.0 family, fine-tuned locally on the tracked datasets.
+      # K8S: model_id is a path on the models PVC, not a Hugging Face hub id — the
+      # API must not reach the internet at startup. cache_dir/revision stay unset
+      # for the same reason.
       ner:
         enabled: "${LOGFILTER_NER_ENABLED:true}"
-        model_id: "cisco-ai/SecureBERT2.0-NER"
+        model_id: "models/ner/final"
         device: "cpu"
         batch_size: 32
         min_confidence: 0.80
+
       biencoder:
         enabled: "${LOGFILTER_BIENCODER_ENABLED:true}"
-        model_id: "cisco-ai/SecureBERT2.0-biencoder"
+        model_id: "models/biencoder/final"
         device: "cpu"
         batch_size: 64
         dedup_threshold: 0.95
         dedup_window_minutes: 5
         faiss_top_k: 3
+
       cross_encoder:
         enabled: "${LOGFILTER_CROSS_ENCODER_ENABLED:true}"
-        model_id: "cisco-ai/SecureBERT2.0-cross_encoder"
+        model_id: "models/cross_encoder/final"
         device: "cpu"
         batch_size: 16
+
+      # Shipped as the `mitre_techniques.json` key of this ConfigMap (see below);
+      # without it ATT&CK candidate retrieval silently degrades to an empty index.
       mitre_techniques_path: "config/mitre_techniques.json"
+
     scoring:
       weights:
         classifier: 0.35
         entity_boost: 0.25
         cross_encoder: 0.40
-        novelty: 0.0
+        novelty: 0.15
       entity_boost_value: 0.20
       dedup_penalty: 0.30
+
+      # Sigma matching reads config/sigma_rules/*.yml, shipped as the
+      # `sigma_rules_baseline_rules.yml` key of this ConfigMap (see below).
+      sigma:
+        enabled: "${LOGFILTER_SIGMA_ENABLED:true}"
+
       routing:
         high: "${LOGFILTER_SCORE_HIGH:0.80}"
         medium: "${LOGFILTER_SCORE_MEDIUM:0.50}"
         low: "${LOGFILTER_SCORE_LOW:0.20}"
+
+      # Source-specific fusion is calibrated independently because flow, endpoint,
+      # and lexical model scores do not share a probability distribution.
+      source_profiles:
+        firewall_flow:
+          weights:
+            classifier: 1.0
+            entity_boost: 0.0
+            cross_encoder: 0.0
+            novelty: 0.0
+          routing:
+            high: "${LOGFILTER_FLOW_SCORE_HIGH:0.80}"
+            medium: "${LOGFILTER_FLOW_SCORE_MEDIUM:0.50}"
+            low: "${LOGFILTER_FLOW_SCORE_LOW:0.20}"
+        firewall_http:
+          weights:
+            classifier: 1.0
+            entity_boost: 0.0
+            cross_encoder: 0.0
+            novelty: 0.0
+          routing:
+            high: "${LOGFILTER_HTTP_SCORE_HIGH:0.80}"
+            medium: "${LOGFILTER_HTTP_SCORE_MEDIUM:0.50}"
+            low: "${LOGFILTER_HTTP_SCORE_LOW:0.20}"
+
       tier2:
         uncertainty_low: "${LOGFILTER_TIER2_UNCERTAINTY_LOW:0.10}"
         uncertainty_high: "${LOGFILTER_TIER2_UNCERTAINTY_HIGH:0.90}"
+
+      # In-process DDoS signal for single-worker/local deployments. Distributed
+      # deployments must externalize this state (Kafka Streams/Redis) before using
+      # the signal for automated enforcement. The API runs replicas>1, so this stays
+      # off unless the operator knowingly accepts per-pod state.
+      flow_window:
+        enabled: "${LOGFILTER_FLOW_WINDOW_ENABLED:false}"
+        window_seconds: "${LOGFILTER_FLOW_WINDOW_SECONDS:10}"
+        max_keys: "${LOGFILTER_FLOW_WINDOW_MAX_KEYS:10000}"
+        max_events_per_key: "${LOGFILTER_FLOW_WINDOW_MAX_EVENTS:5000}"
+        flow_threshold: "${LOGFILTER_DDOS_FLOW_THRESHOLD:200}"
+        packet_threshold: "${LOGFILTER_DDOS_PACKET_THRESHOLD:20000}"
+        byte_threshold: "${LOGFILTER_DDOS_BYTE_THRESHOLD:10000000}"
+        source_threshold: "${LOGFILTER_DDOS_SOURCE_THRESHOLD:50}"
+
+    # Forwarding to QRadar
     qradar:
       mode: "enrich_only"
       syslog_host: "${QRADAR_HOST:localhost}"
-      syslog_port: 514
-      syslog_protocol: "${QRADAR_PROTOCOL:https_ack}"
+      syslog_port: "${QRADAR_PORT:514}"
+      # K8S: the logfilter-router Deployment injects QRADAR_PROTOCOL=https_ack from
+      # the key of the same name at the bottom of this ConfigMap, which overrides
+      # this tracked default; the placeholder is kept so the file stays env-driven.
+      syslog_protocol: "${QRADAR_PROTOCOL:tcp}"
       gateway:
         url: "${QRADAR_GATEWAY_URL:}"
+        # Feature-conditional: required only when syslog_protocol is https_ack, and
+        # enforced by http_gateway.py at construction. logfilter-router pulls the
+        # secret from the logfilter-secrets Secret.
         hmac_secret: "${QRADAR_GATEWAY_HMAC_SECRET:}"
-        timeout_seconds: 10
+        timeout_seconds: "${QRADAR_GATEWAY_TIMEOUT_SECONDS:10}"
+        ca_file: "${QRADAR_GATEWAY_CA_FILE:}"
+        client_cert_file: "${QRADAR_GATEWAY_CLIENT_CERT_FILE:}"
+        client_key_file: "${QRADAR_GATEWAY_CLIENT_KEY_FILE:}"
       leef_vendor: "YourCo"
       leef_product: "AIPreprocessor"
       leef_version: "1.0"
+
     response:
       mode: "${LOGFILTER_RESPONSE_MODE:dry_run}"
       kill_switch: "${LOGFILTER_RESPONSE_KILL_SWITCH:false}"
-      block_threshold: 0.85
+      # Must stay at or below the maximum achievable composite score (0.80 under the
+      # default profile), otherwise the armed response engine can never fire.
+      block_threshold: "${LOGFILTER_RESPONSE_BLOCK_THRESHOLD:0.75}"
       quarantine_priorities: ["HIGH"]
       allowed_networks: "${LOGFILTER_RESPONSE_ALLOWED_NETWORKS:}"
       allowed_hosts: "${LOGFILTER_RESPONSE_ALLOWED_HOSTS:}"
-      max_actions_per_minute: 60
+      max_actions_per_minute: "${LOGFILTER_RESPONSE_MAX_ACTIONS_PER_MINUTE:60}"
       gateway:
         url: "${LOGFILTER_RESPONSE_GATEWAY_URL:}"
+        # Not mandatory: only needed when the response engine is armed, which
+        # http_gateway.py enforces at construction.
         hmac_secret: "${LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET:}"
-        timeout_seconds: 10
+        timeout_seconds: "${LOGFILTER_RESPONSE_GATEWAY_TIMEOUT_SECONDS:10}"
+        ca_file: "${LOGFILTER_RESPONSE_GATEWAY_CA_FILE:}"
+        client_cert_file: "${LOGFILTER_RESPONSE_GATEWAY_CLIENT_CERT_FILE:}"
+        client_key_file: "${LOGFILTER_RESPONSE_GATEWAY_CLIENT_KEY_FILE:}"
+
     api:
       max_batch_size: 200
-      scoring_token: "${LOGFILTER_API_TOKEN:}"
-      metrics_token: "${LOGFILTER_METRICS_TOKEN:}"
+      # Mandatory: an unset or empty token is a deployment misconfiguration, not a
+      # request-scoped condition. Both are injected by api.yaml from the
+      # logfilter-secrets Secret, so an absent Secret stops the rollout instead of
+      # degrading to an empty token the auth layer would reject per request.
+      scoring_token: "${LOGFILTER_API_TOKEN:?LOGFILTER_API_TOKEN must be set in .env}"
+      metrics_token: "${LOGFILTER_METRICS_TOKEN:?LOGFILTER_METRICS_TOKEN must be set in .env}"
       rate_limit_per_minute: 60
+      # K8S: set LOGFILTER_TRUSTED_PROXIES to the ingress-nginx / router egress
+      # CIDRs so client IPs are not taken from an untrusted X-Forwarded-For.
+      trusted_proxies: ["${LOGFILTER_TRUSTED_PROXIES:}"]
+
     monitoring:
       prometheus_port: 9090
       score_histogram_buckets: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
+
+      drift:
+        enabled: "${LOGFILTER_DRIFT_ENABLED:false}"
+        window_size: 1000
+        psi_threshold: 0.25
+        check_interval: 100
+        auto_fallback: "${LOGFILTER_DRIFT_AUTO_FALLBACK:true}"
+
+      novelty:
+        enabled: "${LOGFILTER_NOVELTY_ENABLED:false}"
+        window_size: 10000
+        min_baseline: 100
+        warmup_events: 500
+        distance_scale: 2.0
+
+  # ATT&CK technique corpus. Projects to /app/config/mitre_techniques.json,
+  # which models.mitre_techniques_path resolves against ROOT. Without it the
+  # BiEncoder logs "MITRE techniques file not found" and Tier-3 ATT&CK
+  # candidate retrieval returns nothing.
+  mitre_techniques.json: |
+    [
+      {
+        "id": "T1059",
+        "name": "Command and Scripting Interpreter",
+        "description": "Adversaries may abuse command and script interpreters to execute commands, scripts, or binaries. These interfaces and languages provide ways of interacting with computer systems and are a common feature across many different platforms. Most systems come with some built-in command-line interface and scripting capabilities such as PowerShell, bash, cmd.exe, or Python."
+      },
+      {
+        "id": "T1059.001",
+        "name": "PowerShell",
+        "description": "Adversaries may abuse PowerShell commands and scripts for execution. PowerShell is a powerful interactive command-line interface and scripting environment included in the Windows operating system. Adversaries can use PowerShell to perform a number of actions including discovery of information and execution of code."
+      },
+      {
+        "id": "T1059.003",
+        "name": "Windows Command Shell",
+        "description": "Adversaries may abuse the Windows command shell for execution. The Windows command shell (cmd.exe) is the primary command prompt on Windows systems. The Windows command shell can be used to execute commands and batch files and perform tasks."
+      },
+      {
+        "id": "T1078",
+        "name": "Valid Accounts",
+        "description": "Adversaries may obtain and abuse credentials of existing accounts as a means of gaining initial access, persistence, privilege escalation, or defense evasion. Compromised credentials may be used to bypass access controls placed on various resources on systems within the network and may even be used for persistent access to remote systems."
+      },
+      {
+        "id": "T1021",
+        "name": "Remote Services",
+        "description": "Adversaries may use valid accounts to log into a service specifically designed to accept remote connections, such as telnet, SSH, and VNC. The adversary may then perform actions as the logged-on user. RDP is a common remote service used for lateral movement."
+      },
+      {
+        "id": "T1021.001",
+        "name": "Remote Desktop Protocol",
+        "description": "Adversaries may use Valid Accounts to log into a computer using the Remote Desktop Protocol. The adversary may then perform actions as the logged-on user. Remote desktop is a common feature in operating systems. It allows a user to log into an interactive session with a system desktop graphical user interface on a remote system."
+      },
+      {
+        "id": "T1021.002",
+        "name": "SMB/Windows Admin Shares",
+        "description": "Adversaries may use Valid Accounts to interact with a remote network share using Server Message Block. The adversary may then perform actions as the logged-on user. SMB is a file, printer, and serial port sharing protocol commonly used by Windows systems."
+      },
+      {
+        "id": "T1003",
+        "name": "OS Credential Dumping",
+        "description": "Adversaries may attempt to dump credentials to obtain account login and credential material, normally in the form of a hash or a clear text password from the operating system and software. Credentials can be obtained from OS caches, memory, or structures. Mimikatz is a common tool used for credential dumping."
+      },
+      {
+        "id": "T1003.001",
+        "name": "LSASS Memory",
+        "description": "Adversaries may attempt to access credential material stored in the process memory of the Local Security Authority Subsystem Service (LSASS). After a user logs on, the system generates and stores a variety of credential materials in LSASS process memory."
+      },
+      {
+        "id": "T1055",
+        "name": "Process Injection",
+        "description": "Adversaries may inject code into processes in order to evade process-based defenses as well as possibly elevate privileges. Process injection is a method of executing arbitrary code in the address space of a separate live process. Running code in the context of another process may allow access to the process's memory, system, and network resources."
+      },
+      {
+        "id": "T1548",
+        "name": "Abuse Elevation Control Mechanism",
+        "description": "Adversaries may circumvent mechanisms designed to control elevate privileges to gain higher-level permissions. Most modern systems contain native elevation control mechanisms that are intended to limit privileges that a user can perform on a machine. Adversaries may abuse these mechanisms to execute system artifacts or malicious programs via sudo or Windows User Account Control (UAC)."
+      },
+      {
+        "id": "T1190",
+        "name": "Exploit Public-Facing Application",
+        "description": "Adversaries may attempt to exploit a weakness in an Internet-facing host or system to initially access a network. The weakness in the system can be a software bug, a temporary glitch, or a misconfiguration. Exploitation of a vulnerability in a web-facing application may allow adversaries to obtain access to the system."
+      },
+      {
+        "id": "T1133",
+        "name": "External Remote Services",
+        "description": "Adversaries may leverage external-facing remote services to initially access and/or persist within a network. Remote services such as VPNs, Citrix, and other access mechanisms allow users, including adversaries, to connect to internal enterprise network resources from external locations."
+      },
+      {
+        "id": "T1110",
+        "name": "Brute Force",
+        "description": "Adversaries may use brute force techniques to gain access to accounts when passwords are unknown or when password hashes are obtained. Without knowledge of the password, an adversary may opt to systematically guess the password using repetitive or iterative mechanisms. Common techniques include password guessing, password spraying, and credential stuffing."
+      },
+      {
+        "id": "T1110.001",
+        "name": "Password Guessing",
+        "description": "Adversaries with no prior knowledge of legitimate credentials within the system or environment may guess passwords to attempt access to accounts. Guessing passwords involves repeated unsuccessful authentication attempts until a correct authentication is found."
+      },
+      {
+        "id": "T1566",
+        "name": "Phishing",
+        "description": "Adversaries may send phishing messages to gain access to victim systems. All forms of phishing are electronically delivered social engineering. Phishing can be targeted, known as spearphishing. Spearphishing can involve sending emails or other messages with attachments or links."
+      },
+      {
+        "id": "T1071",
+        "name": "Application Layer Protocol",
+        "description": "Adversaries may communicate using OSI application layer protocols to avoid detection/network filtering by blending in with existing traffic. Commands to the remote system, and often the results of those commands, will be embedded within the protocol traffic between the client and server. Common application layer protocols include web traffic (HTTP/S), DNS, and mail protocols (SMTP, POP3, IMAP)."
+      },
+      {
+        "id": "T1071.001",
+        "name": "Web Protocols",
+        "description": "Adversaries may communicate using application layer protocols associated with web traffic to avoid detection/network filtering by blending in with existing traffic. Commands to the remote system, and often the results of those commands, will be embedded within the protocol traffic between the client and server."
+      },
+      {
+        "id": "T1071.004",
+        "name": "DNS",
+        "description": "Adversaries may communicate using the Domain Name System to avoid detection/network filtering by blending in with existing traffic. Commands to the remote system, and often the results of those commands, will be embedded within the protocol traffic between the client and server."
+      },
+      {
+        "id": "T1486",
+        "name": "Data Encrypted for Impact",
+        "description": "Adversaries may encrypt data on target systems or on large numbers of systems in a network to interrupt availability to system and network resources. They can attempt to render stored data inaccessible by encrypting files or data on local and remote drives and withholding access to a decryption key. This may be done in order to extract monetary compensation from a victim in exchange for decryption or a decryption key (ransomware)."
+      },
+      {
+        "id": "T1562",
+        "name": "Impair Defenses",
+        "description": "Adversaries may maliciously modify components of a victim environment in order to hinder or disable defensive mechanisms. This not only involves impairing preventative defenses, such as firewalls and anti-virus, but also detection capabilities that defenders can use to audit activity and identify malicious behavior."
+      },
+      {
+        "id": "T1562.001",
+        "name": "Disable or Modify Tools",
+        "description": "Adversaries may disable security tools to avoid possible detection of their tools and activities. This can take the form of killing security software or event logging processes, deleting Registry keys so that tools do not start at run time, or other methods to interfere with security tools scanning or reporting information."
+      },
+      {
+        "id": "T1070",
+        "name": "Indicator Removal",
+        "description": "Adversaries may delete or modify artifacts generated within systems to remove evidence of their presence or hinder defenses. Location and timing of an adversary's actions may be obfuscated by removing or modifying logs, timestamps, or other artifacts such as dropped files."
+      },
+      {
+        "id": "T1046",
+        "name": "Network Service Discovery",
+        "description": "Adversaries may attempt to get a listing of services running on remote hosts and local network infrastructure devices, including those that may be vulnerable to remote exploitation through services. Methods to acquire this information include port scans and vulnerability scans using tools that are brought onto a system."
+      },
+      {
+        "id": "T1041",
+        "name": "Exfiltration Over C2 Channel",
+        "description": "Adversaries may steal data by exfiltrating it over an existing command and control channel. Stolen data is encoded into the normal communications channel using the same protocol as command and control communications. Exfiltration via C2 channel is one of the most common methods for data exfiltration."
+      },
+      {
+        "id": "T1018",
+        "name": "Remote System Discovery",
+        "description": "Adversaries may attempt to get a listing of other systems by IP address, hostname, or other logical identifier on a network that may be used for lateral movement from the current system. Functionality could exist within remote access tools to enable this, but utilities available on the operating system could also be used such as Net and Nslookup."
+      },
+      {
+        "id": "T1082",
+        "name": "System Information Discovery",
+        "description": "An adversary may attempt to get detailed information about the operating system and hardware, including version, patches, hotfixes, service packs, and architecture. Adversaries may use the information gathered to shape follow-on behaviors and determine what techniques to use."
+      },
+      {
+        "id": "T1049",
+        "name": "System Network Connections Discovery",
+        "description": "Adversaries may attempt to get a listing of network connections to or from the compromised system they are currently accessing or from remote systems by querying for information over the network. An adversary who gains access to a system that is part of a cloud environment may map out Virtual Private Clouds or Virtual Networks in order to determine what systems and services are connected."
+      },
+      {
+        "id": "T1053",
+        "name": "Scheduled Task/Job",
+        "description": "Adversaries may abuse task scheduling functionality to facilitate initial or recurring execution of malicious code. Utilities exist within all major operating systems to schedule programs or scripts to be executed at a specified date and time. A task scheduler may also allow jobs to be executed when a specified amount of CPU load has been met, when files are added to specific locations, or when other predefined conditions are met."
+      },
+      {
+        "id": "T1543",
+        "name": "Create or Modify System Process",
+        "description": "Adversaries may create or modify system-level processes to repeatedly execute malicious payloads as part of persistence. When operating systems boot up, they can start processes that perform background system functions. On Windows and Linux, these system processes are referred to as services. On macOS, they are known as Launch Agents/Daemons."
+      },
+      {
+        "id": "T1505",
+        "name": "Server Software Component",
+        "description": "Adversaries may abuse legitimate extensible development features of servers to establish persistent access to systems. Enterprise server applications may include features that allow developers to write and install software or scripts to extend the functionality of the main application. Adversaries may install malicious components to extend and abuse server applications."
+      },
+      {
+        "id": "T1136",
+        "name": "Create Account",
+        "description": "Adversaries may create an account to maintain access to victim systems. With a sufficient level of access, creating such accounts may be used to establish secondary credentialed access that do not require persistent remote access tools to be deployed on the system."
+      },
+      {
+        "id": "T1098",
+        "name": "Account Manipulation",
+        "description": "Adversaries may manipulate accounts to maintain access to victim systems. Account manipulation may consist of any action that preserves adversary access to a compromised account, such as modifying credentials or permission groups. These actions could also include account activity designed so that it does not trigger security tools."
+      },
+      {
+        "id": "T1574",
+        "name": "Hijack Execution Flow",
+        "description": "Adversaries may execute their own malicious payloads by hijacking the way operating systems run programs. Hijacking execution flow can be for the purposes of persistence, since this hijacked execution may reoccur over time. It can also be used for privilege escalation, since modifying how a program runs may allow attackers to run arbitrary code with elevated permissions."
+      },
+      {
+        "id": "T1105",
+        "name": "Ingress Tool Transfer",
+        "description": "Adversaries may transfer tools or other files from an external system into a compromised environment. Tools/files may be copied from an external adversary-controlled system through the command and control channel to bring tools into the victim network or through alternate protocols with another tool such as FTP."
+      },
+      {
+        "id": "T1027",
+        "name": "Obfuscated Files or Information",
+        "description": "Adversaries may attempt to make an executable or file difficult to discover or analyze by encrypting, encoding, or otherwise obfuscating its contents on the system or in transit. This is common behavior that can be used across different platforms and the network to evade defenses."
+      },
+      {
+        "id": "T1036",
+        "name": "Masquerading",
+        "description": "Adversaries may attempt to manipulate features of their artifacts to make them appear legitimate or benign to users and/or security tools. Masquerading occurs when the name or location of an object, legitimate or malicious, is manipulated or abused for the sake of evading defenses and observation."
+      },
+      {
+        "id": "T1112",
+        "name": "Modify Registry",
+        "description": "Adversaries may interact with the Windows Registry to hide configuration information within Registry keys, remove information as part of cleaning up, or as part of other techniques to aid in persistence and execution. Adversaries may also use the Registry to store information about the victim system and set up and store configuration information for malware."
+      },
+      {
+        "id": "T1489",
+        "name": "Service Stop",
+        "description": "Adversaries may stop or disable services on a system to render those services unavailable to legitimate users. Stopping critical services or processes can inhibit or stop response to an incident or aid in the adversary's overall objectives to cause damage to the environment."
+      },
+      {
+        "id": "T1496",
+        "name": "Resource Hijacking",
+        "description": "Adversaries may leverage the resources of co-opted systems in order to solve resource intensive problems which may impact system and/or hosted service availability. One common purpose for Resource Hijacking is to validate transactions of cryptocurrency networks and earn virtual currency. Adversaries may consume enough system resources to negatively impact and/or cause affected machines to become unresponsive."
+      },
+      {
+        "id": "T1595",
+        "name": "Active Scanning",
+        "description": "Adversaries may execute active reconnaissance scans to gather information that can be used during targeting. Active scans are those where the adversary probes victim infrastructure via network traffic, as opposed to other forms of reconnaissance that do not involve direct interaction with the victim."
+      },
+      {
+        "id": "T1040",
+        "name": "Network Sniffing",
+        "description": "Adversaries may sniff network traffic to capture information about an environment, including authentication material passed over the network. Network sniffing refers to using the network interface on a system to monitor or capture information sent over a wired or wireless connection."
+      },
+      {
+        "id": "T1557",
+        "name": "Adversary-in-the-Middle",
+        "description": "Adversaries may attempt to position themselves between two or more networked devices using an adversary-in-the-middle technique to support follow-on behaviors such as network sniffing, relayed authentication, or replay attacks."
+      },
+      {
+        "id": "T1485",
+        "name": "Data Destruction",
+        "description": "Adversaries may destroy data and files on specific systems or in large numbers on a network to interrupt availability to systems, services, and network resources. Data destruction is likely to render stored data irrecoverable by forensic techniques through overwriting files or data on local and remote drives."
+      },
+      {
+        "id": "T1531",
+        "name": "Account Access Removal",
+        "description": "Adversaries may interrupt availability of system and network resources by inhibiting access to accounts utilized by legitimate users. Accounts may be deleted, locked, or manipulated to remove access to accounts."
+      }
+    ]
+
+  # Baseline Sigma rules. ConfigMap keys cannot contain "/", so the workload
+  # volume projects this key to /app/config/sigma_rules/baseline_rules.yml —
+  # the directory LogScorer globs ("config/sigma_rules/*.yml"). Keep the
+  # .yml extension: the loader matches on it. Add further rule files as
+  # `sigma_rules_<name>.yml` keys with matching `path:` entries in api.yaml.
+  sigma_rules_baseline_rules.yml: |
+    title: SQL Injection Pattern
+    id: e1a2b3c4-0001-4a11-8b11-000000000001
+    status: experimental
+    description: >
+      Signature-based detection of common SQL injection substrings in web request
+      logs. Represents the kind of static pattern a traditional rule-based SIEM
+      (no ML) would ship out of the box.
+    logsource:
+        category: application
+    detection:
+        selection:
+            CommandLine|contains:
+                - "OR 1=1"
+                - "or 1=1"
+                - "UNION SELECT"
+                - "union select"
+                - "SQL injection"
+        condition: selection
+    level: high
+    tags:
+        - attack.initial_access
+        - attack.t1190
+    ---
+    title: Cross-Site Scripting (XSS) Pattern
+    id: e1a2b3c4-0002-4a11-8b11-000000000002
+    status: experimental
+    description: Static substring match for reflected/stored XSS payloads.
+    logsource:
+        category: application
+    detection:
+        selection:
+            CommandLine|contains:
+                - "<script>"
+                - "onerror=alert"
+                - "XSS attack"
+        condition: selection
+    level: high
+    tags:
+        - attack.initial_access
+        - attack.t1190
+    ---
+    title: SYN Flood / DDoS Pattern
+    id: e1a2b3c4-0003-4a11-8b11-000000000003
+    status: experimental
+    description: Signature match for flood/DoS indicators emitted by kernel or edge firewalls.
+    logsource:
+        category: firewall
+    detection:
+        selection:
+            CommandLine|contains:
+                - "SYN flood"
+                - "Connection flood"
+                - "DoS threshold exceeded"
+        condition: selection
+    level: high
+    tags:
+        - attack.impact
+        - attack.t1498
+    ---
+    title: Port / Network Scan Pattern
+    id: e1a2b3c4-0004-4a11-8b11-000000000004
+    status: experimental
+    description: Signature match for scanning tool fingerprints and SYN-scan behavior.
+    logsource:
+        category: firewall
+    detection:
+        selection:
+            CommandLine|contains:
+                - "SYN scan"
+                - "Nmap Scripting Engine"
+                - "ET SCAN"
+        condition: selection
+    level: medium
+    tags:
+        - attack.discovery
+        - attack.t1046
+    ---
+    title: Malware / C2 Communication Pattern
+    id: e1a2b3c4-0005-4a11-8b11-000000000005
+    status: experimental
+    description: Signature match for known malware/C2 indicators (DNS beacon, AV hit, blocked outbound).
+    logsource:
+        category: application
+    detection:
+        selection:
+            CommandLine|contains:
+                - "malware C2"
+                - "Known malware hash"
+                - "Outbound connection to evil"
+        condition: selection
+    level: high
+    tags:
+        - attack.command_and_control
+        - attack.t1071
+    ---
+    title: SSH Brute Force / Invalid User Pattern
+    id: e1a2b3c4-0006-4a11-8b11-000000000006
+    status: experimental
+    description: Signature match for repeated failed SSH authentication attempts.
+    logsource:
+        category: authentication
+    detection:
+        selection:
+            CommandLine|contains:
+                - "Failed password"
+                - "Invalid user"
+                - "maximum authentication attempts exceeded"
+        condition: selection
+    level: medium
+    tags:
+        - attack.credential_access
+        - attack.t1110
+    ---
+    title: Privilege Escalation via sudo
+    id: e1a2b3c4-0007-4a11-8b11-000000000007
+    status: experimental
+    description: Signature match for sudo-to-root command execution.
+    logsource:
+        category: authentication
+    detection:
+        selection:
+            CommandLine|contains:
+                - "USER=root ; COMMAND"
+        condition: selection
+    level: medium
+    tags:
+        - attack.privilege_escalation
+        - attack.t1548
+    ---
+    title: Command Injection Pattern
+    id: e1a2b3c4-0008-4a11-8b11-000000000008
+    status: experimental
+    description: Signature match for shell command-injection attempts in web parameters.
+    logsource:
+        category: application
+    detection:
+        selection:
+            CommandLine|contains:
+                - "Command injection attempt"
+                - "/bin/sh -c"
+        condition: selection
+    level: high
+    tags:
+        - attack.execution
+        - attack.t1059
+
+  # Environment defaults, referenced by the Deployments through configMapKeyRef.
   # Override to SASL_SSL in production.
   KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"
   KAFKA_SASL_MECHANISM: ""
@@ -109,6 +675,7 @@ data:
   KAFKA_SSL_CERTFILE: ""
   KAFKA_SSL_KEYFILE: ""
   KAFKA_SSL_CHECK_HOSTNAME: "true"
+  # K8S: the router forwards through the QRadar gateway rather than raw syslog.
   QRADAR_PROTOCOL: "https_ack"
   QRADAR_GATEWAY_URL: "https://qradar-gateway.example.com/v1/events"
   LOGFILTER_RESPONSE_MODE: "dry_run"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 from typing import cast
 
 import pytest
@@ -324,6 +325,249 @@ def test_drain_quarantines_malformed_spool_lines(tmp_path) -> None:
     assert replayed == [{"raw": "good"}]
     assert spool_path.read_text(encoding="utf-8") == ""
     assert (tmp_path / "spool.ndjson.bad").read_text(encoding="utf-8") == "not-json\n"
+
+
+def test_spool_write_does_not_rescan_the_file_per_record(tmp_path, monkeypatch) -> None:
+    """Appending must be O(1): no full read/rewrite of the spool per record.
+
+    The old implementation re-read every line, re-encoded all of them to
+    re-sum their lengths, then truncated and rewrote the whole file on each
+    write, so the nth write cost O(n) under the lock.
+    """
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    # A pre-seeded spool of 10k lines; steady-state appends must still scan
+    # nothing — the byte/line counters are maintained in memory.
+    spool_path.write_text(
+        "".join(json.dumps({"n": i}) + "\n" for i in range(10_000)), encoding="utf-8"
+    )
+    seeded_size = spool_path.stat().st_size
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=10_000_000)
+
+    reads = {"count": 0}
+    rewrites = {"count": 0}
+    original_read = spool._read_lines
+    original_rewrite = spool._rewrite
+
+    def counting_read() -> list[str]:
+        reads["count"] += 1
+        return original_read()
+
+    def counting_rewrite(lines: list[str]) -> None:
+        rewrites["count"] += 1
+        original_rewrite(lines)
+
+    monkeypatch.setattr(spool, "_read_lines", counting_read)
+    monkeypatch.setattr(spool, "_rewrite", counting_rewrite)
+
+    for n in range(1000):
+        spool.write({"n": n})
+
+    assert reads["count"] == 0
+    assert rewrites["count"] == 0
+    appended = sum(len((json.dumps({"n": n}) + "\n").encode()) for n in range(1000))
+    assert spool_path.stat().st_size == seeded_size + appended
+    assert len(spool_path.read_text(encoding="utf-8").splitlines()) == 11_000
+    spool.close()
+
+
+def test_spool_compacts_only_when_bound_exceeded(tmp_path) -> None:
+    """A full-file rewrite happens on bound crossings, not on every write."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    record_bytes = len((json.dumps({"n": 0}) + "\n").encode())
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=record_bytes * 5)
+
+    rewrites: list[list[str]] = []
+    original_rewrite = spool._rewrite
+
+    def recording_rewrite(lines: list[str]) -> None:
+        rewrites.append(list(lines))
+        original_rewrite(lines)
+
+    spool._rewrite = recording_rewrite  # type: ignore[method-assign]
+
+    # Five records fit exactly; nothing is rewritten until the sixth crosses.
+    for n in range(5):
+        spool.write({"n": n})
+    assert rewrites == []
+
+    spool.write({"n": 5})
+    assert len(rewrites) == 1
+    assert [json.loads(line)["n"] for line in rewrites[0]] == [1, 2, 3, 4, 5]
+    spool.close()
+
+
+def test_spool_rewrite_leaves_no_partial_file_on_crash(tmp_path, monkeypatch) -> None:
+    """A failure mid-rewrite must leave the previous spool intact (temp+rename)."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+    spool.write({"raw": "survivor"})
+
+    def boom(_lines: list[str]) -> None:
+        raise OSError("simulated crash mid-rewrite")
+
+    monkeypatch.setattr(spool, "_rewrite", boom)
+    with pytest.raises(OSError, match="simulated crash"):
+        spool._settle_drain(['{"raw": "survivor"}\n'], [])
+
+    assert spool_path.read_text(encoding="utf-8") == '{"raw": "survivor"}\n'
+    assert list(tmp_path.glob("*.tmp.*")) == []
+    spool.close()
+
+
+def test_spool_rewrite_uses_temp_file_then_rename(tmp_path, monkeypatch) -> None:
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+    spool.write({"raw": "old"})
+
+    seen: dict[str, object] = {}
+    real_replace = collector_module.os.replace
+
+    def spy_replace(src, dst) -> None:
+        # The destination still holds the old contents at rename time, and the
+        # source is a sibling temp file — that is what makes this atomic.
+        seen["tmp_existed"] = collector_module.os.path.exists(str(src))
+        seen["old_contents"] = collector_module.os.path.exists(str(dst))
+        real_replace(src, dst)
+        seen["replaced"] = True
+
+    monkeypatch.setattr(collector_module.os, "replace", spy_replace)
+    spool._rewrite(['{"raw": "new"}\n'])
+
+    assert seen["tmp_existed"] is True
+    assert seen["old_contents"] is True
+    assert seen["replaced"] is True
+    assert spool_path.read_text(encoding="utf-8") == '{"raw": "new"}\n'
+    spool.close()
+
+
+def test_drain_callback_can_reenter_write_without_deadlock(tmp_path) -> None:
+    """drain() must not hold the spool lock while invoking the replay callback."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+    spool.write({"raw": "event1"})
+    spool.write({"raw": "event2"})
+
+    errors: list[BaseException] = []
+
+    def callback(record: dict) -> None:
+        # Re-entering write() from the callback would deadlock if drain held
+        # the (non-reentrant) lock across the callback.
+        try:
+            spool.write({"raw": "from-callback"})
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    worker = threading.Thread(target=lambda: spool.drain(callback))
+    worker.start()
+    worker.join(timeout=10.0)
+
+    assert not worker.is_alive(), "drain() deadlocked: it held the lock across the callback"
+    assert errors == []
+    records = [json.loads(line) for line in spool_path.read_text(encoding="utf-8").splitlines()]
+    assert {"raw": "from-callback"} in records
+    assert {"raw": "event1"} not in records
+    assert {"raw": "event2"} not in records
+    spool.close()
+
+
+def test_drain_replays_at_most_one_batch(tmp_path) -> None:
+    """drain() bounds its work so an outage cannot stall the drain thread for hours."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000, drain_batch_size=3)
+    for n in range(10):
+        spool.write({"n": n})
+
+    replayed: list[dict] = []
+    assert spool.drain(replayed.append) == 3
+    assert [r["n"] for r in replayed] == [0, 1, 2]
+    assert len(spool_path.read_text(encoding="utf-8").strip().split("\n")) == 7
+
+    # Successive batches drain the rest in order.
+    assert spool.drain(replayed.append) == 3
+    assert spool.drain(replayed.append) == 3
+    assert spool.drain(replayed.append) == 1
+    assert spool.drain(replayed.append) == 0
+    assert [r["n"] for r in replayed] == list(range(10))
+    spool.close()
+
+
+def test_drain_keeps_failed_records_written_during_replay(tmp_path) -> None:
+    """Concurrent writes during a replay are preserved, not clobbered."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+    spool.write({"raw": "event1"})
+
+    def callback(record: dict) -> None:
+        spool.write({"raw": "arrived-during-replay"})
+
+    spool.drain(callback)
+
+    records = [json.loads(line) for line in spool_path.read_text(encoding="utf-8").splitlines()]
+    assert records == [{"raw": "arrived-during-replay"}]
+    spool.close()
+
+
+def test_drain_retains_failed_record_written_during_replay(tmp_path) -> None:
+    """A record whose replay failed stays in the spool even if a new one lands."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000)
+    spool.write({"raw": "event1"})
+
+    def callback(_record: dict) -> None:
+        spool.write({"raw": "arrived-during-replay"})
+        raise RuntimeError("kafka still down")
+
+    assert spool.drain(callback) == 0
+
+    records = [json.loads(line) for line in spool_path.read_text(encoding="utf-8").splitlines()]
+    assert records == [{"raw": "event1"}, {"raw": "arrived-during-replay"}]
+    spool.close()
+
+
+def test_quarantine_file_is_bounded_and_evicts_oldest(tmp_path) -> None:
+    """The .bad quarantine must not grow without bound during an outage."""
+    from logfilter.collector import BoundedNDJSONSpool
+
+    spool_path = tmp_path / "spool.ndjson"
+    bad_path = tmp_path / "spool.ndjson.bad"
+    spool = BoundedNDJSONSpool(path=spool_path, max_bytes=1_000_000, bad_max_bytes=40)
+
+    for n in range(6):
+        spool_path.write_text(f'not-json-{n}\n', encoding="utf-8")
+        spool.drain(lambda _record: None)
+
+    assert bad_path.stat().st_size <= 40
+    contents = bad_path.read_text(encoding="utf-8").splitlines()
+    # Oldest-first eviction: the most recent malformed lines survive.
+    assert contents == ["not-json-3", "not-json-4", "not-json-5"]
+    spool.close()
+
+
+def test_quarantine_default_bound_scales_with_spool(tmp_path) -> None:
+    from logfilter.collector import BoundedNDJSONSpool
+
+    small = BoundedNDJSONSpool(path=tmp_path / "a.ndjson", max_bytes=1_000_000)
+    large = BoundedNDJSONSpool(path=tmp_path / "b.ndjson", max_bytes=500_000_000)
+    assert small._bad_max_bytes == 1_048_576
+    assert large._bad_max_bytes == 50_000_000
+    small.close()
+    large.close()
 
 
 def _reset_collector_counters() -> None:

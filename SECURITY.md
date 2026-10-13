@@ -10,15 +10,21 @@ organization's ingress, firewall, TLS, identity, and monitoring controls.
 
 - Required secrets have no unsafe defaults.
 - Scoring endpoints require `X-API-Token`.
-- Admin endpoints require `X-Admin-Token`.
+- The collector accepts only `SYSLOG_ALLOWED_CIDRS`; the default is loopback.
 - Metrics endpoints require `X-Metrics-Token` (or `Authorization: Bearer <token>`).
 - All token checks fail closed when the token is not configured.
 - API docs and OpenAPI JSON are disabled unless `LOGFILTER_ENABLE_DOCS=1`.
 - Kafka, API, Elasticsearch, Kibana, Prometheus, Grafana, and collector ports
   are bound to `127.0.0.1` in the default Compose stack.
-- The collector accepts only `SYSLOG_ALLOWED_CIDRS`; the default is loopback.
 - Python service containers run as non-root users, drop Linux capabilities,
-  prevent privilege escalation, and use read-only root filesystems.
+  prevent privilege escalation, and use read-only root filesystems. Specifically
+  the `archive`, `logfilter-api`, `collector`, and `router` services:
+  `docker-compose.yml` merges the `&python-service-security` anchor
+  (`no-new-privileges:true`, `cap_drop: ALL`, `read_only: true`, tmpfs `/tmp`)
+  into each of them.
+- Model artifact integrity is checked against `models/model_manifest.json` at API
+  startup. Mismatches are a logged warning by default; set `LOGFILTER_MODELS_STRICT=1`
+  to make a mismatch fatal and refuse startup.
 - Runtime scaler artifacts are JSON-only; pickle/joblib scaler loading is
   rejected.
 
@@ -32,10 +38,10 @@ Before exposing this system outside a developer machine:
 2. Restrict collector access to trusted log forwarder CIDRs (`SYSLOG_ALLOWED_CIDRS`).
 3. Keep Elasticsearch, Prometheus, Grafana, Kafka, and Kibana behind private
    network boundaries — the Compose stack binds them to `127.0.0.1` by default.
-4. Rotate `LOGFILTER_API_TOKEN`, `LOGFILTER_ADMIN_TOKEN`,
-   `LOGFILTER_METRICS_TOKEN`, `ES_PASSWORD`, and `GRAFANA_ADMIN_PASSWORD`
-   through your secret manager (Vault, AWS SM, GCP SM). Never store secrets in
-   `.env` on disk in production.
+4. Rotate `LOGFILTER_API_TOKEN`, `LOGFILTER_METRICS_TOKEN`, `ES_PASSWORD`,
+   `GRAFANA_ADMIN_PASSWORD`, `QRADAR_GATEWAY_HMAC_SECRET`, and
+   `LOGFILTER_RESPONSE_GATEWAY_HMAC_SECRET` through your secret manager (Vault,
+   AWS SM, GCP SM). Never store secrets in `.env` on disk in production.
 5. Set `CORS_ALLOW_ORIGINS` to your actual frontend origin(s). The API refuses
    to start with localhost CORS origins in production mode (when
    `LOGFILTER_ENABLE_DOCS` is off). Leave empty for headless deployments.
@@ -51,7 +57,9 @@ Before exposing this system outside a developer machine:
 9. Build images in CI from a clean checkout and scan them with your container
    scanner.
 10. Treat model artifacts as deployable code; only promote artifacts from trusted
-    training jobs. Verify `model_manifest.json` SHA-256 hashes on every deploy.
+    training jobs. Run `make model-manifest-validate` on every deploy, and set
+    `LOGFILTER_MODELS_STRICT=1` in production so a hash mismatch fails startup
+    instead of only logging a warning.
 11. For high availability, layer `docker-compose.prod.yml` over the base stack
     (`docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`)
     to expand Kafka to 3 brokers, ES to 3 data nodes, and raise replication

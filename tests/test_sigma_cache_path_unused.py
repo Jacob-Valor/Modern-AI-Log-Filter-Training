@@ -48,24 +48,37 @@ def _imports_in_file(path: Path) -> set[str]:
 
     found: set[str] = set()
     for node in ast.walk(tree):
-        target: ast.AST | None = None
         if isinstance(node, ast.Import):
+            # `import a.b.c` — the dotted name lives on each ast.alias, and a
+            # single Import node may carry several aliases.
             for alias in node.names:
-                target = alias
-                break
+                found.add(alias.name)
         elif isinstance(node, ast.ImportFrom):
-            target = node
-        if target is None:
-            continue
-
-        if isinstance(target, ast.Import):
-            found.add(target.names[0].name)
-        elif isinstance(target, ast.ImportFrom):
-            module = target.module or ""
-            for alias in target.names:
+            module = node.module or ""
+            for alias in node.names:
                 full = f"{module}.{alias.name}" if module else alias.name
                 found.add(full)
     return found
+
+
+@pytest.mark.parametrize("module", sorted(VULNERABLE_MODULES))
+def test_import_collector_detects_both_import_forms(tmp_path: Path, module: str) -> None:
+    """The CVE guard's collector must see plain *and* from-imports.
+
+    ``import sigma.data.mitre_attack`` is the primary way the vulnerable
+    loader could come back; if the collector only understands the
+    ``from ... import ...`` form the whole guard silently passes.
+    """
+    plain = tmp_path / "plain_import.py"
+    plain.write_text(f"import {module}\n", encoding="utf-8")
+    from_form = tmp_path / "from_import.py"
+    from_form.write_text(f"from {module} import load_sigma\n", encoding="utf-8")
+    multi = tmp_path / "multi_import.py"
+    multi.write_text(f"import os, {module}\n", encoding="utf-8")
+
+    assert module in _imports_in_file(plain)
+    assert f"{module}.load_sigma" in _imports_in_file(from_form)
+    assert module in _imports_in_file(multi)
 
 
 @pytest.mark.parametrize("vuln_module", sorted(VULNERABLE_MODULES))

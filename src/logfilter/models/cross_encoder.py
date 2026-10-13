@@ -6,12 +6,13 @@ a set of MITRE ATT&CK technique descriptions. Used in Tier 3 of the
 inference pipeline after the BiEncoder has retrieved top-k candidates.
 
 Model: cisco-ai/SecureBERT2.0-cross_encoder
-Type:  CrossEncoder / Sentence Similarity (output: scalar 0–1)
+Type:  CrossEncoder / Sentence Similarity (single logit; sigmoid applied here)
 Max sequence length: 1024 tokens
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,30 @@ from typing import Any
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def _identity_activation() -> Any:
+    """Identity activation for ``CrossEncoder.predict``.
+
+    This model has ``num_labels == 1``, for which sentence-transformers applies a
+    ``Sigmoid`` by default, so ``predict`` already returns a probability. That
+    default combined with the wrapper's own sigmoid squashed every score into
+    ``(0.5, 0.731)``, which made this 0.40-weighted scoring term incapable of
+    moving the composite score across a routing boundary. Requesting the
+    identity guarantees exactly one sigmoid is applied below, independent of the
+    installed library version.
+    """
+    from torch.nn import Identity
+
+    return Identity()
+
+
+def _sigmoid(value: float) -> float:
+    """Numerically stable logistic function."""
+    if value >= 0.0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp_value = math.exp(value)
+    return exp_value / (1.0 + exp_value)
 
 
 @dataclass
@@ -128,12 +153,15 @@ class CrossEncoderModel:
         if self._model is None:
             self._load()
 
-        # Batch prediction
+        # Batch prediction. ``activation_fn=_identity_activation()`` is load-bearing:
+        # with the library default, ``predict`` returns a sigmoid'd probability for
+        # this single-logit model, and the sigmoid below would be a second one.
         raw_scores = self._model.predict(  # type: ignore[union-attr]
             all_pairs,
             batch_size=self.batch_size,
             show_progress_bar=False,
             convert_to_numpy=True,
+            activation_fn=_identity_activation(),
         )
 
         # Re-assemble per-log results
@@ -143,8 +171,9 @@ class CrossEncoderModel:
             log_scores = []
             for j, candidate in enumerate(candidates):
                 raw = float(raw_scores[offset + j])
-                # CrossEncoder outputs a raw logit; apply sigmoid for 0–1 range
-                score_01 = 1.0 / (1.0 + (2.718281828**-raw))
+                # ``raw`` is a raw logit (see ``activation_fn`` above); this is the
+                # single sigmoid that maps it onto 0–1.
+                score_01 = _sigmoid(raw)
                 log_scores.append(
                     CrossEncoderScore(
                         technique_id=candidate.get("id", ""),

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -23,10 +24,26 @@ from train_flow_classifier import (
     _hashes_for,
     load_capture,
     numeric_frame,
+    repo_relative,
 )
 
 from logfilter.models.classifier import SafeMaxAbsScaler
 
+# Must match train_flow_classifier.parse_args defaults: a retrain with any other
+# value silently invalidates the cross-split dedup boundary reproduced here.
+DEFAULT_SEED = 20_260_730
+DEFAULT_MAX_TRAIN_PER_CLASS = 75_000
+DEFAULT_MAX_NEGATIVE_TRAIN = 50_000
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--max-train-per-class", type=int, default=DEFAULT_MAX_TRAIN_PER_CLASS)
+    parser.add_argument("--max-negative-train", type=int, default=DEFAULT_MAX_NEGATIVE_TRAIN)
+    return parser.parse_args()
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -83,14 +100,17 @@ def _model_probabilities(
 
 
 def main() -> None:
-    seed = 20260730
-    frame = pd.concat([load_capture(DEFAULT_ARCHIVE, spec) for spec in CAPTURES], ignore_index=True)
+    args = parse_args()
+    seed = args.seed
+    frame = pd.concat([load_capture(args.archive, spec) for spec in CAPTURES], ignore_index=True)
     features = numeric_frame(frame)
     labels = frame["_label"].to_numpy(dtype=np.int8)
     splits = frame["_split"].to_numpy(dtype=str)
     captures = frame["_capture"].to_numpy(dtype=str)
 
-    general_train = _balanced_limit(np.flatnonzero(splits == "train"), labels, 75_000, seed)
+    general_train = _balanced_limit(
+        np.flatnonzero(splits == "train"), labels, args.max_train_per_class, seed
+    )
     bot_labels = np.logical_and(frame["_capture"].to_numpy(dtype=str) == "bot", labels == 1).astype(
         np.int8
     )
@@ -98,8 +118,8 @@ def main() -> None:
     all_train = np.flatnonzero(splits == "train")
     bot_positive = all_train[bot_labels[all_train] == 1]
     bot_negative = all_train[bot_labels[all_train] == 0]
-    if len(bot_negative) > 50_000:
-        bot_negative = rng.choice(bot_negative, size=50_000, replace=False)
+    if len(bot_negative) > args.max_negative_train:
+        bot_negative = rng.choice(bot_negative, size=args.max_negative_train, replace=False)
     bot_train = np.concatenate((bot_positive, bot_negative))
 
     development_hashes = _hashes_for(features, general_train)
@@ -115,13 +135,13 @@ def main() -> None:
     calibration_labels = labels[calibration_idx]
 
     general_probability = _model_probabilities(
-        DEFAULT_OUTPUT / "flow_classifier.json",
-        DEFAULT_OUTPUT / "scaler.json",
+        args.output_dir / "flow_classifier.json",
+        args.output_dir / "scaler.json",
         calibration_features,
     )
     bot_probability = _model_probabilities(
-        DEFAULT_OUTPUT / "bot_classifier.json",
-        DEFAULT_OUTPUT / "bot_scaler.json",
+        args.output_dir / "bot_classifier.json",
+        args.output_dir / "bot_scaler.json",
         calibration_features,
     )
     alert_floor = 0.65
@@ -175,13 +195,13 @@ def main() -> None:
                         "bot_probability_threshold": bot_threshold,
                         "bot_fpr_budget_share": _as_float(bot_share, "Bot budget share"),
                         "alert_floor": alert_floor,
-                        "validation_benign": benign_count,
-                        "validation_positive": positive_count,
+                        "calibration_in_sample_benign": benign_count,
+                        "calibration_in_sample_positive": positive_count,
                         "false_positives": false_positives,
                         "true_positives": true_positives,
-                        "validation_fpr": false_positives / benign_count,
-                        "validation_recall": true_positives / positive_count,
-                        "validation_recall_by_capture": family_recalls,
+                        "calibration_in_sample_fpr": false_positives / benign_count,
+                        "calibration_in_sample_recall": true_positives / positive_count,
+                        "calibration_in_sample_recall_by_capture": family_recalls,
                     },
                 )
             )
@@ -190,30 +210,31 @@ def main() -> None:
         targets[key] = max(candidates, key=lambda item: item[0])[1]
 
     artifact_paths = (
-        DEFAULT_OUTPUT / "flow_classifier.onnx",
-        DEFAULT_OUTPUT / "flow_classifier.json",
-        DEFAULT_OUTPUT / "scaler.json",
-        DEFAULT_OUTPUT / "feature_names.json",
-        DEFAULT_OUTPUT / "bot_classifier.onnx",
-        DEFAULT_OUTPUT / "bot_classifier.json",
-        DEFAULT_OUTPUT / "bot_scaler.json",
-        DEFAULT_OUTPUT / "bot_feature_names.json",
-        DEFAULT_OUTPUT / "bot_calibration.json",
-        DEFAULT_OUTPUT / "development_feature_hashes.txt",
-        DEFAULT_OUTPUT / "bot_development_feature_hashes.txt",
+        args.output_dir / "flow_classifier.onnx",
+        args.output_dir / "flow_classifier.json",
+        args.output_dir / "scaler.json",
+        args.output_dir / "feature_names.json",
+        args.output_dir / "bot_classifier.onnx",
+        args.output_dir / "bot_classifier.json",
+        args.output_dir / "bot_scaler.json",
+        args.output_dir / "bot_feature_names.json",
+        args.output_dir / "bot_calibration.json",
+        args.output_dir / "development_feature_hashes.txt",
+        args.output_dir / "bot_development_feature_hashes.txt",
     )
     report = {
         "schema_version": "1.0",
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "validation_only": True,
-        "fused_score": "OR of validation-calibrated general and Bot heads",
+        "calibration_partition_only": True,
+        "held_out_evaluation": False,
+        "fused_score": "OR of calibration-partition general and Bot heads",
         "flow_window_enabled": False,
         "other_fusion_components": False,
         "calibration_rows": len(calibration_idx),
         "exact_development_duplicates_removed": duplicates_removed,
         "source_dataset": {
-            "path": str(DEFAULT_ARCHIVE.relative_to(DEFAULT_OUTPUT.parents[1])),
-            "sha256": _sha256(DEFAULT_ARCHIVE),
+            "path": repo_relative(args.archive),
+            "sha256": _sha256(args.archive),
         },
         "capture_cutoffs": {
             spec.name: {
@@ -224,11 +245,11 @@ def main() -> None:
             for spec in CAPTURES
         },
         "artifacts": {
-            str(path.relative_to(DEFAULT_OUTPUT)): _sha256(path) for path in artifact_paths
+            str(path.relative_to(args.output_dir)): _sha256(path) for path in artifact_paths
         },
         "fixed_fpr": targets,
     }
-    output = DEFAULT_OUTPUT / "fusion_calibration.json"
+    output = args.output_dir / "fusion_calibration.json"
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
 

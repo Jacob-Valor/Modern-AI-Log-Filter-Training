@@ -30,6 +30,7 @@ from train_flow_classifier import (
     _hashes_for,
     load_capture,
     numeric_frame,
+    resolve_device,
 )
 
 from logfilter.models.classifier import SafeMaxAbsScaler
@@ -46,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-negative-train", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=20260730)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--device",
+        choices=("cuda", "cpu"),
+        default="cuda",
+        help="XGBoost training device (default cuda; use cpu on hosts without a GPU)",
+    )
     return parser.parse_args()
 
 
@@ -121,6 +128,7 @@ def main() -> None:
     args = parse_args()
     if args.max_negative_train <= 0 or not 0 < args.threshold < 1:
         raise SystemExit("Training limit and threshold are invalid")
+    device = resolve_device(args.device)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -167,7 +175,7 @@ def main() -> None:
         eval_metric="aucpr",
         random_state=args.seed,
         tree_method="hist",
-        device="cuda",
+        device=device,
         n_jobs=4,
         early_stopping_rounds=40,
     )
@@ -199,7 +207,7 @@ def main() -> None:
         eval_metric="aucpr",
         random_state=args.seed,
         tree_method="hist",
-        device="cuda",
+        device=device,
         n_jobs=4,
     )
     final_model.fit(
@@ -232,6 +240,7 @@ def main() -> None:
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "protocol": {
             "seed": args.seed,
+            "device": device,
             "target": "Bot vs rest",
             "labels_excluded_from_features": True,
             "capture_and_split_metadata_excluded_from_features": True,

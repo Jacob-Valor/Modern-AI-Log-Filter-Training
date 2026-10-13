@@ -37,3 +37,22 @@ def test_dev_profile_services_do_not_block_base_stack_startup() -> None:
         f"dev-profile services use fail-if-unset ${{VAR:?}} interpolation that blocks "
         f"the base 'docker compose up'; use ${{VAR:-}} instead: {offenders}"
     )
+
+
+def test_base_compose_dev_profile_services_exist() -> None:
+    """Guard the guard above: with no dev services it asserts nothing.
+
+    The interpolation bug this file protects against only reaches a dev-only
+    service, so a future edit that drops the ``dev`` profile would silently
+    retire the whole check.
+    """
+    services = _base_compose()["services"]
+    dev_services = sorted(
+        name for name, spec in services.items() if "dev" in (spec.get("profiles") or [])
+    )
+
+    assert services, "docker-compose.yml defines no services — the parser is broken"
+    assert dev_services, (
+        "no service declares the 'dev' profile; test_dev_profile_services_do_not_"
+        "block_base_stack_startup can no longer fire"
+    )

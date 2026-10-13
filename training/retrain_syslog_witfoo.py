@@ -64,6 +64,7 @@ _FEATURE_STOPWORDS = frozenset(
 
 SEED = 42
 TEST_SIZE = 0.20
+VAL_SIZE = 0.10
 MAX_TRAIN_EVENTS = 50000  # cap to keep training fast (~30s)
 RNG = np.random.default_rng(SEED)
 
@@ -215,8 +216,14 @@ def train_model(
     from sklearn.model_selection import train_test_split
 
     # ── Split ───────────────────────────────────────────────────────────────
-    X_train, X_test, y_train, y_test = train_test_split(
+    # Three-way split: early stopping reads the validation rows only, and the
+    # test rows are touched exactly once, after training is frozen.
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
         X, y, test_size=TEST_SIZE, random_state=SEED, stratify=y
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=VAL_SIZE / (1.0 - TEST_SIZE), random_state=SEED,
+        stratify=y_train_val,
     )
 
     # ── Scale ───────────────────────────────────────────────────────────────
@@ -224,6 +231,7 @@ def train_model(
     max_abs[max_abs == 0] = 1.0
     scaler = SafeMaxAbsScaler(max_abs)
     X_train_s = scaler.transform(X_train).astype(np.float32)
+    X_val_s = scaler.transform(X_val).astype(np.float32)
     X_test_s = scaler.transform(X_test).astype(np.float32)
 
     # ── Class distribution ──────────────────────────────────────────────────
@@ -233,6 +241,7 @@ def train_model(
         f"\n  Train: {n_normal} benign, {n_failure} malicious "
         f"(malicious rate: {n_failure / max(n_normal + n_failure, 1) * 100:.1f}%)"
     )
+    print(f"  Val:   {(y_val == 0).sum()} benign, {(y_val == 1).sum()} malicious")
     print(f"  Test:  {(y_test == 0).sum()} benign, {(y_test == 1).sum()} malicious")
 
     # ── Train ──────────────────────────────────────────────────────────────
@@ -252,15 +261,16 @@ def train_model(
     model.fit(
         X_train_s,
         y_train,
-        eval_set=[(X_test_s, y_test)],
+        eval_set=[(X_val_s, y_val)],
         verbose=50,
     )
 
     # ── Evaluate ───────────────────────────────────────────────────────────
+    # Single pass over the untouched test rows, after the model is frozen.
     y_pred = model.predict(X_test_s)
     y_proba = model.predict_proba(X_test_s)[:, 1]
 
-    print("\n  === Evaluation on held-out test set ===")
+    print("\n  === Evaluation on held-out test set (never used for early stopping) ===")
     print(classification_report(y_test, y_pred, target_names=["benign", "malicious"]))
     print(f"  ROC-AUC: {roc_auc_score(y_test, y_proba):.4f}")
 
@@ -280,11 +290,14 @@ def train_model(
         "roc_auc": float(roc_auc_score(y_test, y_proba)),
         "train_normal": n_normal,
         "train_failure": n_failure,
+        "val_normal": int((y_val == 0).sum()),
+        "val_failure": int((y_val == 1).sum()),
         "test_normal": int((y_test == 0).sum()),
         "test_failure": int((y_test == 1).sum()),
         "zero_vector_p_malicious": float(zero_proba[1]),
+        "early_stopping_split": "val",
+        "test_threshold_tuning": False,
     }
-
     return model, scaler, metrics
 
 

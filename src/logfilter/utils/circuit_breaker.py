@@ -38,6 +38,16 @@ class CircuitBreakerOpen(Exception):
         self.name = name
 
 
+class _CallOutcome:
+    """Carries a protected call's result and whether the breaker counted it."""
+
+    __slots__ = ("value", "succeeded")
+
+    def __init__(self) -> None:
+        self.value: Any = None
+        self.succeeded = True
+
+
 class CircuitBreaker:
     """Thread-safe circuit breaker for external service resilience.
 
@@ -75,6 +85,7 @@ class CircuitBreaker:
         self._success_count = 0
         self._last_failure_time: float = 0.0
         self._lock = threading.RLock()
+        self._probe_slots = threading.Semaphore(self.half_open_max_calls)
 
     @property
     def state(self) -> State:
@@ -106,13 +117,76 @@ class CircuitBreaker:
     def _should_attempt_reset(self) -> bool:
         return time.monotonic() - self._last_failure_time >= self.recovery_timeout
 
+
+    def _record_failure_locked(self) -> None:
+        """Count a failure. Caller must hold ``self._lock``."""
+        self._failure_count += 1
+        self._last_failure_time = time.monotonic()
+        if self._state is State.HALF_OPEN:
+            self._open()
+        elif self._failure_count >= self.failure_threshold:
+            self._open()
+
+    def _record_success_locked(self) -> None:
+        """Count a success. Caller must hold ``self._lock``."""
+        if self._state is State.HALF_OPEN:
+            self._success_count += 1
+            if self._success_count >= self.half_open_max_calls:
+                self._close()
+        elif self._state is State.CLOSED:
+            self._failure_count = max(0, self._failure_count - 1)
+
+    def record_failure(self) -> None:
+        """Record a failure detected outside a protected call."""
+        with self._lock:
+            self._record_failure_locked()
+
+    def call_checked(self, fn, is_failure, *args, **kwargs):  # noqa: ANN001, ANN202
+        """Call ``fn`` through the breaker, classifying the *result*.
+
+        A partial failure the callable cannot raise on — e.g. an Elasticsearch
+        bulk response that accepted most documents — must still count against
+        the threshold. Plain ``call`` would record a success and decay the
+        failure count, so a stream of partial failures would never trip.
+        """
+        with self._protect(classify_failure=is_failure) as outcome:
+            outcome.value = fn(*args, **kwargs)
+            return outcome.value
+
+    @contextmanager
+    def _protect(self, classify_failure=None):  # noqa: ANN001, ANN201
+        probe = self._admit()
+        outcome = _CallOutcome()
+        try:
+            try:
+                yield outcome
+            except self.expected_exception:
+                with self._lock:
+                    self._record_failure_locked()
+                raise
+            else:
+                if classify_failure is not None and classify_failure(outcome.value):
+                    outcome.succeeded = False
+                    with self._lock:
+                        self._record_failure_locked()
+                else:
+                    with self._lock:
+                        self._record_success_locked()
+        finally:
+            if probe:
+                self._probe_slots.release()
+
     def call(self, fn, *args, **kwargs):  # noqa: ANN001, ANN202
         """Call ``fn`` through the circuit breaker, returning its result."""
         with self._protect():
             return fn(*args, **kwargs)
 
-    @contextmanager
-    def _protect(self):
+    def _admit(self) -> bool:
+        """Reserve a call slot; returns True when a HALF_OPEN probe slot is held.
+
+        The probe slot is taken while still holding ``self._lock`` so that at
+        most ``half_open_max_calls`` probes can ever be in flight, as documented.
+        """
         with self._lock:
             if self._state is State.OPEN:
                 if self._should_attempt_reset():
@@ -120,28 +194,13 @@ class CircuitBreaker:
                 else:
                     raise CircuitBreakerOpen(self.name)
 
-            if self._state is State.HALF_OPEN and self._success_count >= self.half_open_max_calls:
-                raise CircuitBreakerOpen(self.name)
-
-        try:
-            yield
-        except self.expected_exception:
-            with self._lock:
-                self._failure_count += 1
-                self._last_failure_time = time.monotonic()
-                if self._state is State.HALF_OPEN:
-                    self._open()
-                elif self._failure_count >= self.failure_threshold:
-                    self._open()
-            raise
-        else:
-            with self._lock:
-                if self._state is State.HALF_OPEN:
-                    self._success_count += 1
-                    if self._success_count >= self.half_open_max_calls:
-                        self._close()
-                elif self._state is State.CLOSED:
-                    self._failure_count = max(0, self._failure_count - 1)
+            if self._state is State.HALF_OPEN:
+                if self._success_count >= self.half_open_max_calls:
+                    raise CircuitBreakerOpen(self.name)
+                if not self._probe_slots.acquire(blocking=False):
+                    raise CircuitBreakerOpen(self.name)
+                return True
+            return False
 
     def __call__(self, fn):  # noqa: ANN001, ANN204
         """Decorator usage: ``@breaker`` on a function."""

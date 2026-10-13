@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.4 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.4@sha256:5164bf84e7b4e2e08ce0b4c66b4a8c996a286e6959f72ac5c6e0a3c80e8cb04a /uv /usr/local/bin/uv
 COPY uv.lock pyproject.toml ./
 RUN uv export --frozen --no-dev --only-group collector --no-emit-project \
         --output-file /tmp/requirements.lock \
@@ -18,7 +18,12 @@ COPY src/ ./src/
 COPY config/ ./config/
 RUN uv pip install --system --no-cache -e . --no-deps
 
-RUN useradd -m -u 1000 logfilter && chown -R logfilter:logfilter /app
+# /app/spool is the SYSLOG_SPOOL_PATH mount point. Creating it in the image, owned by
+# the runtime user, makes the fresh named volume inherit that ownership so the
+# non-root collector can write to it despite `read_only: true`.
+RUN useradd -m -u 1000 logfilter \
+    && mkdir -p /app/spool \
+    && chown -R logfilter:logfilter /app
 USER logfilter
 
 # The collector entrypoint: listens on syslog port 5140 (unprivileged)

@@ -12,6 +12,7 @@ import hashlib
 import ipaddress
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Protocol
@@ -143,6 +144,13 @@ class AutoResponseEngine:
         ai_priority values that trigger host quarantine.
     """
 
+    #: Maximum number of acknowledged action ids retained for deduplication.
+    #: Bounded so a long-lived process cannot accumulate one 64-char digest per
+    #: executed action (~31M/year at 60/min). Idempotency is guaranteed for the
+    #: most recent ``MAX_EXECUTED_IDS`` acknowledgements; older ids are evicted
+    #: oldest-first and may be executed again.
+    MAX_EXECUTED_IDS = 100_000
+
     def __init__(
         self,
         firewall: FirewallClient | None = None,
@@ -175,6 +183,7 @@ class AutoResponseEngine:
             raise ValueError("max_actions_per_minute must be positive")
         self.max_actions_per_minute = max_actions_per_minute
         self._executed_ids: set[str] = set()
+        self._executed_order: deque[str] = deque()
         self._execution_times: list[float] = []
         self._inflight_ids: set[str] = set()
         self._lock = threading.RLock()
@@ -184,6 +193,15 @@ class AutoResponseEngine:
         event_identity = event_ref or reason
         payload = f"{event_identity}|{action.value}|{target}".encode()
         return hashlib.sha256(payload).hexdigest()
+
+    def _remember_executed(self, action_id: str) -> None:
+        """Record an acknowledged id, evicting oldest entries past the bound."""
+        if action_id in self._executed_ids:
+            return
+        self._executed_ids.add(action_id)
+        self._executed_order.append(action_id)
+        while len(self._executed_order) > self.MAX_EXECUTED_IDS:
+            self._executed_ids.discard(self._executed_order.popleft())
 
     def _ip_allowed(self, value: str) -> str | None:
         try:
@@ -368,7 +386,7 @@ class AutoResponseEngine:
                 raise
             with self._lock:
                 self._inflight_ids.discard(authoritative_id)
-                self._executed_ids.add(authoritative_id)
+                self._remember_executed(authoritative_id)
             logger.info(
                 "Auto-response executed",
                 action=action.action.value,

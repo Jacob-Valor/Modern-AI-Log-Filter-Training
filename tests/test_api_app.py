@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock
 
@@ -58,8 +59,10 @@ def reset_app_state(monkeypatch):
     original_windows = api_app._state.rate_limit_windows
     original_redis_client = api_app._state.redis_client
     original_rate_limiter = api_app._state.rate_limiter
-    original_archiver = api_app._state.archiver
-
+    original_redis_url = api_app._state.redis_url
+    original_redis_retry_at = api_app._state.redis_retry_at
+    original_health_cache = api_app._state.health_cache
+    original_health_cache_at = api_app._state.health_cache_at
     monkeypatch.delenv("LOGFILTER_API_TOKEN", raising=False)
     monkeypatch.delenv("LOGFILTER_METRICS_TOKEN", raising=False)
     monkeypatch.delenv("REDIS_URL", raising=False)
@@ -70,7 +73,10 @@ def reset_app_state(monkeypatch):
     api_app._state.rate_limit_windows = {}
     api_app._state.redis_client = None
     api_app._state.rate_limiter = None
-    api_app._state.archiver = None
+    api_app._state.redis_url = ""
+    api_app._state.redis_retry_at = 0.0
+    api_app._state.health_cache = {}
+    api_app._state.health_cache_at = 0.0
 
     yield
 
@@ -80,7 +86,21 @@ def reset_app_state(monkeypatch):
     api_app._state.rate_limit_windows = original_windows
     api_app._state.redis_client = original_redis_client
     api_app._state.rate_limiter = original_rate_limiter
-    api_app._state.archiver = original_archiver
+    api_app._state.redis_url = original_redis_url
+    api_app._state.redis_retry_at = original_redis_retry_at
+    api_app._state.health_cache = original_health_cache
+    api_app._state.health_cache_at = original_health_cache_at
+
+
+def test_config_path_is_anchored_to_repo_root_not_cwd(tmp_path, monkeypatch) -> None:
+    """config/config.yaml carries tokens and ES creds — a CWD-relative path is unsafe."""
+    monkeypatch.chdir(tmp_path)
+
+    assert api_app._CONFIG_PATH.is_absolute()
+    assert api_app._CONFIG_PATH.parent == api_app._REPO_ROOT / "config"
+    assert api_app._CONFIG_PATH.name == "config.yaml"
+    assert api_app._REPO_ROOT == Path(api_app.__file__).resolve().parents[3]
+    assert api_app._CONFIG_PATH.exists()
 
 
 def test_source_hint_handles_valid_invalid_and_missing_values() -> None:
@@ -105,17 +125,53 @@ def test_extract_bearer_token() -> None:
 def test_require_metrics_access_fails_closed_without_token() -> None:
     """Metrics endpoint must fail closed when token is not configured."""
     with pytest.raises(HTTPException) as missing:
-        asyncio.run(api_app._require_metrics_access())
+        asyncio.run(api_app._require_metrics_access(_request()))
     assert missing.value.status_code == 403
 
     api_app._state.config = {"api": {"metrics_token": "metrics"}}
     asyncio.run(
-        api_app._require_metrics_access(x_metrics_token=None, authorization="Bearer metrics")
+        api_app._require_metrics_access(
+            _request(), x_metrics_token=None, authorization="Bearer metrics"
+        )
     )
 
     with pytest.raises(HTTPException) as invalid:
-        asyncio.run(api_app._require_metrics_access(x_metrics_token="wrong"))
+        asyncio.run(api_app._require_metrics_access(_request(), x_metrics_token="wrong"))
     assert invalid.value.status_code == 401
+
+
+def test_metrics_access_is_rate_limited() -> None:
+    api_app._state.config = {
+        "api": {
+            "metrics_token": "metrics",
+            "rate_limit_per_minute": 1,
+        }
+    }
+
+    asyncio.run(api_app._require_metrics_access(_request(), x_metrics_token="metrics"))
+    with pytest.raises(HTTPException) as limited:
+        asyncio.run(api_app._require_metrics_access(_request(), x_metrics_token="metrics"))
+
+    assert limited.value.status_code == 429
+
+
+def test_wrong_token_flood_is_throttled_before_token_comparison() -> None:
+    """A wrong-token flood must be rate limited, not just rejected with 401."""
+    api_app._state.config = {
+        "api": {
+            "metrics_token": "metrics",
+            "rate_limit_per_minute": 2,
+        }
+    }
+
+    statuses: list[int] = []
+    for _ in range(4):
+        try:
+            asyncio.run(api_app._require_metrics_access(_request(), x_metrics_token="guess"))
+        except HTTPException as exc:
+            statuses.append(exc.status_code)
+
+    assert statuses == [401, 401, 429, 429]
 
 
 def test_scoring_access_rate_limit() -> None:
@@ -157,6 +213,34 @@ def test_configure_rate_limiter_falls_back_when_redis_is_unavailable(monkeypatch
 
     assert api_app._state.redis_client is None
     assert api_app._state.rate_limiter is None
+    assert api_app._state.redis_retry_at > 0.0
+
+
+def test_recovered_redis_rate_limiter_is_re_adopted_after_retry_delay(monkeypatch) -> None:
+    """A Redis that recovers must be re-adopted, not degrade for process lifetime."""
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    fake_module = Mock()
+    fake_module.Redis.from_url.side_effect = ConnectionError("boom")
+    monkeypatch.setattr(api_app.importlib, "import_module", Mock(return_value=fake_module))
+
+    api_app._configure_rate_limiter()
+    assert api_app._state.rate_limiter is None
+
+    # Before the retry delay elapses the in-process limiter keeps serving.
+    api_app._state.redis_retry_at = api_app.time.monotonic() + 30.0
+    api_app._maybe_retry_rate_limiter()
+    assert api_app._state.rate_limiter is None
+
+    recovered = Mock()
+    recovered.ping.return_value = True
+    fake_module.Redis.from_url.side_effect = None
+    fake_module.Redis.from_url.return_value = recovered
+    api_app._state.redis_retry_at = api_app.time.monotonic() - 1.0
+
+    api_app._maybe_retry_rate_limiter()
+
+    assert api_app._state.redis_client is recovered
+    assert isinstance(api_app._state.rate_limiter, api_app.RedisRateLimiter)
 
 
 def test_enforce_rate_limit_uses_x_forwarded_for_from_trusted_proxy() -> None:
@@ -316,6 +400,67 @@ def test_health_reports_dependency_status_when_archiver_fails() -> None:
     assert response.status == "degraded"
     assert response.dependencies["elasticsearch"] == "red"
     assert http_response.status_code == 503
+
+
+class _CountingArchiver:
+    """Archiver that counts how often the health fan-out reached Elasticsearch."""
+
+    def __init__(self) -> None:
+        self.health_calls = 0
+
+    def health(self) -> dict[str, str]:
+        self.health_calls += 1
+        return {"status": "green"}
+
+
+class _CountingRedis:
+    """Redis stub that counts PINGs issued by the health fan-out."""
+
+    def __init__(self) -> None:
+        self.ping_calls = 0
+
+    def ping(self) -> bool:
+        self.ping_calls += 1
+        return True
+
+
+def _healthy_scorer() -> Any:
+    class FakeClassifier:
+        def is_ready(self) -> bool:
+            return True
+
+    class FakeScorer:
+        classifier = FakeClassifier()
+
+    return FakeScorer()
+
+
+def test_health_dependency_fan_out_is_cached_within_ttl(monkeypatch) -> None:
+    """Unauthenticated /health must not re-fan-out to ES/Redis on every hit."""
+    monkeypatch.setenv("LOGFILTER_HEALTH_CACHE_SECONDS", "300")
+    archiver = _CountingArchiver()
+    redis = _CountingRedis()
+    api_app._state.scorer = cast(Any, _healthy_scorer())
+    api_app._state.enricher = cast(Any, object())
+    api_app._state.archiver = cast(Any, archiver)
+    api_app._state.redis_client = cast(Any, redis)
+
+    for _ in range(10):
+        http_response = Response()
+        response = asyncio.run(api_app.health(http_response))
+        assert response.status == "healthy"
+        assert http_response.status_code == 200
+
+    assert archiver.health_calls == 1
+    assert redis.ping_calls == 1
+
+    # Once the TTL expires the dependencies are probed again.
+    api_app._state.health_cache_at = api_app.time.monotonic() - 301.0
+    asyncio.run(api_app.health(Response()))
+
+    assert archiver.health_calls == 2
+    assert redis.ping_calls == 2
+
 
 
 def test_health_drift_returns_503_when_detector_not_configured() -> None:
@@ -731,14 +876,66 @@ def test_metrics_endpoint_returns_200_via_test_client_with_valid_token() -> None
     assert response.status_code == 200
 
 
+@pytest.fixture
+def scoring_client(monkeypatch):
+    """TestClient wired for /score auth tests with isolated, unthrottled state."""
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(api_app._state, "config", {"api": {}}, raising=False)
+    monkeypatch.setattr(api_app._state, "rate_limit_windows", {}, raising=False)
+    monkeypatch.setattr(api_app._state, "rate_limiter", None, raising=False)
+    monkeypatch.setattr(api_app._state, "redis_client", None, raising=False)
+    monkeypatch.delenv("LOGFILTER_API_TOKEN", raising=False)
+    # No context manager: entering it runs the app lifespan, which loads the real
+    # config.yaml and would couple an auth unit test to deployment credentials.
+    yield TestClient(api_app.app, raise_server_exceptions=False)
+
+
+def _score(client, **headers):
+    return client.post(
+        "/score",
+        json={"raw": "Jan 15 11:07:53 host sshd[1]: Failed password for root from 10.0.0.5"},
+        headers=headers,
+    )
+
+
+def test_score_returns_403_via_test_client_when_token_unconfigured(scoring_client) -> None:
+    """No configured token must fail closed with 403, not reach the scorer.
+
+    This drives the real route so FastAPI actually executes the
+    ``Depends(_require_scoring_access)`` parameter. The pre-existing tests call
+    ``api_app.score_event(...)`` directly, which skips the dependency entirely
+    and so cannot catch a bypass introduced in the wiring.
+    """
+    response = _score(scoring_client)
+    assert response.status_code == 403
+    assert "not configured" in response.json()["detail"].lower()
+
+
+def test_score_returns_401_via_test_client_with_wrong_token(scoring_client, monkeypatch) -> None:
+    monkeypatch.setattr(api_app._state, "config", {"api": {"scoring_token": "right"}})
+
+    response = _score(scoring_client, **{"X-API-Token": "wrong"})
+    assert response.status_code == 401
+
+
+def test_score_returns_401_via_test_client_without_token_header(
+    scoring_client, monkeypatch
+) -> None:
+    """A missing header must be rejected identically to a wrong token."""
+    monkeypatch.setattr(api_app._state, "config", {"api": {"scoring_token": "right"}})
+
+    assert _score(scoring_client).status_code == 401
+
+
 def test_require_metrics_access_with_env_token(monkeypatch) -> None:
     monkeypatch.setenv("LOGFILTER_METRICS_TOKEN", "metrics-secret")
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(api_app._require_metrics_access(x_metrics_token="wrong"))
+        asyncio.run(api_app._require_metrics_access(_request(), x_metrics_token="wrong"))
     assert exc_info.value.status_code == 401
 
-    asyncio.run(api_app._require_metrics_access(x_metrics_token="metrics-secret"))
+    asyncio.run(api_app._require_metrics_access(_request(), x_metrics_token="metrics-secret"))
 
 
 def test_require_scoring_access_with_env_token(monkeypatch) -> None:

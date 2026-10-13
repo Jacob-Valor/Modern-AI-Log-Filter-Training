@@ -4,11 +4,34 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import Any
 
 import numpy as np
+import pytest
+import torch
 
 from logfilter.models.cross_encoder import CrossEncoderModel
 from logfilter.models.ner import ExtractedEntities, NERModel
+
+
+class _FakeAutoTokenizer:
+    """Minimal stand-in for transformers.AutoTokenizer.
+
+    ``NERModel._load`` now resolves a tokenizer as well as the pipeline, because
+    transformers v5 cannot be told to truncate at pipeline-construction time, so the
+    character budget has to be derived here instead.
+    """
+
+    model_max_length = 512
+
+    @classmethod
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeAutoTokenizer:
+        return cls()
+
+
+def _fake_transformers(pipeline: Any) -> types.SimpleNamespace:
+    return types.SimpleNamespace(pipeline=pipeline, AutoTokenizer=_FakeAutoTokenizer)
+
 
 
 def test_extracted_entities_flat_string_deduplicates_in_order() -> None:
@@ -64,8 +87,7 @@ def test_ner_load_uses_cuda_device(monkeypatch) -> None:
         calls.append((args, kwargs))
         return object()
 
-    module = types.SimpleNamespace(pipeline=fake_pipeline)
-    monkeypatch.setitem(sys.modules, "transformers", module)
+    monkeypatch.setitem(sys.modules, "transformers", _fake_transformers(fake_pipeline))
 
     model = NERModel(model_id="ner", device="cuda")
     model._load()
@@ -79,9 +101,20 @@ def test_cross_encoder_score_empty_candidates_skips_model_load() -> None:
     assert model.score("text", []) == []
 
 
-def test_cross_encoder_score_batch_sorts_and_sigmoids() -> None:
+def test_cross_encoder_score_batch_sorts_and_applies_single_sigmoid() -> None:
+    """Guards against the double-sigmoid defect.
+
+    ``sentence_transformers.CrossEncoder.predict`` applies a Sigmoid by default
+    when ``num_labels == 1`` (true for SecureBERT2.0-cross_encoder). The wrapper
+    must request an identity activation and apply exactly one sigmoid, otherwise
+    every score is squashed into ``(0.5, 0.731)`` and this 0.40-weighted scoring
+    term cannot move the composite score across a routing boundary.
+    """
+    captured: dict[str, object] = {}
+
     class FakeModel:
         def predict(self, pairs, **kwargs):
+            captured.update(kwargs)
             assert pairs == [
                 ("log-a", "desc-low"),
                 ("log-a", "desc-high"),
@@ -107,6 +140,41 @@ def test_cross_encoder_score_batch_sorts_and_sigmoids() -> None:
     assert [score.technique_id for score in results[0]] == ["T2", "T1"]
     assert round(results[1][0].score, 3) == 0.5
     assert results[2] == []
+
+    # An identity activation must be requested, otherwise predict() returns an
+    # already-activated probability and the wrapper's sigmoid becomes a second one.
+    activation = captured["activation_fn"]
+    assert isinstance(activation, torch.nn.Identity)
+
+
+def test_cross_encoder_scores_span_full_unit_interval() -> None:
+    """Scores must not be confined to the (0.5, 0.731) double-sigmoid band."""
+
+    class FakeModel:
+        def predict(self, pairs, **kwargs):
+            return np.array([-4.0, 0.0, 4.0], dtype=np.float32)
+
+    model = CrossEncoderModel()
+    model._model = FakeModel()
+
+    results = model.score_batch(
+        ["log"],
+        [
+            [
+                {"id": "T-low", "name": "Low", "description": "d"},
+                {"id": "T-mid", "name": "Mid", "description": "d"},
+                {"id": "T-high", "name": "High", "description": "d"},
+            ]
+        ],
+    )
+
+    by_id = {score.technique_id: score.score for score in results[0]}
+    assert by_id["T-high"] > 0.98
+    assert by_id["T-low"] < 0.02
+    assert by_id["T-mid"] == pytest.approx(0.5, abs=1e-3)
+
+    # The whole point: real spread, not a 0.23-wide band around 0.61.
+    assert by_id["T-high"] - by_id["T-low"] > 0.9
 
 
 def test_cross_encoder_load_uses_sentence_transformer(monkeypatch) -> None:
@@ -178,14 +246,15 @@ def test_ner_load_with_cache_dir_and_revision(monkeypatch) -> None:
         calls.append((args, kwargs))
         return object()
 
-    module = types.SimpleNamespace(pipeline=fake_pipeline)
-    monkeypatch.setitem(sys.modules, "transformers", module)
+    monkeypatch.setitem(sys.modules, "transformers", _fake_transformers(fake_pipeline))
 
     model = NERModel(model_id="ner", device="cpu", cache_dir="/tmp/cache", revision="v1")
     model._load()
 
     assert calls[0][1]["cache_dir"] == "/tmp/cache"
     assert calls[0][1]["revision"] == "v1"
+    # The budget is derived from the tokenizer, so a pipeline-only fake is not enough.
+    assert model._max_input_chars == 512 * NERModel.CONSERVATIVE_CHARS_PER_TOKEN
 
 
 def test_ner_extract_batch_single_text_fallback() -> None:
@@ -281,8 +350,7 @@ def test_ner_extract_calls_load_lazily(monkeypatch) -> None:
         def __call__(self, batch):
             return [{"score": 0.9, "entity_group": "Indicator", "word": "10.0.0.5"}]
 
-    module = types.SimpleNamespace(pipeline=FakePipeline)
-    monkeypatch.setitem(sys.modules, "transformers", module)
+    monkeypatch.setitem(sys.modules, "transformers", _fake_transformers(FakePipeline))
 
     model = NERModel()
     assert model._pipeline is None

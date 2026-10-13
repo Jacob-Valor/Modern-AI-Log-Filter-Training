@@ -17,6 +17,7 @@ Type:  BiEncoder / Sentence Transformer (768-dim output)
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -86,7 +87,11 @@ def _cpu_supports_avx2() -> bool:
     try:
         return "avx2" in Path("/proc/cpuinfo").read_text(errors="ignore").lower()
     except OSError:
-        return True
+        # /proc/cpuinfo only exists on Linux. On macOS/Windows it does not, and
+        # assuming AVX2 there would force the portable NumPy path on platforms
+        # that may well support FAISS. Fall back to "no AVX2" instead.
+        logger.info("Cannot read /proc/cpuinfo; assuming no AVX2 support")
+        return False
 
 
 def _new_inner_product_index(dim: int) -> Any:
@@ -159,6 +164,18 @@ class BiEncoderModel:
         # Rolling dedup window: deque of (timestamp, embedding)
         self._dedup_window: deque[tuple[float, np.ndarray]] = deque()
 
+        # Guards the rolling dedup window and its derived FAISS index. The
+        # scorer is a process singleton reached from both FastAPI request
+        # handlers and the Kafka consumer thread; without this a lost or
+        # reordered index entry silently changes whether Tier-3 runs at all.
+        self._dedup_lock = threading.RLock()
+
+        # True once the ATT&CK index is populated. An empty index means
+        # retrieve_attack_candidates() returns nothing and Tier-3 silently
+        # degrades, so the state must be observable via is_ready().
+        self._attack_index_ready = False
+        self._attack_index_error: str | None = None
+
         self.novelty_detector = novelty_detector
 
     # ── initialisation ─────────────────────────────────────────────────────────
@@ -190,8 +207,13 @@ class BiEncoderModel:
             raise RuntimeError("BiEncoder embedding dimension is not initialized")
 
         if not self.mitre_techniques_path.exists():
-            logger.warning(
-                "MITRE techniques file not found",
+            self._attack_index_ready = False
+            self._attack_index_error = (
+                f"MITRE techniques file not found: {self.mitre_techniques_path}"
+            )
+            logger.error(
+                "MITRE techniques file not found; ATT&CK candidate retrieval is disabled "
+                "and Tier-3 will produce no candidates",
                 path=str(self.mitre_techniques_path),
             )
             self._faiss_attack = _new_inner_product_index(dim)
@@ -215,6 +237,8 @@ class BiEncoderModel:
         self._faiss_attack = _new_inner_product_index(dim)
         self._faiss_attack.add(embeddings.astype(np.float32))
         logger.info("ATT&CK index ready")
+        self._attack_index_ready = True
+        self._attack_index_error = None
 
     # ── public API ─────────────────────────────────────────────────────────────
     def encode(self, texts: list[str]) -> np.ndarray:
@@ -232,30 +256,52 @@ class BiEncoderModel:
         )
         return embeddings.astype(np.float32)
 
+    def is_ready(self) -> dict[str, Any]:
+        """Report load state, including whether Tier-3 retrieval can work.
+
+        ``attack_index_ready`` is ``False`` when the MITRE techniques file is
+        missing, in which case :meth:`retrieve_attack_candidates` returns an
+        empty list and Tier-3 silently produces nothing. Callers (health
+        endpoints) must surface this rather than reporting a healthy model.
+        """
+        return {
+            "model_loaded": self._model is not None,
+            "embedding_dim": self._dim,
+            "dedup_index_size": self._faiss_dedup.ntotal if self._faiss_dedup is not None else 0,
+            "attack_index_ready": self._attack_index_ready,
+            "attack_technique_count": len(self._attack_techniques),
+            "attack_index_error": self._attack_index_error,
+        }
+
     def check_dedup(self, embedding: np.ndarray) -> DedupResult:
         """
         Check if this embedding is a near-duplicate of a recent event.
         Prunes stale entries from the dedup window before checking.
+
+        The whole read-then-append sequence is serialised: dedup gates Tier-3
+        candidate generation, so a torn window/index pair would silently
+        change whether Tier-3 runs at all.
         """
         if self._model is None:
             self._load()
 
-        self._prune_dedup_window()
+        with self._dedup_lock:
+            self._prune_dedup_window()
 
-        dedup_index = self._faiss_dedup
-        if dedup_index is None:
-            raise RuntimeError("BiEncoder dedup index is not initialized")
+            dedup_index = self._faiss_dedup
+            if dedup_index is None:
+                raise RuntimeError("BiEncoder dedup index is not initialized")
 
-        if dedup_index.ntotal == 0:
+            if dedup_index.ntotal == 0:
+                self._add_to_dedup(embedding)
+                return DedupResult(is_duplicate=False, similarity=0.0)
+
+            query = embedding.reshape(1, -1)
+            distances, _ = dedup_index.search(query, k=1)
+            sim = float(distances[0][0])
+
             self._add_to_dedup(embedding)
-            return DedupResult(is_duplicate=False, similarity=0.0)
-
-        query = embedding.reshape(1, -1)
-        distances, _ = dedup_index.search(query, k=1)
-        sim = float(distances[0][0])
-
-        self._add_to_dedup(embedding)
-        return DedupResult(is_duplicate=sim >= self.dedup_threshold, similarity=sim)
+            return DedupResult(is_duplicate=sim >= self.dedup_threshold, similarity=sim)
 
     def retrieve_attack_candidates(self, embedding: np.ndarray) -> list[ATTACKCandidate]:
         """Return top-k MITRE ATT&CK techniques most similar to this embedding."""

@@ -40,6 +40,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARCHIVE = ROOT / "demo_data" / "CIC-IDS2017" / "MachineLearningCSV.zip"
 DEFAULT_OUTPUT = ROOT / "models" / "flow"
 LABEL = "Label"
+TIMESTAMP = "Timestamp"
+TIMESTAMP_FORMAT = "%d/%m/%Y:%H:%M:%S"
 SOURCE_COLUMNS: dict[str, str] = {
     "destination_port": "Destination Port",
     "flow_duration_us": "Flow Duration",
@@ -118,7 +120,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-per-class", type=int, default=75_000)
     parser.add_argument("--seed", type=int, default=20260730)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--device",
+        choices=("cuda", "cpu"),
+        default="cuda",
+        help="XGBoost training device (default cuda; use cpu on hosts without a GPU)",
+    )
     return parser.parse_args()
+
+
+def resolve_device(requested: str) -> str:
+    """Return the device to train on, verifying a CUDA request is satisfiable."""
+    if requested == "cpu":
+        return "cpu"
+    if not bool(xgb.build_info().get("USE_CUDA")):
+        raise SystemExit(
+            "--device cuda was requested but this XGBoost build has no CUDA support; "
+            "re-run with --device cpu"
+        )
+    return "cuda"
+
+
+def repo_relative(path: Path) -> str:
+    """Repo-relative path when possible, bare filename otherwise (no home-dir leak)."""
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return resolved.name
 
 
 def _sha256(path: Path) -> str:
@@ -150,7 +179,7 @@ def load_capture(archive_path: Path, spec: CaptureSpec) -> pd.DataFrame:
         member = _member(archive, spec.member_suffix)
         with archive.open(member) as binary:
             text = io.TextIOWrapper(binary, encoding="utf-8-sig", errors="replace", newline="")
-            frame = pd.read_csv(text, usecols=lambda name: name.strip() in required)
+            frame = pd.read_csv(text, usecols=lambda name: name.strip() in required | {TIMESTAMP})
     frame.columns = [column.strip() for column in frame.columns]
     missing = required - set(frame.columns)
     if missing:
@@ -160,8 +189,22 @@ def load_capture(archive_path: Path, spec: CaptureSpec) -> pd.DataFrame:
     frame = frame.loc[selected].copy()
     frame["_label"] = labels.loc[selected].map(lambda label: 0 if label == "BENIGN" else 1)
     frame["_capture"] = spec.name
+    # The split below is chronological and therefore rests entirely on the CSV
+    # row order. When the capture ships a Timestamp column, cross-check that it
+    # agrees with that order rather than trusting the file layout silently; the
+    # CIC-IDS2017 captures do not, so the absence is recorded for the report.
+    monotonic: bool | None = None
+    if TIMESTAMP in frame.columns:
+        timestamps = pd.to_datetime(frame[TIMESTAMP], format=TIMESTAMP_FORMAT, errors="coerce")
+        if timestamps.isna().any():
+            raise ValueError(f"Unparseable {TIMESTAMP} values in {spec.name}")
+        if not timestamps.is_monotonic_increasing:
+            raise ValueError(
+                f"{TIMESTAMP} is not monotonically increasing in the {spec.name} capture; "
+                "the chronological split would not match capture time order"
+            )
+        monotonic = True
     original_rows = frame.index.to_numpy(dtype=np.int64)
-    frame["_row"] = original_rows
     calibration_start = spec.train_end + (spec.validation_end - spec.train_end) // 2
     frame["_split"] = np.select(
         (
@@ -172,6 +215,8 @@ def load_capture(archive_path: Path, spec: CaptureSpec) -> pd.DataFrame:
         ("train", "validation", "calibration"),
         default="test",
     )
+    frame.attrs["timestamp_column_present"] = TIMESTAMP in frame.columns
+    frame.attrs["timestamp_monotonic_increasing"] = monotonic
     return frame
 
 
@@ -308,9 +353,9 @@ def main() -> None:
         raise SystemExit("Training limit must be positive")
     if not 0 < args.threshold < 1:
         raise SystemExit("Threshold must be between zero and one")
+    device = resolve_device(args.device)
     random.seed(args.seed)
     np.random.seed(args.seed)
-
     frames = [load_capture(args.archive, spec) for spec in CAPTURES]
     frame = pd.concat(frames, ignore_index=True)
     features = numeric_frame(frame)
@@ -360,7 +405,7 @@ def main() -> None:
         eval_metric="aucpr",
         random_state=args.seed,
         tree_method="hist",
-        device="cuda",
+        device=device,
         n_jobs=4,
         early_stopping_rounds=40,
     )
@@ -390,12 +435,25 @@ def main() -> None:
     report = {
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "dataset": {
-            "archive": str(args.archive),
+            "archive": repo_relative(args.archive),
             "sha256": _sha256(args.archive),
             "members": [spec.member_suffix for spec in CAPTURES],
         },
         "protocol": {
             "seed": args.seed,
+            "device": device,
+            "split_basis": "csv_row_order",
+            "capture_timestamp_cross_check": {
+                spec.name: {
+                    "timestamp_column_present": bool(
+                        frames[index].attrs["timestamp_column_present"]
+                    ),
+                    "timestamp_monotonic_increasing": frames[index].attrs[
+                        "timestamp_monotonic_increasing"
+                    ],
+                }
+                for index, spec in enumerate(CAPTURES)
+            },
             "capture_cutoffs": {
                 spec.name: {
                     "train_rows": [0, spec.train_end - 1],

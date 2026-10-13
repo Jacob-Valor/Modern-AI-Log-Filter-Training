@@ -3,7 +3,13 @@ Validate the scoring pipeline against real syslog patterns.
 
 Tests the full pipeline (normalizer → scorer → enricher) with representative
 production log events covering common attack vectors and benign traffic.
-Reports per-category accuracy so you can assess real-world readiness.
+
+Each case declares the priorities that are acceptable for that event
+(``INFO``/``LOW``/``MEDIUM``/``HIGH``, per the scorer's routing bands). A case
+passes only when the scorer's ``ai_priority`` falls inside its declared set, so
+the per-category ratio reported at the end is a real accuracy measurement: a
+benign event scored ``HIGH``, or an exploit scored ``INFO``, is a false positive
+or a miss respectively.
 """
 
 from __future__ import annotations
@@ -30,29 +36,29 @@ WARN = "\033[93m⚠\033[0m"
 INFO = "\033[94m·\033[0m"
 
 # ── Test cases by category ────────────────────────────────────────────────────
-# Each entry: (category, raw_log, expected_priority_range, description)
-# priority_range is a set of acceptable priorities. Empty = any.
+# Each entry: (category, raw_log, expected_priorities, description)
+# expected_priorities is the set of acceptable routing labels for that event.
 TEST_CASES: list[tuple[str, str, set[str], str]] = [
     # ── SSH brute force ──────────────────────────────────────────────────────
     (
         "ssh_brute_force",
         "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password "
         "for root from 10.0.0.5 port 44382 ssh2",
-        set(),
+        {"INFO", "LOW"},
         "Single failed SSH password attempt",
     ),
     (
         "ssh_brute_force",
         "Jan 15 11:07:53 prod-srv01 sshd[22345]: Failed password for "
         "invalid user admin from 192.168.1.100 port 33442 ssh2",
-        set(),
+        {"INFO", "LOW"},
         "Failed SSH with invalid user",
     ),
     (
         "ssh_brute_force",
         "Jan 15 11:07:53 prod-srv01 sshd[22345]: Connection closed by "
         "authenticating user root 10.0.0.5 port 44382 [preauth]",
-        set(),
+        {"INFO", "LOW"},
         "SSH connection closed during auth",
     ),
     (
@@ -60,7 +66,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "Jan 15 11:07:53 prod-srv01 sshd[22345]: Disconnecting "
         "authenticating user root 10.0.0.5 port 44382: "
         "Too many authentication failures [preauth]",
-        set(),
+        {"MEDIUM", "HIGH"},
         "Too many SSH auth failures",
     ),
     # ── SSH successful login ─────────────────────────────────────────────────
@@ -68,27 +74,27 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "ssh_login",
         "Jan 15 11:08:01 prod-srv01 sshd[22400]: Accepted publickey "
         "for deploy from 10.0.0.12 port 52301 ssh2: RSA SHA256:abc123",
-        set(),
+        {"INFO"},
         "Successful SSH public key login",
     ),
     (
         "ssh_login",
         "Jan 15 11:08:01 prod-srv01 sshd[22400]: pam_unix(sshd:session"
         "): session opened for user deploy by (uid=0)",
-        set(),
+        {"INFO"},
         "PAM session opened for SSH user",
     ),
     # ── Web attacks ──────────────────────────────────────────────────────────
     (
         "web_attack",
         '10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "GET /wp-admin HTTP/1.1" 403 512',
-        set(),
+        {"MEDIUM", "HIGH"},
         "WordPress admin access attempt (403)",
     ),
     (
         "web_attack",
         '10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "GET /../../../etc/passwd HTTP/1.1" 400 342',
-        set(),
+        {"HIGH"},
         "Path traversal attempt",
     ),
     (
@@ -96,14 +102,14 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "10.0.0.5 - - [15/Jan/2026:11:07:53 +0000] "
         '"POST /api/login HTTP/1.1" 200 128 '
         '"-" "sqlmap/1.5"',
-        set(),
+        {"HIGH"},
         "SQL injection tool detected in UA",
     ),
     # ── Normal web traffic ───────────────────────────────────────────────────
     (
         "web_normal",
         '10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] "GET /index.html HTTP/1.1" 200 5120',
-        set(),
+        {"INFO", "LOW"},
         "Normal HTTP GET for index.html",
     ),
     (
@@ -111,7 +117,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "10.0.0.12 - - [15/Jan/2026:11:07:53 +0000] "
         '"GET /api/health HTTP/1.1" 200 16 '
         '"-" "ELB-HealthChecker/2.0"',
-        set(),
+        {"INFO"},
         "Health check from load balancer",
     ),
     # ── Firewall / IDS ───────────────────────────────────────────────────────
@@ -119,7 +125,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "firewall",
         "CEF:0|Palo Alto|NGFW|10.0|threat|SSH brute force|8|"
         "src=10.0.0.5 dst=192.168.1.1 spt=55000 dpt=22",
-        set(),
+        {"HIGH"},
         "CEF firewall SSH brute force alert",
     ),
     (
@@ -127,7 +133,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "CEF:0|Snort|IDS|2.9|attempted-admin|"
         "EternalBlue MS17-010|10|"
         "src=10.0.0.99 dst=10.0.0.1 spt=4444 dpt=445",
-        set(),
+        {"HIGH"},
         "IDS EternalBlue exploit attempt",
     ),
     # ── Authentication failures ──────────────────────────────────────────────
@@ -136,7 +142,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "Jan 15 11:07:53 prod-srv01 sudo: user : "
         "TTY=pts/0 ; PWD=/home/user ; USER=root ; "
         "COMMAND=/bin/cat /etc/shadow",
-        set(),
+        {"HIGH"},
         "sudo attempt to read shadow file",
     ),
     (
@@ -144,7 +150,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "Jan 15 11:07:53 prod-srv01 login: "
         "FAILED LOGIN 2 FROM 10.0.0.5 FOR admin, "
         "Authentication failure",
-        set(),
+        {"MEDIUM", "HIGH"},
         "Login authentication failure",
     ),
     # ── Windows events ───────────────────────────────────────────────────────
@@ -162,7 +168,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
                 "TimeCreated": "2026-01-15T11:07:53Z",
             }
         ),
-        set(),
+        {"MEDIUM", "HIGH"},
         "Windows Event 4625 - failed logon",
     ),
     (
@@ -177,7 +183,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
                 "TimeCreated": "2026-01-15T11:07:53Z",
             }
         ),
-        set(),
+        {"MEDIUM", "HIGH"},
         "Windows Event 4720 - user account created",
     ),
     # ── HDFS traces ──────────────────────────────────────────────────────────
@@ -189,7 +195,7 @@ TEST_CASES: list[tuple[str, str, set[str], str]] = [
         "org.apache.hadoop.hdfs.protocol.LocatedBlocks\n"
         "bestNode+success: chosen bestnode = dn1 "
         "in nodes = [dn1, dn2, dn3]",
-        set(),
+        {"INFO"},
         "Normal HDFS trace - getFileInfo",
     ),
 ]
@@ -283,10 +289,11 @@ def main() -> None:
             results[category] = {"pass": [], "fail": []}
 
         has_entities = bool(scored.ai_entities)
-        has_score = scored.ai_threat_score > 0
-        pri_ok = (not expected_prios) or (scored.ai_priority in expected_prios)
+        if not expected_prios:
+            raise ValueError(f"{desc!r} declares no expected priorities")
+        pri_ok = scored.ai_priority in expected_prios
 
-        passed = has_score and pri_ok
+        passed = pri_ok
 
         tag = PASS if passed else FAIL
         print(f"  [{i}/{total}] {tag} {desc}")
@@ -304,7 +311,7 @@ def main() -> None:
         if passed:
             results[category]["pass"].append(entry)
         else:
-            results[category]["fail"].append(entry)
+            results[category]["fail"].append({**entry, "expected": sorted(expected_prios)})
 
     avg_latency = sum(latencies) / len(latencies) if latencies else 0
     p99_latency = sorted(latencies)[int(len(latencies) * 0.99)] if latencies else 0
@@ -320,7 +327,10 @@ def main() -> None:
         status = PASS if ratio >= 0.5 else WARN
         print(f"  {status} {cat}: {n_pass}/{n_total} passed ({ratio:.0%})")
         for f in cat_results["fail"]:
-            print(f"      {FAIL} {f['desc']} (score={f['score']:.4f}, priority={f['priority']})")
+            print(
+                f"      {FAIL} {f['desc']} (score={f['score']:.4f}, "
+                f"priority={f['priority']}, expected={'/'.join(f['expected'])})"
+            )
 
     print(f"\n{'─' * 60}")
     print("  Latency")

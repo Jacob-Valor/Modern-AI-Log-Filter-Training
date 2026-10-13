@@ -26,6 +26,10 @@ from logfilter.kafka.config import kafka_security_kwargs
 logger = structlog.get_logger(__name__)
 
 
+class DlqNotConfiguredError(RuntimeError):
+    """Raised when a DLQ publish is attempted without a configured DLQ topic."""
+
+
 class LogProducer:
     """
     Wraps KafkaProducer with retry logic and structured logging.
@@ -66,6 +70,14 @@ class LogProducer:
             "compression_type": compression,
             "acks": "all",  # wait for full ISR acknowledgement
             "retries": 5,
+            # The settings above already meet the idempotent producer's
+            # requirements, but kafka-python only enables the deduplicating
+            # producer state when this is set explicitly. Without it a retried
+            # publish could append a duplicate record to the log; the pipeline's
+            # raw_log_ref de-duplication would absorb it, but the gap is better
+            # closed at the producer. Must stay consistent with acks/retries/
+            # max_in_flight above or Kafka rejects the configuration.
+            "enable_idempotence": True,
             "max_in_flight_requests_per_connection": 1,
             **kafka_security_kwargs(kafka_config),
         }
@@ -139,11 +151,6 @@ class LogProducer:
                 logger.error("Failed to send message to Kafka", error=str(exc))
                 raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, max=5),
-        reraise=True,
-    )
     def send_dlq(
         self,
         original_message: dict[str, Any],
@@ -155,12 +162,40 @@ class LogProducer:
         Send a failed message to the dead-letter queue with failure metadata.
 
         The DLQ payload preserves the original message and adds context
-        about the failure so it can be reprocessed or audited later.
+        about the failure so it can be reprocessed or audited later. The
+        original ``raw_log_ref`` is carried so a replay keeps the same
+        Elasticsearch document id instead of minting a new one.
+
+        Raises
+        ------
+        DlqNotConfiguredError
+            If no DLQ topic is configured. Callers must not commit offsets
+            for records whose only remaining copy was going to the DLQ.
         """
         if not self.dlq_topic:
-            logger.warning("DLQ topic not configured; dropping failed message")
-            return
+            raise DlqNotConfiguredError(
+                "DLQ topic is not configured; refusing to drop a failed message"
+            )
+        self._send_dlq_payload(
+            original_message=original_message,
+            error=error,
+            original_topic=original_topic,
+            retry_count=retry_count,
+        )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, max=5),
+        reraise=True,
+    )
+    def _send_dlq_payload(
+        self,
+        original_message: dict[str, Any],
+        error: str,
+        original_topic: str,
+        retry_count: int = 0,
+    ) -> None:
+        """Publish one DLQ record, retrying transient broker failures."""
         with telemetry.start_as_current_span(
             "kafka.producer.send_dlq",
             {
@@ -176,6 +211,7 @@ class LogProducer:
                 "original_topic": original_topic,
                 "timestamp": time.time(),
                 "retry_count": retry_count,
+                "raw_log_ref": original_message.get("raw_log_ref"),
             }
             producer = self._get_producer()
             headers = telemetry.inject_kafka_headers(span=span)
@@ -211,12 +247,14 @@ class LogProducer:
         events: list[dict[str, Any]],
     ) -> int:
         """
-        Fire-and-forget batch send. Returns number of messages sent.
+        Batch send. Returns the number of messages the broker acknowledged.
 
-        Each event dict should have keys: raw, source_type, host.
+        Each event dict should have keys: raw, source_type, host. Sends whose
+        future carries a ``KafkaError`` are logged and excluded from the count
+        so callers never treat an unacknowledged message as delivered.
         """
         producer = self._get_producer()
-        sent = 0
+        futures: list[tuple[str, Any]] = []
         with telemetry.start_as_current_span(
             "kafka.producer.send_batch",
             {
@@ -235,20 +273,39 @@ class LogProducer:
                     "ingest_ts": time.time(),
                 }
                 try:
-                    producer.send(
-                        self.topic,
-                        value=payload,
-                        key=host,
-                        headers=telemetry.inject_kafka_headers(span=span),
+                    futures.append(
+                        (
+                            host,
+                            producer.send(
+                                self.topic,
+                                value=payload,
+                                key=host,
+                                headers=telemetry.inject_kafka_headers(span=span),
+                            ),
+                        )
                     )
-                    sent += 1
                 except KafkaError as exc:
                     telemetry.record_exception(span, exc)
-                    logger.error("Batch send error", error=str(exc))
+                    logger.error("Batch send error", error=str(exc), host=host)
 
-            # Flush buffered messages
-            producer.flush(timeout=30)
+            try:
+                producer.flush(timeout=30)
+            except KafkaError as exc:
+                logger.error("Batch flush failed", error=str(exc))
+
+            sent = 0
+            for host, future in futures:
+                try:
+                    future.get(timeout=10)
+                except KafkaError as exc:
+                    logger.error("Batch send not acknowledged", error=str(exc), host=host)
+                    continue
+                sent += 1
+
             span.set_attribute("logfilter.kafka.messages_sent", sent)
+            span.set_attribute("logfilter.kafka.messages_failed", len(events) - sent)
+            if sent != len(events):
+                logger.error("Batch send incomplete", sent=sent, total=len(events))
             logger.debug("Batch flushed", sent=sent, total=len(events))
             return sent
 

@@ -44,8 +44,13 @@ def test_threshold_sweep_summary_selects_candidates() -> None:
     summary = summarize_threshold_sweep(rows, min_recall=1.0)
 
     assert [row["threshold"] for row in rows] == [0.3, 0.5, 0.8]
-    assert summary["best_f1"]["threshold"] == 0.3
-    assert summary["best_precision_at_min_recall"]["threshold"] == 0.3
+    # 0.3 and 0.5 tie exactly on f1=1.0, tp=2, fp=0. Ties resolve toward the HIGHEST
+    # threshold, so 0.5 (the most conservative tied operating point) wins. Resolving
+    # to 0.3 would pick the least conservative member of the tied set.
+    best_tied = max(row["threshold"] for row in rows if row["f1"] == 1.0)
+    assert best_tied == 0.5
+    assert summary["best_f1"]["threshold"] == best_tied
+    assert summary["best_precision_at_min_recall"]["threshold"] == best_tied
 
 
 def test_threshold_metrics_validate_shapes() -> None:

@@ -183,13 +183,30 @@ groups:
           summary: "Collector spool is non-empty for 10+ minutes"
           description: "Kafka producer may be persistently failing; spool depth is {{ $value }}."
 
-      # ── DLQ Depth ─────────────────────────────────────────────────────────
+      # ── Kafka consumer lag / DLQ depth ────────────────────────────────────
+      # Metrics below come from danielqsj/kafka-exporter, which exposes
+      # kafka_consumergroup_lag_sum{consumergroup,topic} (lag summed over the
+      # topic's partitions). There is no kafka_consumer_group_lag metric and no
+      # `group` label — a rule built on either can never fire.
       - alert: LogfilterDLQDepthHigh
         expr: |
-          kafka_consumer_group_lag{group=~"logfilter-.*", topic="logfilter-dlq"} > 100
+          kafka_consumergroup_lag_sum{consumergroup=~"logfilter-.*", topic="logfilter-dlq"} > 100
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "DLQ topic has >100 unprocessed messages"
-          description: "{{ $value }} messages in DLQ; check for persistent failures."
+          description: "Consumer group {{ $labels.consumergroup }} is {{ $value }} messages behind on logfilter-dlq; check for persistent failures."
+
+      # Canonical stall detector: the archiver and router both consume raw-logs.
+      # If either stops committing offsets, raw syslog silently stops flowing
+      # into Elasticsearch and on to QRadar while every other metric looks healthy.
+      - alert: LogfilterRawLogsConsumerLagHigh
+        expr: |
+          kafka_consumergroup_lag_sum{consumergroup=~"logfilter-archiver|logfilter-router", topic="raw-logs"} > 1000
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consumer {{ $labels.consumergroup }} is >1000 messages behind on raw-logs"
+          description: "{{ $labels.consumergroup }} has been {{ $value }} messages behind on raw-logs for 10+ minutes. The pipeline is stalled."

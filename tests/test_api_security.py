@@ -76,6 +76,30 @@ def test_rate_limit_can_be_disabled() -> None:
     assert windows == {}
 
 
+def test_rate_limit_window_map_stays_bounded_under_distinct_client_ids() -> None:
+    """A stream of one-shot client ids must not grow the window map unbounded."""
+    windows: dict[str, deque[float]] = {}
+
+    # 2k distinct ids arriving over 100 s. Without a sweep the map would hold
+    # all 2k; with one it holds only the ids still inside the 60 s horizon.
+    for i in range(2_000):
+        client_id = f"198.51.100.{i % 250}.{i // 250}"
+        enforce_rate_limit(windows, client_id, 5, now=100.0 + i * 0.05)
+
+    assert len(windows) < 2_000
+
+
+def test_rate_limit_sweep_keeps_windows_still_inside_the_horizon() -> None:
+    windows: dict[str, deque[float]] = {}
+
+    enforce_rate_limit(windows, "198.51.100.10", 5, now=100.0)
+    enforce_rate_limit(windows, "198.51.100.11", 5, now=150.0)
+    enforce_rate_limit(windows, "198.51.100.12", 5, now=200.0)
+
+    assert set(windows) == {"198.51.100.11", "198.51.100.12"}
+    assert list(windows["198.51.100.12"]) == [200.0]
+
+
 def test_redis_rate_limit_uses_atomic_lua_script() -> None:
     client = Mock()
     script = Mock(return_value=[1, 1])

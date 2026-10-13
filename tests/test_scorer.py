@@ -582,14 +582,66 @@ def test_scored_event_to_dict() -> None:
     assert d["ai_threat_score"] == 0.5
 
 
-def test_model_version_paths() -> None:
-    scorer = LogScorer(
-        config={"scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}}},
+def _versioned_scorer(version: str) -> LogScorer:
+    """Build a scorer with the models that resolve paths from config.
+
+    classifier/tier2 are injected as fakes on purpose: they are the two paths the
+    old code already handled, so exercising them would not prove anything new.
+    NER / BiEncoder / CrossEncoder / flow / endpoint are constructed for real.
+    """
+    return LogScorer(
+        config={
+            "scoring": {"routing": {"high": 0.85, "medium": 0.50, "low": 0.20}},
+            "models": {
+                "ner": {"enabled": True, "model_id": "models/ner/final"},
+                "biencoder": {"enabled": True, "model_id": "models/biencoder/final"},
+                "cross_encoder": {"enabled": True, "model_id": "models/cross_encoder/final"},
+                "flow": {"enabled": True, "path": "models/flow/flow_classifier.onnx"},
+                "endpoint_novelty": {
+                    "enabled": True,
+                    "path": "models/endpoint/endpoint_novelty.onnx",
+                },
+            },
+        },
         classifier=FakeClassifier(),
         tier2_classifier=FakeTier2Classifier(),
-        model_version="v1",
+        model_version=version,
     )
-    assert scorer._model_version == "v1"
+
+
+def test_model_version_roots_every_model_under_the_version_dir() -> None:
+    """A pinned model_version must move the WHOLE artifact set, not just tier-1/2.
+
+    Regression: only the classifier and tier-2 paths were re-rooted. NER,
+    BiEncoder, CrossEncoder, flow and endpoint kept loading from their unversioned
+    paths, so a deployment that believed it had pinned its models was actually
+    running a mix of two versions.
+    """
+    scorer = _versioned_scorer("v9")
+
+    assert scorer._model_version == "v9"
+    rooted = [
+        scorer.ner_model.model_id,
+        scorer.biencoder.model_id,
+        scorer.cross_encoder.model_id,
+        str(scorer.flow_classifier.model_path),
+        str(scorer.endpoint_novelty_model.model_path),
+    ]
+    assert rooted, "expected at least one constructed model path"
+    for path in rooted:
+        assert "models/v9" in path, f"{path!r} was not re-rooted under models/v9"
+
+
+def test_model_version_leaves_unversioned_paths_untouched() -> None:
+    scorer = _versioned_scorer("")
+
+    for path in (
+        scorer.ner_model.model_id,
+        scorer.biencoder.model_id,
+        scorer.cross_encoder.model_id,
+    ):
+        assert "models/v" not in path
+    assert "models/ner/final" in scorer.ner_model.model_id
 
 
 class FakeNERWithEntities(FakeNER):
@@ -1278,3 +1330,222 @@ def test_calibrated_flow_isolation_excludes_sigma_and_other_components() -> None
 def test_unknown_source_profile_is_rejected() -> None:
     with pytest.raises(ValueError, match="Invalid scoring source profile"):
         LogScorer(config={"scoring": {"source_profiles": {"unknown": {}}}})
+
+
+# ── Regression guards for the scoring-correctness remediation ─────────────────
+
+
+def _weights_scorer(**weights: float) -> LogScorer:
+    """Build a minimal LogScorer with explicit weights, as _compute_score sees them."""
+    return LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.35,
+                    "entity_boost": 0.25,
+                    "cross_encoder": 0.40,
+                    "novelty": 0.15,
+                    **weights,
+                },
+                "routing": {"high": 0.80, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+
+def _blank_event(**kwargs: Any) -> ScoredEvent:
+    defaults: dict[str, Any] = {
+        "source_type": "generic",
+        "timestamp": "",
+        "host": "h",
+        "raw": "raw",
+        "normalized_text": "raw",
+    }
+    return ScoredEvent(**{**defaults, **kwargs})
+
+
+def test_nan_component_degrades_instead_of_scoring_maximum() -> None:
+    """NaN must not clamp to 1.0 (maximum threat) via max(0.0, min(1.0, nan)).
+
+    ``nan < 1.0`` is False in CPython, so the old clamp evaluated to 1.0 and routed a
+    broken computation to HIGH.
+    """
+    scorer = _weights_scorer()
+    event = _blank_event(classifier_score=float("nan"))
+
+    score = scorer._compute_score(event)
+
+    assert score == 0.0
+    assert event.score_degraded is True
+    assert scorer._routing_label(event) != "HIGH"
+
+
+def test_infinite_component_degrades() -> None:
+    scorer = _weights_scorer()
+    event = _blank_event(classifier_score=float("inf"))
+    assert scorer._compute_score(event) == 0.0
+    assert event.score_degraded is True
+
+
+def test_finite_nan_provenance_is_surfaced_in_limited_scope() -> None:
+    """A NaN in one event degrades that event, not the whole batch."""
+    scorer = _weights_scorer()
+    bad = _blank_event(classifier_score=float("nan"))
+    good = _blank_event(classifier_score=0.9)
+
+    assert scorer._compute_score(bad) == 0.0
+    assert scorer._compute_score(good) > 0.0
+    assert good.score_degraded is False
+
+
+def test_bounded_probability_maps_non_finite_to_zero() -> None:
+    assert scorer_module._bounded_probability(float("nan")) == 0.0
+    assert scorer_module._bounded_probability(float("inf")) == 0.0
+    assert scorer_module._bounded_probability(float("-inf")) == 0.0
+    assert scorer_module._bounded_probability(0.5) == pytest.approx(0.5)
+
+
+def test_dedup_penalty_is_applied_on_near_duplicates() -> None:
+    """The documented -0.30 dedup term must actually be reachable.
+
+    dedup_penalty is set only on duplicates and cross_encoder_max only on
+    non-duplicates, so the previous ``cross_encoder_max > 0`` guard made the
+    subtraction permanently 0.0.
+    """
+    scorer = _weights_scorer()
+    duplicate = _blank_event(
+        classifier_score=0.80,
+        cross_encoder_max=0.0,  # Tier 3 skipped because the event is a duplicate
+        dedup_penalty=0.30,
+        is_duplicate=True,
+    )
+
+    score = scorer._compute_score(duplicate)
+
+    # 0.35 * 0.80 = 0.28, minus the 0.30 penalty, floored at 0.0.
+    assert score == pytest.approx(0.0)
+    assert score < 0.35  # the penalty demonstrably subtracted something
+
+
+def test_dedup_penalty_is_zero_when_cross_encoder_has_no_weight() -> None:
+    """firewall_flow profiles give the cross-encoder no weight, so no penalty applies."""
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 1.0,
+                    "entity_boost": 0.0,
+                    "cross_encoder": 0.0,
+                    "novelty": 0.0,
+                },
+                "routing": {"high": 0.80, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+    event = _blank_event(classifier_score=0.60, dedup_penalty=0.30, is_duplicate=True)
+    assert scorer._compute_score(event) == pytest.approx(0.60)
+
+
+def test_compute_score_does_not_mutate_classifier_score() -> None:
+    """The sigma floor is a scoring term, not a mutation of the event."""
+    scorer = _weights_scorer()
+    event = _blank_event(classifier_score=0.10, sigma_matched=True)
+
+    score = scorer._compute_score(event)
+
+    assert event.classifier_score == 0.10  # untouched by score computation
+    assert score >= 0.35 * scorer_module._SIGMA_CLASSIFIER_FLOOR
+    # Recomputing is idempotent.
+    assert scorer._compute_score(event) == pytest.approx(score)
+
+
+def test_missing_syslog_head_routes_to_hdfs_and_marks_degraded() -> None:
+    """A syslog event must never be scored by nothing and reported as benign."""
+
+    class UnavailableSyslogClassifier(SyslogClassifier):
+        def __init__(self) -> None:
+            self._feature_names = ["sshd+failed password"]
+
+        def is_ready(self) -> bool:
+            return False
+
+        def predict_proba(self, feature_vectors: np.ndarray) -> np.ndarray:
+            raise AssertionError("unavailable syslog head must not be called")
+
+    scorer = LogScorer(
+        config={
+            "scoring": {
+                "weights": {
+                    "classifier": 0.35,
+                    "entity_boost": 0.25,
+                    "cross_encoder": 0.40,
+                    "novelty": 0.15,
+                },
+                "routing": {"high": 0.80, "medium": 0.50, "low": 0.20},
+            }
+        },
+        classifier=FakeClassifier(),
+        syslog_classifier=UnavailableSyslogClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    raw = "<13>Jul  1 12:00:00 host sshd[123]: Failed password for root from 10.0.0.5"
+    normalized = LogNormalizer().normalize(raw, source_type_hint="syslog")
+    assert normalized.source_type.value == "syslog"
+
+    scored = scorer.score(normalized)
+
+    # Scored by the HDFS head (0.82) rather than left at the 0.0 default ...
+    assert scored.classifier_score > 0.0
+    # ... and explicitly flagged, so automated response is blocked.
+    assert scored.score_degraded is True
+
+
+def test_manifest_validation_accepts_full_sha256(tmp_path) -> None:
+    """A manifest holding the full 64-hex digest must validate cleanly."""
+    import hashlib
+    import json
+
+    scorer = LogScorer(
+        config={"scoring": {"weights": {}, "routing": {}}},
+        classifier=FakeClassifier(),
+        tier2_classifier=FakeTier2Classifier(),
+        ner_model=FakeNER(),
+        biencoder=FakeBiEncoder(),
+        cross_encoder=FakeCrossEncoder(),
+    )
+
+    digest = hashlib.sha256(b"artifact").hexdigest()
+    manifest = {
+        "models": {
+            "unit-test": {
+                "path": str(tmp_path),
+                "artifacts": {"a.bin": {"sha256": digest}},
+            }
+        }
+    }
+    tmp_path.mkdir(exist_ok=True)
+    (tmp_path / "a.bin").write_bytes(b"artifact")
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(scorer_module, "ROOT", tmp_path.parent)
+        (tmp_path.parent / "models").mkdir(exist_ok=True)
+        (tmp_path.parent / "models" / "model_manifest.json").write_text(json.dumps(manifest))
+        # No exception and no error list => full-length digests are accepted.
+        scorer._validate_manifest()
+    finally:
+        monkey.undo()

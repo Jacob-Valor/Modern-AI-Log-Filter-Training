@@ -30,9 +30,17 @@ Then set:
 
 ```dotenv
 LOGFILTER_FLOW_ENABLED=true
+LOGFILTER_BOT_FLOW_ENABLED=true
 LOGFILTER_FLOW_WINDOW_ENABLED=true
 LOGFILTER_ENDPOINT_NOVELTY_ENABLED=true
 ```
+
+`LOGFILTER_BOT_FLOW_ENABLED=true` is required, not optional. The attested
+general/Bot fusion only exists when the Bot head is loaded; with it off (the
+default), bot traffic is scored by the general head alone, which has 0% Bot recall
+at its default threshold. Without this flag the Bot column in the scenario table
+below is unreachable. `docker-compose.prod.yml` sets it to `false` explicitly —
+override it there too when promoting to production.
 
 The in-process DDoS window is appropriate for single-worker validation only. A
 multi-worker/HA deployment must externalize window state to Kafka Streams, Redis,
@@ -75,6 +83,12 @@ dedup penalties and the local flow window cannot alter it.
 | 0.1% | `8d2e6e60cd6e523cc9fe84d2` | 100% / 0% | 87.3% / 0.2% | 94.6% / 0% | 15.6% / 0% |
 | 1% | `4be17913e0fa085eb9bbb8fa` | 100% / 0.6% | 92.9% / 1.2% | 100% / 1.0% | 15.6% / 0% |
 | 5% | `2e07408b75c00a9743696fe9` | 100% / 2.8% | 93.9% / 2.8% | 100% / 4.8% | 15.6% / 0% |
+
+Reproducing any row of this table requires `LOGFILTER_BOT_FLOW_ENABLED=true`. The
+Bot recall/FPR column is unreachable at the default (`false`), because the general
+head alone scores 0% Bot recall at its default threshold — the numbers above are
+fusion results, not general-head results. Reproduce them with a manifest-validated
+artifact set and `LOGFILTER_MODELS_STRICT=1`; see [SECURITY.md](../SECURITY.md).
 
 The evaluator excludes exact feature rows seen by either flow head during model
 development. Deduplication chooses representatives without labels. Reports attest

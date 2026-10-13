@@ -37,15 +37,19 @@ def main() -> None:
     es_client: Elasticsearch = archive.client
 
     dlq_topic = topics.get("dlq")
-    dlq_producer = None
-    if dlq_topic:
-        dlq_producer = LogProducer(
-            bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
-            topic=dlq_topic,
-            dlq_topic=dlq_topic,
-            kafka_config=kafka_cfg,
+    if not dlq_topic:
+        raise SystemExit(
+            "DLQ topic is unset. Set kafka.topics.dlq in config/config.yaml before "
+            "starting the archive consumer — without it a permanent per-record "
+            "failure has nowhere to go and the raw log would be lost."
         )
-        logger.info("DLQ producer enabled", topic=dlq_topic)
+    dlq_producer = LogProducer(
+        bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
+        topic=dlq_topic,
+        dlq_topic=dlq_topic,
+        kafka_config=kafka_cfg,
+    )
+    logger.info("DLQ producer enabled", topic=dlq_topic)
 
     consumer = ArchiveConsumer(
         bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),

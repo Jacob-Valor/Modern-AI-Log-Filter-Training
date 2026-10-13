@@ -37,6 +37,12 @@ k8s/secret.local.yaml
 .commandcode/
 
 
+# Agent tool state / transcripts — local only, large and machine-specific
+.pi-subagents/
+.codegraph/
+.remember/
+.kaggle_runs/
+
 # Generated Kafka TLS/SASL secrets — regenerate locally via scripts/certs/generate.sh
 scripts/certs/*
 !scripts/certs/generate.sh

@@ -3,10 +3,14 @@
 Promotes a registered staging run to production by:
 1. Updating the registry status
 2. Copying artifacts to the production directory
-3. Optionally triggering an API reload
+
+Promotion is entirely local. The API exposes no reload endpoint (`app.py`
+registers only /score, /score/batch, /health, /health/drift, /metrics and
+/metrics/snapshot), so there is nothing to notify; a running API picks up the
+new artifacts on its next restart.
 
 Usage:
-    python scripts/promote_model.py --run-id <run_id> [--production-dir models/production] [--reload-api]
+    python scripts/promote_model.py --run-id <run_id> [--production-dir models/production]
 """
 
 from __future__ import annotations
@@ -29,11 +33,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("models/production"),
         help="Destination directory for production artifacts",
-    )
-    parser.add_argument(
-        "--reload-api",
-        action="store_true",
-        help="Trigger API reload after promotion (requires LOGFILTER_ADMIN_TOKEN env var)",
     )
     parser.add_argument(
         "--registry-path",
@@ -91,33 +90,9 @@ def main() -> None:
     print(f"  model_type: {run.model_type}")
     print(f"  artifacts:  {args.production_dir}")
     print(f"  metrics:    {run.metrics}")
+    print("  reload:     not applicable (the API exposes no reload endpoint)")
 
-    if args.reload_api:
-        import os
-        import urllib.request
 
-        admin_token = os.environ.get("LOGFILTER_ADMIN_TOKEN", "")
-        if not admin_token:
-            print(
-                "WARNING: LOGFILTER_ADMIN_TOKEN not set — skipping API reload",
-                file=sys.stderr,
-            )
-            return
-
-        req = urllib.request.Request(
-            "http://localhost:8080/admin/reload",
-            headers={
-                "X-Admin-Token": admin_token,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-            data=b"{}",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                print(f"API reload: {resp.status} {resp.read().decode()}")
-        except Exception as exc:
-            print(f"WARNING: API reload failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

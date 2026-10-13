@@ -34,7 +34,11 @@ sys.path.insert(0, str(ROOT))
 
 from training.data_loader import split_dataset  # noqa: E402
 from training.text_dataset import build_windows  # noqa: E402
-from training.thresholds import summarize_threshold_sweep, threshold_sweep  # noqa: E402
+from training.thresholds import (  # noqa: E402
+    FIXED_FPR_TARGETS,
+    threshold_metrics,
+    thresholds_at_fixed_fpr,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,6 +138,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Enable FP16 training (default: enabled when CUDA is available)",
     )
+    parser.add_argument(
+        "--min-recall",
+        type=float,
+        default=0.90,
+        help="Minimum validation recall a fixed-FPR target must reach (default 0.90)",
+    )
     return parser.parse_args()
 
 
@@ -193,7 +203,10 @@ def compute_metrics(eval_pred: tuple[np.ndarray, np.ndarray]) -> dict[str, float
     }
 
 
-def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, Any]:
+def score_split(
+    trainer: Any, dataset: Any, split: str
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+    """Predict one split and return its metrics plus the (labels, probability) pair."""
     predictions = trainer.predict(test_dataset=dataset, metric_key_prefix=split)
     metrics = predictions.metrics
     logits = np.asarray(predictions.predictions, dtype=np.float32)
@@ -201,17 +214,12 @@ def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, Any]:
     logits_shifted = logits - np.max(logits, axis=-1, keepdims=True)
     exp_logits = np.exp(logits_shifted)
     y_prob = (exp_logits / exp_logits.sum(axis=-1, keepdims=True))[:, 1]
-    sweep = threshold_sweep(labels, y_prob)
     result = {
         "split": split,
         "precision": round(float(metrics[f"{split}_precision"]), 4),
         "recall": round(float(metrics[f"{split}_recall"]), 4),
         "f1": round(float(metrics[f"{split}_f1"]), 4),
         "roc_auc": round(float(metrics[f"{split}_roc_auc"]), 4),
-        "threshold_strategy": {
-            "summary": summarize_threshold_sweep(sweep),
-            "sweep": sweep,
-        },
     }
     logger.info(
         "[%s]  Precision=%.4f  Recall=%.4f  F1=%.4f  ROC-AUC=%.4f",
@@ -221,7 +229,37 @@ def evaluate_split(trainer: Any, dataset: Any, split: str) -> dict[str, Any]:
         result["f1"],
         result["roc_auc"],
     )
-    return result
+    return result, labels, y_prob
+
+
+def select_fixed_fpr_threshold(
+    calibration: dict[str, dict[str, float | int | str | None]],
+    min_recall: float,
+) -> tuple[str, float]:
+    """Pick the strictest validation-calibrated cutoff that still meets min_recall.
+
+    ``FIXED_FPR_TARGETS`` is ascending, so the first calibrated target that
+    reaches ``min_recall`` on validation is the most conservative one that
+    qualifies. When no target qualifies, the strictest calibrated target is used
+    and the caller reports the shortfall via the calibration block.
+    """
+    calibrated = [
+        (key, row) for key, row in calibration.items() if row.get("threshold") is not None
+    ]
+    if not calibrated:
+        raise RuntimeError("no validation-calibrated Tier-2 threshold could be selected")
+    for key, row in calibrated:
+        if float(row["validation_recall"]) >= min_recall:
+            return str(key), float(row["threshold"])
+    key, row = calibrated[0]
+    logger.warning(
+        "No validation fixed-FPR target reaches recall %.2f (best %.4f); "
+        "selecting the strictest target %s.",
+        min_recall,
+        max(float(row["validation_recall"]) for _, row in calibrated),
+        key,
+    )
+    return str(key), float(row["threshold"])
 
 
 def count_parameters(model: Any) -> int:
@@ -383,7 +421,7 @@ def main() -> None:
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         compute_metrics=compute_metrics,
         callbacks=[early_stopping_callback(early_stopping_patience=2)],
         class_weights=class_weights,
@@ -399,8 +437,30 @@ def main() -> None:
     )
     trainer.train()
 
-    val_metrics = evaluate_split(trainer, val_dataset, "val")
-    test_metrics = evaluate_split(trainer, test_dataset, "test")
+    # Thresholds are calibrated on validation only. The test split is scored
+    # exactly once, at cutoffs chosen without ever looking at it.
+    val_metrics, y_val, p_val = score_split(trainer, val_dataset, "val")
+    calibration = thresholds_at_fixed_fpr(y_val, p_val, FIXED_FPR_TARGETS)
+    selected_target, selected_threshold = select_fixed_fpr_threshold(calibration, args.min_recall)
+    logger.info(
+        "Selected Tier-2 threshold %.4f (validation fixed-FPR target %s, min_recall=%.2f)",
+        selected_threshold,
+        selected_target,
+        args.min_recall,
+    )
+
+    test_metrics, y_test, p_test = score_split(trainer, test_dataset, "test")
+    test_metrics["selected_threshold"] = round(selected_threshold, 4)
+    test_metrics["selected_target_fpr"] = selected_target
+    test_metrics["at_selected_threshold"] = threshold_metrics(y_test, p_test, selected_threshold)
+    test_metrics["at_validation_fixed_fpr"] = {
+        key: (
+            {"status": row["status"]}
+            if row.get("threshold") is None
+            else threshold_metrics(y_test, p_test, float(row["threshold"]))
+        )
+        for key, row in calibration.items()
+    }
 
     trainer.save_model(str(args.output_dir))
     tokenizer.save_pretrained(args.output_dir)
@@ -409,6 +469,27 @@ def main() -> None:
     onnx_path = args.output_dir / "log_classifier_tier2.onnx"
     export_onnx(args.output_dir, onnx_path)
 
+    # Record the inference length alongside the ONNX artifact so the serving
+    # layer cannot drift from the length the model was fine-tuned at. Previously
+    # nothing wrote this file: Tier2Classifier._load_export_metadata() looked for
+    # tier2_config.json, found nothing, and fell back to its hardcoded default of
+    # 1024 for every real deployment. HDFS TraceBench failure windows run to
+    # ~2100+ tokens, so a 1024 inference cap truncates ~90% of them and deletes
+    # the exception lines that carry the signal.
+    inference_config_path = args.output_dir / "tier2_config.json"
+    inference_config_path.write_text(
+        json.dumps(
+            {
+                "inference_max_length": args.max_length,
+                "model_id": args.model_id,
+                "revision": args.revision,
+                "base_max_position_embeddings": model.config.max_position_embeddings,
+            },
+            indent=2,
+        )
+    )
+    logger.info("Inference metadata saved to %s", inference_config_path)
+
     label_map_path = args.output_dir / "tier2_label_map.json"
     label_map_path.write_text(json.dumps(LABEL_MAP, indent=2))
     logger.info("Label map saved to %s", label_map_path)
@@ -416,11 +497,19 @@ def main() -> None:
     metrics_path = args.output_dir / "tier2_metrics.json"
     metrics = {
         "val": val_metrics,
+        "val_fixed_fpr_calibration": calibration,
         "test": test_metrics,
         "model_id": args.model_id,
         "num_params": num_params,
         "training_args": asdict(config),
         "window_stats": window_stats,
+        "threshold_protocol": {
+            "selected_target_fpr": selected_target,
+            "selected_threshold": round(selected_threshold, 4),
+            "min_recall_target": args.min_recall,
+            "calibrated_on": "val",
+            "test_threshold_tuning": False,
+        },
     }
     metrics_path.write_text(json.dumps(metrics, indent=2))
     logger.info("Metrics saved to %s", metrics_path)

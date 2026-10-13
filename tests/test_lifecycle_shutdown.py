@@ -76,19 +76,71 @@ class TestCollectorThreadJoin:
 
 
 def _extract_run_body(source: str, class_name: str) -> str:
+    """Return the body of ``<class_name>.run``.
+
+    Raises instead of returning "" on a miss. An empty string trivially satisfies
+    every ``"x" not in block`` assertion below, so a silent miss turned these
+    regression tests into no-ops that passed regardless of the implementation.
+    """
     pattern = rf"class {class_name}.*?def run\(self\) -> None:(.*?)(?=\n    def |\nclass |\Z)"
     m = re.search(pattern, source, re.DOTALL)
-    return m.group(1) if m else ""
+    if m is None:
+        raise AssertionError(
+            f"could not locate {class_name}.run() — the source shape changed, "
+            "so the signal-safety regression check below would silently pass"
+        )
+    return m.group(1)
 
 
 def _extract_lifespan_shutdown(source: str) -> str:
     idx = source.find("yield")
     if idx == -1:
-        return ""
+        raise AssertionError(
+            "no yield found in the lifespan function — the shutdown assertions would silently pass"
+        )
     return source[idx:]
 
 
 def _extract_collector_run(source: str) -> str:
     pattern = r"def run\(self\) -> None.*?(?=\ndef |\Z)"
     m = re.search(pattern, source, re.DOTALL)
-    return m.group(0) if m else ""
+    if m is None:
+        raise AssertionError(
+            "could not locate Collector.run() — the thread-join regression check "
+            "would silently pass"
+        )
+    return m.group(0)
+
+
+class TestExtractorsActuallyMatch:
+    """Guard the guard: every extractor must return a non-empty slice of real code.
+
+    These checks assert on source text, so their only real failure mode is the
+    extractor silently matching nothing while the ``"x" not in block`` assertions
+    pass anyway. Asserting the extraction is non-empty — and contains the anchor
+    it is supposed to key on — closes that hole without pretending the test
+    exercises runtime behaviour.
+    """
+
+    def test_run_body_extractors_match_real_code(self) -> None:
+        for class_name in ("ArchiveConsumer", "ScorerConsumer"):
+            body = _extract_run_body(_CONSUMER_SRC, class_name)
+            assert body.strip(), f"{class_name}.run() body extracted empty"
+            assert "def " in body or "self." in body, (
+                f"{class_name}.run() extraction looks like it captured the wrong "
+                f"region: {body[:120]!r}"
+            )
+
+    def test_collector_run_extractor_matches_real_code(self) -> None:
+        run_block = _extract_collector_run(_COLLECTOR_SRC)
+        assert "def run(self) -> None" in run_block
+        assert len(run_block) > 200, (
+            f"Collector.run() extraction suspiciously short: {len(run_block)} chars"
+        )
+
+    def test_lifespan_extractor_matches_real_code(self) -> None:
+        shutdown = _extract_lifespan_shutdown(_APP_SRC)
+        assert shutdown.strip()
+        assert "redis" in shutdown.lower() or "archiver" in shutdown.lower(), (
+            "lifespan shutdown extraction did not reach the cleanup code"
+        )

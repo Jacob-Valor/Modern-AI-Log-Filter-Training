@@ -72,6 +72,13 @@ api = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.7.0",
+    # Imported at runtime by src/logfilter/models/{classifier,syslog_classifier}.py on
+    # the native-XGBoost fallback path (used when ONNX artifacts are absent, i.e. the
+    # degraded/CI case) and by biencoder.py for FAISS. docker/api/Dockerfile installs
+    # ONLY this group via `uv export --frozen --only-group api`, so anything the API
+    # imports must be listed here or the image crashes at runtime.
+    "xgboost>=2.0.0",
+    "faiss-cpu>=1.8.0",
     "pydantic-settings>=2.2.0",
     "kafka-python>=2.0.2",
     "lz4>=4.3.3",

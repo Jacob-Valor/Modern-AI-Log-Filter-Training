@@ -2,13 +2,16 @@
 # Usage: make <target>
 
 .PHONY: help install dev-install train evaluate test test-coverage lint format \
-         verify audit security-check up up-dev down logs logs-api logs-router \
-         build clean models-dir smoke-test smoke-pipeline benchmark \
-         download-beth download-cic train-flow train-endpoint train-all \
-         k8s-apply k8s-delete k8s-secrets certs
+        verify audit security-check up up-dev down logs logs-api logs-router \
+        build clean models-dir smoke-test smoke-pipeline benchmark \
+        download-beth download-cic train-flow train-endpoint train-all \
+        integration-test benchmark-standalone \
+        model-manifest-generate model-manifest-validate \
+        k8s-apply k8s-delete k8s-secrets certs
 
 PYTHON     ?= python3
 PIP        ?= pip3
+UV         ?= uv
 COMPOSE    ?= docker compose
 SAMPLE_N   ?= 50000   # subsample for quick training (default 50K normal)
 K8S_SECRET_FILE ?= k8s/secret.local.yaml
@@ -99,8 +102,11 @@ train-endpoint: models-dir
 test:
 	$(PYTHON) -m pytest tests/ -v --tb=short
 
+# `-m "not integration"` matches CI: tests/integration/ boots the Docker Compose
+# stack via a session-scoped autouse fixture, so collecting it here would break
+# the documented fast local gate on a machine without Docker.
 test-coverage:
-	$(PYTHON) -m pytest tests/ --cov=src/logfilter --cov-report=term-missing --cov-report=xml --cov-report=html
+	$(PYTHON) -m pytest tests/ -m "not integration" --cov=src/logfilter --cov-report=term-missing --cov-report=xml --cov-report=html
 
 integration-test:
 	@echo "Starting integration test stack …"
@@ -124,8 +130,16 @@ model-manifest-validate:
 
 verify: lint test-coverage smoke-pipeline
 
+# Audit the exact set the production images install (uv.lock via `uv export
+# --frozen`), not requirements.txt, whose `>=` ranges resolve to versions that
+# never ship. `--no-deps --disable-pip` avoids re-resolving the pinned export:
+# it contains a local-version torch (+cpu) from the PyTorch CPU index.
 audit:
-	$(PYTHON) -m pip_audit -r requirements.txt --progress-spinner off
+	$(UV) export --frozen \
+		--only-group api --only-group archive \
+		--only-group collector --only-group router \
+		--no-emit-project --output-file /tmp/logfilter-locked.txt
+	$(PYTHON) -m pip_audit -r /tmp/logfilter-locked.txt --no-deps --disable-pip --progress-spinner off
 
 security-check: verify audit
 

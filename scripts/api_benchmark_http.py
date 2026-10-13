@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -82,11 +83,12 @@ def main() -> None:
     env["LOGFILTER_API_TOKEN"] = TOKEN
     env["PYTHONPATH"] = str(ROOT / "src")
     # Benchmark measures the scoring pipeline only, not ES archiving or
-    # distributed rate limiting. config.yaml's "${ES_PASSWORD:?...}" default
-    # is a literal non-empty string when the var is unset, so unsetting it
-    # doesn't disable the archiver — it must be set to "" explicitly to make
-    # _configure_archiver() see an empty password and skip ES.
-    env["ES_PASSWORD"] = ""
+    # distributed rate limiting. Elasticsearch is disabled by rewriting the
+    # password key to an empty value in the scratch config below (see the
+    # placeholder removal there), because config.yaml declares ES_PASSWORD
+    # mandatory via "${ES_PASSWORD:?...}" and load_config() now fails closed
+    # when it is unset or empty.
+    env["LOGFILTER_METRICS_TOKEN"] = TOKEN
     env.pop("REDIS_URL", None)
 
     # app.py loads config from the hardcoded relative path "config/config.yaml"
@@ -102,13 +104,21 @@ def main() -> None:
     src_cfg = ROOT / "config" / "config.yaml"
     cfg_text = src_cfg.read_text() if src_cfg.exists() else ""
     if "rate_limit_per_minute" in cfg_text:
-        import re
-
         cfg_text = re.sub(
             r"rate_limit_per_minute:\s*\d+", "rate_limit_per_minute: 100000", cfg_text
         )
     else:
         cfg_text += "\napi:\n  rate_limit_per_minute: 100000\n"
+
+    # Strip the mandatory "${ES_PASSWORD:?...}" placeholder entirely so the scratch
+    # config needs no Elasticsearch credentials. Leaving it in place would abort
+    # startup now that load_config() fails closed on an unset or empty value.
+    cfg_text = re.sub(
+        r'^(\s*)password:\s*"\$\{ES_PASSWORD:\?[^"]*\}"\s*$',
+        r'\1password: ""',
+        cfg_text,
+        flags=re.MULTILINE,
+    )
     (workdir / "config" / "config.yaml").write_text(cfg_text)
 
     print(f"Starting uvicorn subprocess on {HOST}:{PORT} (cwd={workdir}) ...")

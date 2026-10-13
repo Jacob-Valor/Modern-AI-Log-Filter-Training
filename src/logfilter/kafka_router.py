@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,8 +20,14 @@ from kafka import KafkaConsumer, KafkaProducer
 
 from logfilter import telemetry
 from logfilter.config import load_config
-from logfilter.kafka.config import kafka_security_kwargs
-from logfilter.kafka.producer import LogProducer
+from logfilter.kafka.config import (
+    decode_kafka_value,
+    exhausted_dlq_topic,
+    is_transient_failure,
+    kafka_consumer_health_kwargs,
+    kafka_security_kwargs,
+)
+from logfilter.kafka.producer import DlqNotConfiguredError, LogProducer
 from logfilter.pipeline.archive import compute_kafka_raw_log_ref
 from logfilter.pipeline.router import RoutingMode, build_qradar_sender, decide_routing
 from logfilter.utils.circuit_breaker import CircuitBreaker
@@ -33,6 +41,9 @@ _API_BREAKER = CircuitBreaker(
     half_open_max_calls=3,
     expected_exception=(httpx.HTTPError, RuntimeError),
 )
+
+_MAX_DLQ_REPLAYS = 3
+_TRANSIENT_BACKOFF_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -96,18 +107,28 @@ class RouteBatchError(RuntimeError):
 
 
 def _event_with_archive_ref(message: Any) -> dict[str, Any]:
-    """Copy one Kafka payload and attach its replay-stable archive reference."""
+    """Copy one Kafka payload and attach its replay-stable archive reference.
+
+    A message replayed from the DLQ already carries the reference minted when
+    it was first consumed; reusing it keeps the Elasticsearch document id
+    stable across replays instead of minting a duplicate for the same event.
+    """
     event = (
         dict(message.value)
         if isinstance(message.value, dict)
         else {"raw": str(message.value), "source_type": "generic"}
     )
-    event["raw_log_ref"] = compute_kafka_raw_log_ref(
+    event["raw_log_ref"] = event.get("raw_log_ref") or compute_kafka_raw_log_ref(
         str(message.topic),
         int(message.partition),
         int(message.offset),
     )
     return event
+
+
+def _backoff() -> None:
+    """Briefly pause so a transient outage does not turn into a hot poll loop."""
+    time.sleep(_TRANSIENT_BACKOFF_SECONDS)
 
 
 class KafkaQRadarRouter:
@@ -131,8 +152,9 @@ class KafkaQRadarRouter:
             group_id=settings.consumer_group,
             auto_offset_reset=settings.auto_offset_reset,
             enable_auto_commit=False,
-            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            value_deserializer=decode_kafka_value,
             max_poll_records=settings.max_poll_records,
+            **kafka_consumer_health_kwargs(settings.kafka_config),
             **kafka_security_kwargs(settings.kafka_config),
         )
         self.producer = KafkaProducer(
@@ -245,12 +267,19 @@ class KafkaQRadarRouter:
                                     priority,
                                     event_id=scored.get("raw_log_ref"),
                                 )
-                        self.producer.send(
+                        # Await the broker acknowledgement. This is a raw
+                        # KafkaProducer, so send() only queues the record and
+                        # returns a future; a failure recorded on that future is
+                        # otherwise dropped on the floor by flush(), silently
+                        # losing the scored event. Raising here routes the batch
+                        # into the DLQ path and leaves offsets uncommitted.
+                        future = self.producer.send(
                             self.settings.scored_topic,
                             value=scored,
                             key=scored.get("raw_log_ref") or scored.get("host", "unknown"),
                             headers=telemetry.inject_kafka_headers(span=span),
                         )
+                        future.get(timeout=10)
                     except Exception as exc:
                         raise RouteBatchError(index, str(exc)) from exc
                 self.producer.flush(timeout=30)
@@ -259,6 +288,42 @@ class KafkaQRadarRouter:
                 raise
             finally:
                 telemetry.detach_context(token)
+
+    def _dlq_events(self, events: list[dict[str, Any]], error: str) -> bool:
+        """Publish records to the DLQ; False if any publish failed.
+
+        Callers must not commit when this returns False: the failed records
+        would then have no copy anywhere.
+        """
+        if not self.dlq_producer:
+            logger.error(
+                "Batch routing failed and no DLQ producer is configured; "
+                "offsets NOT committed — records stay on the topic for reprocessing",
+                error=error,
+                records=len(events),
+            )
+            return False
+        for event in events:
+            # Same key DLQReplay stamps, so retries accumulate across replays.
+            retry_count = int(event.get("_dlq_replay_count", 0)) + 1
+            try:
+                self.dlq_producer.send_dlq(
+                    original_message=event,
+                    error=error,
+                    original_topic=self.settings.raw_topic,
+                    retry_count=retry_count,
+                )
+            except DlqNotConfiguredError as exc:
+                logger.error(
+                    "DLQ topic is not configured; offsets NOT committed",
+                    error=str(exc),
+                    records=len(events),
+                )
+                return False
+            except Exception as exc:  # noqa: BLE001
+                logger.error("DLQ publish failed; offsets NOT committed", error=str(exc))
+                return False
+        return True
 
     def run(self) -> None:  # pragma: no cover
         logger.info(
@@ -301,28 +366,30 @@ class KafkaQRadarRouter:
                         logger.info("Batch routed", count=len(scored))
                     except Exception as exc:  # noqa: BLE001
                         telemetry.record_exception(span, exc)
-                        failed_index = exc.failed_index if isinstance(exc, RouteBatchError) else 0
+                        if is_transient_failure(exc):
+                            # The batch is intact: retrying it costs nothing, while
+                            # DLQ'ing it would permanently discard up to
+                            # max_poll_records raw logs during an API outage.
+                            logger.error(
+                                "Batch routing failed transiently; offsets not committed",
+                                error=str(exc),
+                                batch_size=len(batch),
+                            )
+                            _backoff()
+                            continue
+                        failed_index = (
+                            exc.failed_index if isinstance(exc, RouteBatchError) else 0
+                        )
                         failed_events = batch[failed_index:]
                         logger.error(
-                            "Batch routing failed; sending unfinished suffix to DLQ",
+                            "Batch routing failed permanently; "
+                            "sending unfinished suffix to DLQ",
                             error=str(exc),
                             completed=failed_index,
                             failed=len(failed_events),
                         )
-                        if self.dlq_producer:
-                            for event in failed_events:
-                                retry_count = event.get("_dlq_retry_count", 0) + 1
-                                self.dlq_producer.send_dlq(
-                                    original_message=event,
-                                    error=str(exc),
-                                    original_topic=self.settings.raw_topic,
-                                    retry_count=retry_count,
-                                )
+                        if self._dlq_events(failed_events, str(exc)):
                             self.consumer.commit()
-                        else:
-                            logger.error(
-                                "Batch routing failed; offsets not committed", error=str(exc)
-                            )
                     finally:
                         telemetry.detach_context(token)
         finally:
@@ -344,7 +411,10 @@ class DLQReplay:
     """
 
     def __init__(self, settings: RouterSettings) -> None:
+        if not settings.dlq_topic:
+            raise SystemExit("kafka.topics.dlq must be configured to run the DLQ replay")
         self.settings = settings
+        self.exhausted_topic = exhausted_dlq_topic(settings.dlq_topic)
         self.producer = KafkaProducer(
             bootstrap_servers=settings.bootstrap_servers,
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
@@ -360,29 +430,69 @@ class DLQReplay:
             group_id=f"{settings.consumer_group}-dlq-replay",
             auto_offset_reset="earliest",
             enable_auto_commit=False,
-            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            value_deserializer=decode_kafka_value,
             max_poll_records=settings.max_poll_records,
+            **kafka_consumer_health_kwargs(settings.kafka_config),
             **kafka_security_kwargs(settings.kafka_config),
         )
         self.running = True
 
-    def _replay(self, dlq_record: dict[str, Any]) -> dict[str, Any] | None:
+    def _replay(self, dlq_record: Any) -> dict[str, Any] | None:
+        """Decide what to do with one DLQ record.
+
+        Returns ``None`` for an unusable record, otherwise a dict carrying the
+        destination ``topic``, the ``original`` payload, and a ``reason``.
+        """
+        if not isinstance(dlq_record, Mapping):
+            return None
         original = dlq_record.get("original")
         if not isinstance(original, dict):
             return None
+        original = dict(original)
+        # The archive reference must survive the replay: it is the idempotency
+        # key for the Elasticsearch document, and it was minted from the offset
+        # the event first landed on.
+        raw_log_ref = original.get("raw_log_ref") or dlq_record.get("raw_log_ref")
+        if raw_log_ref:
+            original["raw_log_ref"] = raw_log_ref
         original_topic = dlq_record.get("original_topic", self.settings.raw_topic)
-        replay_count = original.get("_dlq_replay_count", 0) + 1
-        if replay_count > 3:
-            return None
+        replay_count = int(original.get("_dlq_replay_count", 0)) + 1
+        if replay_count > _MAX_DLQ_REPLAYS:
+            return {
+                "topic": self.exhausted_topic,
+                "original": original,
+                "original_topic": original_topic,
+                "reason": (
+                    f"replay budget exhausted after {replay_count - 1} attempts: "
+                    f"{dlq_record.get('error', 'unknown error')}"
+                ),
+            }
         original["_dlq_replay_count"] = replay_count
-        return {"original": original, "original_topic": original_topic}
+        return {"topic": original_topic, "original": original, "reason": None}
 
     def _publish(self, replay: dict[str, Any]) -> None:
-        self.producer.send(
-            replay["original_topic"],
-            value=replay["original"],
-            key=replay["original"].get("host", "unknown"),
-        )
+        if replay["reason"]:
+            future = self.producer.send(
+                replay["topic"],
+                value={
+                    "original": replay["original"],
+                    "original_topic": replay["original_topic"],
+                    "error": replay["reason"],
+                    "exhausted_at": time.time(),
+                },
+                key=replay["original"].get("host", "unknown"),
+            )
+        else:
+            future = self.producer.send(
+                replay["topic"],
+                value=replay["original"],
+                key=replay["original"].get("host", "unknown"),
+            )
+        # Await the broker acknowledgement so a failed replay is not counted as
+        # processed. Raising here aborts the loop before consumer.commit(), so the
+        # DLQ record stays uncommitted and is retried on the next run. flush()
+        # alone waits without surfacing the per-record error.
+        future.get(timeout=10)
         self.producer.flush(timeout=10)
 
     def run(
@@ -407,7 +517,21 @@ class DLQReplay:
                             break
                         replay = self._replay(msg.value)
                         if replay is None:
+                            logger.error(
+                                "Discarding unusable DLQ record",
+                                topic=self.settings.dlq_topic,
+                                partition=getattr(msg, "partition", None),
+                                offset=getattr(msg, "offset", None),
+                            )
                             continue
+                        if replay["reason"]:
+                            logger.error(
+                                "DLQ record exhausted its replay budget; "
+                                "publishing to the exhausted topic",
+                                topic=replay["topic"],
+                                original_topic=replay["original_topic"],
+                                reason=replay["reason"],
+                            )
                         self._publish(replay)
                         processed += 1
                     if not self.running:

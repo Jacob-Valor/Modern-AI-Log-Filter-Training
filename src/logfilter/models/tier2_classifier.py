@@ -62,6 +62,9 @@ class Tier2Classifier:
         self._load_attempted = False
         self._warned_unavailable = False
         self.strict_model_loading = _strict_model_loading()
+        # Sequence length used at inference. Overridden from the artifact at load
+        # time when the export recorded one, so training and inference cannot drift.
+        self._inference_max_length = 1024
 
     def is_ready(self) -> bool:
         """Return True when artifacts exist and a tokenizer/model backend is loadable."""
@@ -88,9 +91,16 @@ class Tier2Classifier:
             if self._torch_model is not None:  # pragma: no cover
                 return self._predict_torch(texts)
         except Exception as exc:  # noqa: BLE001
+            # Propagate instead of returning a fabricated 0.5. A neutral-looking
+            # probability is indistinguishable from a real prediction, so the caller
+            # recorded it as the classifier score and marked the event tier2_used
+            # without ever setting score_degraded - letting an event that was never
+            # classified reach the automated-response gate. The caller already
+            # handles RuntimeError by keeping the Tier-1 score and marking degraded.
             logger.warning("Tier-2 classifier inference failed", error=str(exc))
+            raise RuntimeError("Tier-2 classifier inference failed") from exc
 
-        return np.full(len(texts), 0.5, dtype=np.float32)
+        raise RuntimeError("Tier-2 classifier has no usable inference backend")
 
     def prewarm(self) -> None:
         # Inference exceptions are deliberately NOT swallowed here (unlike
@@ -138,6 +148,7 @@ class Tier2Classifier:
     def _load(self) -> None:
         self._load_attempted = True
         self._load_label_map()
+        self._load_export_metadata()
 
         try:
             transformers = importlib.import_module("transformers")
@@ -165,6 +176,37 @@ class Tier2Classifier:
                     return
         except Exception as exc:  # noqa: BLE001
             self._fail_or_warn("Tier-2 label map failed to load", error=str(exc))
+
+    def _load_export_metadata(self) -> None:
+        """Adopt the sequence length recorded at export time, when present.
+
+        ``training/train_transformer.py`` accepts ``--max-length``; recording it in the
+        artifact metadata is what stops an export at one length from silently changing
+        inference at another.
+        """
+        for name in ("tier2_config.json", "config.json"):
+            candidate = self.model_dir / name
+            if not candidate.exists():
+                continue
+            try:
+                metadata = json.loads(candidate.read_text())
+            except (OSError, ValueError):
+                continue
+            value = metadata.get("inference_max_length", metadata.get("max_length"))
+            if value is None:
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                self._inference_max_length = parsed
+                logger.info(
+                    "Tier-2 inference max_length loaded from artifact",
+                    max_length=parsed,
+                    source=str(candidate),
+                )
+                return
 
     def _load_onnx(self) -> bool:  # pragma: no cover
         try:
@@ -200,23 +242,37 @@ class Tier2Classifier:
             self._torch = None
             self._torch_model = None
 
+    def _max_length(self) -> int:
+        """Inference sequence length, recorded at export time when available.
+
+        Training takes ``--max-length`` as a CLI flag that previously only reached
+        the metrics JSON, so an export at a different length silently changed
+        inference behaviour. Prefer the value recorded beside the artifact.
+        """
+        return int(self._inference_max_length)
+
     def _predict_onnx(self, texts: list[str]) -> np.ndarray:
         tokenizer = self._tokenizer
         session = self._session
         if tokenizer is None or session is None:
-            return np.full(len(texts), 0.5, dtype=np.float32)
+            raise RuntimeError("Tier-2 ONNX backend is not fully initialised")
 
         encoded = tokenizer(
             texts,
             truncation=True,
             padding=True,
-            max_length=1024,
+            max_length=self._max_length(),
             return_tensors="np",
         )
+        missing = [name for name in self._onnx_input_names if name not in encoded]
+        if missing:
+            # Previously the feed was built with ``if name in encoded``, silently
+            # dropping any graph-required input the tokenizer did not emit; session.run
+            # then failed and the blanket handler turned the whole batch into a
+            # fabricated score.
+            raise RuntimeError(f"Tier-2 ONNX graph requires missing inputs: {missing}")
         feed = {
-            name: np.asarray(encoded[name], dtype=np.int64)
-            for name in self._onnx_input_names
-            if name in encoded
+            name: np.asarray(encoded[name], dtype=np.int64) for name in self._onnx_input_names
         }
         outputs = session.run(None, feed)
         logits = np.asarray(outputs[0], dtype=np.float32)
@@ -233,7 +289,7 @@ class Tier2Classifier:
             texts,
             truncation=True,
             padding=True,
-            max_length=1024,
+            max_length=self._max_length(),
             return_tensors="pt",
         )
         with torch.no_grad():

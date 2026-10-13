@@ -316,8 +316,13 @@ services:
       <<: *common-env
       SYSLOG_ALLOWED_CIDRS: "${SYSLOG_ALLOWED_CIDRS:-127.0.0.1/32,::1/128,172.16.0.0/12}"
       SYSLOG_METRICS_PORT: "${SYSLOG_METRICS_PORT:-9100}"
+      # Durable spool for events that fail to publish to Kafka. The collector
+      # runs read_only with only /tmp tmpfs, so this path must live on the
+      # collector-spool named volume mounted below.
+      SYSLOG_SPOOL_PATH: "${SYSLOG_SPOOL_PATH:-/app/spool/collector.ndjson}"
     volumes:
       - ./config:/app/config:ro
+      - collector-spool:/app/spool
     deploy:
       resources:
         limits:
@@ -545,3 +550,4 @@ volumes:
   grafana-data:
   hf-cache:   # persist HuggingFace model downloads across container restarts
   redis-data:
+  collector-spool:  # durable syslog spool — survives restarts, spooled events are replayed

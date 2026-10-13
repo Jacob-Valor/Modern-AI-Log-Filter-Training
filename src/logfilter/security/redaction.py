@@ -11,6 +11,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+#: Hard cap on the text ``redact`` will run its regex passes over. Callers that
+#: bound their input (the API schema caps ``raw`` at 64 KiB) cannot be assumed
+#: to: without this, one pathological payload costs an unbounded number of
+#: multi-pass regex substitutions. Over-cap input is redacted up to the cap and
+#: the tail replaced by an explicit truncation marker — never dropped
+#: silently, and never redacted past the cap. Enforce the real size limit at
+#: the caller.
+MAX_REDACT_CHARS = 64 * 1024
+TRUNCATION_MARKER = "<REDACT_INPUT_TRUNCATED>"
+
 
 @dataclass(frozen=True)
 class RedactionConfig:
@@ -70,6 +80,8 @@ def redact(
         )
     if not policy.enabled or not text:
         return text
+    if len(text) > MAX_REDACT_CHARS:
+        text = text[:MAX_REDACT_CHARS] + TRUNCATION_MARKER
 
     redacted = text
     if policy.redact_secrets:

@@ -102,22 +102,110 @@ def test_attach_span_context_returns_none_without_otel(monkeypatch) -> None:
     assert telemetry.attach_span_context(None, None) is None
 
 
-def test_detach_context_noop_without_otel(monkeypatch) -> None:
+def test_detach_context_without_otel_does_not_detach(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", False)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        telemetry, "context", type("ctx", (), {"detach": staticmethod(calls.append)})()
+    )
 
-    telemetry.detach_context(None)
+    telemetry.detach_context("token")
 
-
-def test_set_span_attributes_with_none_span() -> None:
-    telemetry.set_span_attributes(None, {"key": "value"})
-
-
-def test_set_span_attributes_with_none_attributes() -> None:
-    telemetry.set_span_attributes(telemetry._NoopSpan(), None)
+    assert calls == [], "context.detach must not run when OTEL is unavailable"
 
 
-def test_record_exception_with_none_span() -> None:
-    telemetry.record_exception(None, RuntimeError("boom"))
+def test_set_span_attributes_skips_none_values() -> None:
+    """None-valued attributes must not reach the span; real ones must."""
+    recorded: list[tuple[str, object]] = []
+    span = type("span", (), {"set_attribute": lambda self, k, v: recorded.append((k, v))})()
+
+    telemetry.set_span_attributes(span, {"key": None, "other": "value"})
+
+    assert recorded == [("other", "value")]
+
+
+def test_set_span_attributes_with_none_attributes_sets_nothing() -> None:
+    recorded: list[tuple[str, object]] = []
+    span = type("span", (), {"set_attribute": lambda self, k, v: recorded.append((k, v))})()
+
+    telemetry.set_span_attributes(span, None)
+    telemetry.set_span_attributes(span, {})
+
+    assert recorded == [], "an empty/None attribute map must set nothing on the span"
+
+
+def test_record_exception_sets_error_status_on_real_span(monkeypatch) -> None:
+    """record_exception must forward the exception AND mark the span ERROR."""
+    seen: dict[str, object] = {}
+
+    class FakeSpan:
+        def record_exception(self, exc: BaseException) -> None:
+            seen["exception"] = exc
+
+        def set_status(self, status: object) -> None:
+            seen["status"] = status
+
+    class FakeStatus:
+        def __init__(self, code: str, message: str) -> None:
+            self.code = code
+            self.message = message
+
+    monkeypatch.setattr(telemetry, "Status", FakeStatus)
+    monkeypatch.setattr(telemetry, "StatusCode", type("StatusCode", (), {"ERROR": "error"})())
+
+    error = RuntimeError("boom")
+    telemetry.record_exception(FakeSpan(), error)
+
+    assert seen["exception"] is error
+    status = seen["status"]
+    assert getattr(status, "code", None) == "error"
+    assert getattr(status, "message", None) == "boom"
+
+
+def test_record_exception_with_otel_span_forwards_exception(monkeypatch) -> None:
+    """Same contract, exercised with OTEL available (the production path)."""
+    monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", True)
+    seen: dict[str, object] = {}
+
+    class FakeStatus:
+        def __init__(self, code: str, message: str) -> None:
+            self.code = code
+            self.message = message
+
+    class FakeSpan:
+        def record_exception(self, exc: BaseException) -> None:
+            seen["exception"] = exc
+
+        def set_status(self, status: object) -> None:
+            seen["status"] = status
+
+    monkeypatch.setattr(telemetry, "Status", FakeStatus)
+    monkeypatch.setattr(telemetry, "StatusCode", type("StatusCode", (), {"ERROR": "error"})())
+
+    error = ValueError("bad")
+    telemetry.record_exception(FakeSpan(), error)
+
+    assert seen["exception"] is error
+    assert getattr(seen["status"], "code", None) == "error"
+    assert getattr(seen["status"], "message", None) == "bad"
+
+
+def test_record_exception_does_not_set_status_without_otel(monkeypatch) -> None:
+    """Without OTEL there is no Status/StatusCode, so only the exception is forwarded."""
+    monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", False)
+    recorded: list[BaseException] = []
+
+    class FakeSpan:
+        def record_exception(self, exc: BaseException) -> None:
+            recorded.append(exc)
+
+        def set_status(self, status: object) -> None:
+            raise AssertionError("set_status must not be called without OTEL")
+
+    error = RuntimeError("boom")
+    telemetry.record_exception(FakeSpan(), error)
+
+    assert recorded == [error]
 
 
 def test_instrument_fastapi_app_returns_false_without_otel(monkeypatch) -> None:
@@ -126,11 +214,13 @@ def test_instrument_fastapi_app_returns_false_without_otel(monkeypatch) -> None:
     assert telemetry.instrument_fastapi_app(None) is False
 
 
-def test_start_as_current_span_with_exception_no_telemetry(monkeypatch) -> None:
+def test_start_as_current_span_propagates_exception_without_otel(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", False)
 
-    with telemetry.start_as_current_span("test"):
-        pass
+    with pytest.raises(RuntimeError, match="boom"):
+        with telemetry.start_as_current_span("test") as span:
+            assert isinstance(span, telemetry._NoopSpan)
+            raise RuntimeError("boom")
 
 
 def test_traced_decorator_uses_module_name(monkeypatch) -> None:
@@ -156,36 +246,28 @@ def test_traced_decorator_uses_fallback_name(monkeypatch) -> None:
     assert decorated() == 1
 
 
-def test_noop_span_set_attribute() -> None:
+def test_noop_span_methods_return_none_and_never_raise() -> None:
+    """The noop span must swallow every span API call without raising."""
     span = telemetry._NoopSpan()
-    span.set_attribute("key", "value")
+
+    assert span.set_attribute("key", "value") is None
+    assert span.set_attributes({"key": "value"}) is None
+    assert span.record_exception(RuntimeError("test")) is None
+    assert span.set_status("ok") is None
 
 
-def test_noop_span_set_attributes() -> None:
+def test_noop_span_context_manager_yields_itself() -> None:
     span = telemetry._NoopSpan()
-    span.set_attributes({"key": "value"})
+    with span as entered:
+        assert entered is span
 
 
-def test_noop_span_record_exception() -> None:
+def test_noop_span_context_manager_suppresses_nothing() -> None:
+    """__exit__ must not swallow exceptions raised inside the span body."""
     span = telemetry._NoopSpan()
-    span.record_exception(RuntimeError("test"))
-
-
-def test_noop_span_set_status() -> None:
-    span = telemetry._NoopSpan()
-    span.set_status("ok")
-
-
-def test_noop_span_context_manager() -> None:
-    span = telemetry._NoopSpan()
-    with span:
-        pass
-
-
-def test_set_span_attributes_skips_none_values(monkeypatch) -> None:
-    monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", False)
-    span = telemetry._NoopSpan()
-    telemetry.set_span_attributes(span, {"key": None, "other": "value"})
+    with pytest.raises(ValueError):
+        with span:
+            raise ValueError("boom")
 
 
 def test_inject_http_headers_returns_empty_without_input(monkeypatch) -> None:
@@ -503,41 +585,28 @@ def test_attach_span_context_with_otel(monkeypatch) -> None:
     assert telemetry.attach_span_context(None, {"trace": "id"}) == "token"
 
 
-def test_detach_context_with_otel(monkeypatch) -> None:
+def test_detach_context_with_otel_detaches_token(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", True)
-
-    class FakeContext:
-        @staticmethod
-        def detach(t):
-            pass
-
-    monkeypatch.setattr(telemetry, "context", FakeContext())
+    detached: list[object] = []
+    monkeypatch.setattr(
+        telemetry, "context", type("ctx", (), {"detach": staticmethod(detached.append)})()
+    )
 
     telemetry.detach_context("token")
 
+    assert detached == ["token"]
 
-def test_record_exception_with_otel_span(monkeypatch) -> None:
+
+def test_detach_context_with_otel_ignores_none_token(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "OTEL_AVAILABLE", True)
+    detached: list[object] = []
+    monkeypatch.setattr(
+        telemetry, "context", type("ctx", (), {"detach": staticmethod(detached.append)})()
+    )
 
-    class FakeStatus:
-        def __init__(self, code, message):
-            self.code = code
-            self.message = message
+    telemetry.detach_context(None)
 
-    class FakeStatusCode:
-        ERROR = "error"
-
-    monkeypatch.setattr(telemetry, "Status", FakeStatus)
-    monkeypatch.setattr(telemetry, "StatusCode", FakeStatusCode)
-
-    class FakeSpan:
-        def record_exception(self, exc):
-            pass
-
-        def set_status(self, status):
-            pass
-
-    telemetry.record_exception(FakeSpan(), RuntimeError("boom"))
+    assert detached == []
 
 
 def test_instrument_fastapi_app_with_otel(monkeypatch) -> None:

@@ -37,6 +37,12 @@ class FlowClassifier(LogClassifier):
         expected = len(FLOW_FEATURE_NAMES)
         if self._scaler is None or self._scaler.n_features_in_ != expected:
             raise ValueError("Flow scaler width does not match runtime schema")
+        # The width check must sit outside the session guard as well: a flow bundle
+        # containing feature names and a matching scaler but no model left
+        # self._session None, skipped this validation entirely, and then
+        # predict_proba returned a fabricated 0.5 for every event.
+        if self._session is None and self._xgb_model is None:
+            raise ValueError("Flow classifier has no usable inference backend")
         if self._session is not None:
             shape = self._session.get_inputs()[0].shape
             if len(shape) < 2 or shape[1] != expected:

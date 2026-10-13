@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from logfilter.security.redaction import RedactionConfig, redact
+import time
+
+from logfilter.security.redaction import (
+    MAX_REDACT_CHARS,
+    TRUNCATION_MARKER,
+    RedactionConfig,
+    redact,
+)
 
 
 def test_redact_masks_default_sensitive_values_without_masking_ip_or_host() -> None:
@@ -69,3 +76,18 @@ def test_redact_does_not_mask_invalid_credit_card_like_numbers() -> None:
     raw = "ticket=4111-1111-1111-1112"
 
     assert redact(raw) == raw
+
+
+def test_redact_caps_adversarial_input_and_redacts_within_the_cap() -> None:
+    """A 64 KiB adversarial payload must not dominate redact cost or leak secrets."""
+    adversarial = ("token=AKIAABCDEFGHIJKLMNOP a@b.com 1" * 3000)[: MAX_REDACT_CHARS * 2]
+
+    start = time.perf_counter()
+    redacted = redact(adversarial)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 1.0
+    assert len(redacted) <= MAX_REDACT_CHARS + len(TRUNCATION_MARKER)
+    assert TRUNCATION_MARKER in redacted
+    assert "AKIAABCDEFGHIJKLMNOP" not in redacted
+    assert "a@b.com" not in redacted

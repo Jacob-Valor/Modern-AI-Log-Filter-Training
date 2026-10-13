@@ -111,6 +111,14 @@ spec:
                   key: KAFKA_SSL_CHECK_HOSTNAME
             - name: SYSLOG_ALLOWED_CIDRS
               value: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+            # Durability spool. Without this the collector runs with spool_path=None:
+            # publish() then raises, and the UDP/TCP handlers log and drop every event
+            # for the duration of a Kafka outage. Bounded by BoundedNDJSONSpool.max_bytes
+            # in the collector itself; sizeLimit here is the second, kernel-level bound.
+            - name: SYSLOG_SPOOL_PATH
+              value: "/app/spool/collector.ndjson"
+            - name: SYSLOG_MAX_SPOOL_BYTES
+              value: "268435456" # 256Mi; collector's own bound, oldest-first eviction
           resources:
             requests:
               memory: "256Mi"
@@ -124,6 +132,8 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: spool
+              mountPath: /app/spool
       volumes:
         - name: config
           configMap:
@@ -131,6 +141,9 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
+        - name: spool
+          emptyDir:
+            sizeLimit: 512Mi
 ---
 apiVersion: v1
 kind: Service

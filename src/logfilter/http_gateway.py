@@ -13,6 +13,26 @@ from urllib.parse import urlparse
 
 import httpx
 
+#: Envelope keys the gateway controls; caller payloads may never supply them.
+RESERVED_ENVELOPE_KEYS = frozenset({"schema_version", "request_id"})
+
+
+def canonical_signature_string(
+    *,
+    method: str,
+    path: str,
+    timestamp: int,
+    request_id: str,
+    body_digest: str,
+) -> bytes:
+    """Return the signed byte string for one gateway request.
+
+    Method and path are part of the canonical form, so a signature captured for
+    one route cannot be replayed byte-identically against another. Receivers
+    must recompute this from the request line they actually served.
+    """
+    return f"{method.upper()}\n{path}\n{timestamp}\n{request_id}\n{body_digest}".encode()
+
 
 @dataclass(frozen=True)
 class GatewayReceipt:
@@ -57,6 +77,8 @@ class SignedHttpGatewayClient:
 
         self.url = url
         self._secret = hmac_secret.encode("utf-8")
+        self._method = "POST"
+        self._path = parsed.path or "/"
         self._owns_client = client is None
         if client is not None:
             self._client = client
@@ -71,10 +93,20 @@ class SignedHttpGatewayClient:
                 cert=cert,
             )
 
+
     def _signed_headers(self, request_id: str, body: bytes, timestamp: int) -> dict[str, str]:
         body_digest = hashlib.sha256(body).hexdigest()
-        canonical = f"{timestamp}\n{request_id}\n{body_digest}".encode()
-        signature = hmac.new(self._secret, canonical, hashlib.sha256).hexdigest()
+        signature = hmac.new(
+            self._secret,
+            canonical_signature_string(
+                method=self._method,
+                path=self._path,
+                timestamp=timestamp,
+                request_id=request_id,
+                body_digest=body_digest,
+            ),
+            hashlib.sha256,
+        ).hexdigest()
         return {
             "Content-Type": "application/json",
             "Idempotency-Key": request_id,
@@ -87,7 +119,10 @@ class SignedHttpGatewayClient:
         """Return only after the receiver confirms durable acceptance or a duplicate."""
         if not request_id or len(request_id) > 128:
             raise ValueError("gateway request_id must contain 1-128 characters")
-        envelope = {"schema_version": "1.0", "request_id": request_id, **payload}
+        reserved = RESERVED_ENVELOPE_KEYS & set(payload)
+        if reserved:
+            raise ValueError(f"gateway payload must not contain reserved keys: {sorted(reserved)}")
+        envelope = {**payload, "schema_version": "1.0", "request_id": request_id}
         body = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
         headers = self._signed_headers(request_id, body, int(time.time()))
         response = self._client.post(self.url, content=body, headers=headers)

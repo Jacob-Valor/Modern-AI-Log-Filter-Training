@@ -195,6 +195,40 @@ def test_armed_mode_suppresses_duplicate_actions():
     assert {action.status for action in second} == {"duplicate"}
 
 
+def test_executed_id_cache_stays_bounded_and_keeps_recent_idempotency(monkeypatch):
+    """Acknowledged ids must be evicted oldest-first once past the documented bound."""
+    firewall = RecordingFirewall()
+    notifier = RecordingNotifier()
+    engine = AutoResponseEngine(
+        firewall=firewall,
+        notifier=notifier,
+        dry_run=False,
+        allowed_networks=("203.0.113.0/24",),
+        allowed_hosts=frozenset({"db01"}),
+        max_actions_per_minute=100_000,
+    )
+    monkeypatch.setattr(engine, "MAX_EXECUTED_IDS", 5)
+
+    scored = _scored("HIGH", 0.95, src_ip="203.0.113.7", host="db01")
+    for i in range(5):
+        engine.handle(scored, f"raw-ref-{i}")
+
+    assert len(engine._executed_ids) == 5
+    assert len(engine._executed_order) == 5
+
+    # A sixth distinct event pushes the map one entry past the bound.
+    engine.handle(scored, "raw-ref-5")
+
+    assert len(engine._executed_ids) == 5
+    assert len(engine._executed_order) == 5
+
+    # The most recent acknowledgement is still deduplicated.
+    again = engine.handle(scored, "raw-ref-5")
+
+    assert {action.status for action in again} == {"duplicate"}
+    assert firewall.blocked_ips == ["203.0.113.7"] * 6
+
+
 def test_failed_gateway_action_is_retryable():
     class FailOnceFirewall(RecordingFirewall):
         def __init__(self) -> None:

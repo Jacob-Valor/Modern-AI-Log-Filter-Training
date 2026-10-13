@@ -134,6 +134,17 @@ The report includes:
 - `best_precision_at_min_recall`: the highest-precision threshold that still meets the recall
   target, controlled by `--min-recall`.
 - Per-threshold confusion counts and false-positive/false-negative rates.
+- `recommendation_reliable`: `false` when the validation split is below
+  `--min-recommendation-samples` rows *or* failures. **Check this before reading any
+  other field** — an unreliable report will still print a confident-looking
+  `best_f1`, and at small sample sizes every threshold row degenerates toward 1.0.
+  The committed report was generated from 841 validation rows / 240 failures and
+  reports `recommendation_reliable: true`; see the operating-point table in
+  `MODEL_SELECTION.md`.
+
+> On this dataset `best_f1` resolves to the lowest cutoff in the sweep — the
+> flag-everything point — because F1 rewards recall against an ~88:12 normal/failure
+> skew. Read the full sweep rather than adopting `best_f1` uncritically.
 
 Keep the runtime cascade defaults unchanged until you review this report against logs that
 represent your deployment environment.

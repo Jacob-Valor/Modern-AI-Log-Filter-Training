@@ -2,26 +2,50 @@
 # in config files, documentation, and regex patterns used for PII redaction.
 #
 # Rules: use gitleaks built-in rules only (no custom detection rules).
-# Allowlist: suppress findings in files with legitimate patterns.
+#
+# The allowlist is deliberately narrow. Never exempt a whole source tree (such as
+# `tests/`) or a whole deployment file (such as `docker-compose*.yml`): a real
+# credential pasted into either would never be reported. Fake fixture tokens are
+# suppressed by VALUE (`stopwords`) instead, which leaves every rule active for
+# those files.
+
+# Without this, supplying --config disables the entire built-in ruleset and the
+# scan silently matches nothing.
+[extend]
+useDefault = true
 
 [allowlist]
+description = "Suppress documented false positives only"
+
 paths = [
     # Apache-2.0 license text contains "example" — false positive
-    '''LICENSE''',
-    # Docker compose healthchecks use `test:` key — triggers generic secret rules
-    '''docker-compose\.ya?ml$''',
-    '''docker-compose\.prod\.ya?ml$''',
+    '''^LICENSE$''',
     # Redaction module contains regex patterns (AKIA, xox, etc.) as *code*, not secrets
-    '''src/logfilter/security/redaction\.py$''',
-    # Test scripts with "test" in output messages
-    '''scripts/smoke_test\.py$''',
-    '''scripts/smoke_test_pipeline\.py$''',
-    '''scripts/smoke_test_real_scorer\.py$''',
-    # Self-signed dev TLS certs are not production secrets
-    '''scripts/certs/''',
-    # Test fixtures intentionally contain realistic tokens for PII testing
-    '''tests/''',
+    '''^src/logfilter/security/redaction\.py$''',
+    # Self-signed dev TLS certs are generated locally, never production secrets
+    '''^scripts/certs/''',
+    # Smoke scripts print placeholder credentials in their output
+    '''^scripts/smoke_test\.py$''',
+    '''^scripts/smoke_test_pipeline\.py$''',
+    '''^scripts/smoke_test_real_scorer\.py$''',
     # Documentation references examples — not real secrets
-    '''SECURITY\.md$''',
-    '''docs/''',
+    '''^SECURITY\.md$''',
+]
+
+# Exact dummy values that appear in committed test fixtures and in CI/CD token
+# literals. Matching on the value keeps all rules live for those files: any other
+# credential pasted into tests/, docker-compose*.yml or a workflow is still caught.
+stopwords = [
+    # Fixture credential in tests/test_redaction.py and tests/test_archive.py
+    "AKIAABCDEFGHIJKLMNOP",
+    "hunter2",
+    "4111-1111-1111-1111",
+    # Ephemeral CI tokens — not credentials
+    "ci-test-api-token",
+    "ci-test-admin-token",
+    "ci-test-metrics-token",
+    # Env-var reference in scripts/es_restore.sh usage docs, not a literal credential.
+    "${ES_USER}:${ES_PASS}",
+    # Historical literal placeholder in scripts/es_restore.sh (pre-env-var form).
+    "elastic:PASS"
 ]

@@ -3,14 +3,32 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
 # ── Docker Compose lifecycle ────────────────────────────────────────────────
 
-_COMPOSE_FILE = "docker-compose.test.yml"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_COMPOSE_FILE = str(REPO_ROOT / "docker-compose.test.yml")
+
+
+def _docker_available() -> tuple[bool, str]:
+    """Return (usable, reason). ``docker`` must exist *and* the daemon must answer."""
+    if shutil.which("docker") is None:
+        return False, "docker CLI not found on PATH"
+    probe = subprocess.run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if probe.returncode != 0:
+        return False, f"docker daemon unreachable: {probe.stderr.decode(errors='ignore').strip()}"
+    return True, ""
 
 
 def _compose_up() -> None:
@@ -65,9 +83,21 @@ def _wait_for_es(host: str, timeout: float = 60.0) -> None:
     raise RuntimeError(f"Elasticsearch not ready after {timeout}s: {last_err}")
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def compose_stack():
-    """Start the Docker Compose test stack once per session and tear it down after."""
+    """Start the Docker Compose test stack once per session and tear it down after.
+
+    Deliberately NOT autouse: tests that never touch Kafka or Elasticsearch
+    (e.g. the circuit-breaker resilience suite) must not require Docker. Every
+    service endpoint fixture below depends on this one, so declaring
+    ``kafka_bootstrap``/``es_host`` is how a test opts into the stack.
+
+    Skips rather than errors when Docker is unavailable, so a Docker-less
+    machine gets a clean skip instead of ``FileNotFoundError: 'docker'``.
+    """
+    available, reason = _docker_available()
+    if not available:
+        pytest.skip(f"Docker unavailable ({reason}); integration stack not started")
     _compose_up()
     try:
         yield
@@ -79,12 +109,14 @@ def compose_stack():
 
 
 @pytest.fixture(scope="session")
-def kafka_bootstrap() -> str:
+def kafka_bootstrap(compose_stack) -> str:
+    """Opt in to the compose stack: any use of this fixture starts it."""
     return "localhost:19092"
 
 
 @pytest.fixture(scope="session")
-def es_host() -> str:
+def es_host(compose_stack) -> str:
+    """Opt in to the compose stack: any use of this fixture starts it."""
     return "http://localhost:19200"
 
 

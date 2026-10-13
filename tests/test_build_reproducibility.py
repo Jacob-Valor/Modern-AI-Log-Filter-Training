@@ -8,6 +8,7 @@ Verifies:
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 
@@ -25,6 +26,52 @@ _DOCKERFILES = [
     _ROOT / "docker" / "nginx" / "Dockerfile",
 ]
 _TRAIN_TRANSFORMER = _ROOT / "training" / "train_transformer.py"
+
+
+def _trainer_call_keywords() -> set[str]:
+    """Keyword names main() passes to the Trainer subclass constructor."""
+    tree = ast.parse(_TRAIN_TRANSFORMER.read_text())
+    main_fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    for node in ast.walk(main_fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return {kw.arg for kw in node.keywords if kw.arg}
+    raise AssertionError("main() must construct a Trainer subclass")
+
+
+class TestTrainerKeywordIsSupportedByPinnedTransformers:
+    """Every keyword main() passes to Trainer must exist in the installed version.
+
+    transformers removed the ``tokenizer`` kwarg from ``Trainer.__init__``; the
+    supported spelling is ``processing_class``. Passing the removed name makes
+    the whole tier-2 training script fail at construction time.
+    """
+
+    def test_keywords_are_accepted_by_trainer_init(self) -> None:
+        import inspect
+
+        import transformers
+
+        allowed = set(inspect.signature(transformers.Trainer.__init__).parameters)
+        allowed |= {"args", "kwargs"}
+
+        unknown = sorted(_trainer_call_keywords() - allowed)
+        assert not unknown, (
+            f"train_transformer.main() passes keyword(s) {unknown} that "
+            f"transformers {transformers.__version__} Trainer does not accept"
+        )
+
+    def test_processing_class_is_the_tokenizer_kwarg(self) -> None:
+        import inspect
+
+        import transformers
+
+        parameters = inspect.signature(transformers.Trainer.__init__).parameters
+        assert "tokenizer" not in parameters
+        assert "processing_class" in parameters
 
 
 # ── ONNX export hard-fail ──────────────────────────────────────────────
@@ -159,11 +206,24 @@ class TestDockerfilesHardenRuntime:
         assert "HEALTHCHECK" in text, "nginx Dockerfile must define a container healthcheck"
 
 
-# ── uv.lock file exists ────────────────────────────────────────────────
+# ── License and lockfile presence ─────────────────────────────────────
 
 
-class TestUvLockExists:
-    """The repository root must contain a uv.lock file."""
+class TestLicenseAndLockfile:
+    def test_license_file_is_present_and_non_empty(self) -> None:
+        """A tracked-but-empty LICENSE ships no license at all.
 
-    def test_uv_lock_exists(self) -> None:
-        assert (_ROOT / "uv.lock").exists(), "uv.lock must exist in the project root"
+        Presence alone is not enough: a zero-byte or whitespace-only file is
+        what a truncated checkout or a bad merge produces, and it passes an
+        existence check while granting no terms.
+        """
+        license_file = _ROOT / "LICENSE"
+        assert license_file.is_file(), "LICENSE must exist at the repository root"
+        assert license_file.stat().st_size > 0, "LICENSE is empty — the repo ships no license"
+        text = license_file.read_text(encoding="utf-8", errors="replace")
+        assert text.strip(), "LICENSE contains only whitespace"
+        assert "Apache License" in text, "LICENSE is not the Apache-2.0 text declared in pyproject"
+
+    def test_uv_lock_exists_and_is_non_empty(self) -> None:
+        assert (_ROOT / "uv.lock").is_file(), "uv.lock must exist in the project root"
+        assert (_ROOT / "uv.lock").stat().st_size > 0, "uv.lock is empty — installs are unpinned"

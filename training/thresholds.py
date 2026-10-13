@@ -235,35 +235,54 @@ def threshold_sweep(
     return [threshold_metrics(y_true, y_prob, threshold) for threshold in sorted(thresholds)]
 
 
-def summarize_threshold_sweep(
-    rows: list[dict[str, float | int]],
-    min_recall: float = 0.90,
-) -> dict[str, Any]:
-    """Summarize a validation sweep with production-oriented candidates."""
-    if not rows:
-        raise ValueError("threshold sweep summary requires at least one row")
-
-    best_f1 = max(
+def _best_f1_row(rows: list[dict[str, float | int]]) -> dict[str, float | int]:
+    """Highest-F1 row, breaking ties toward the most conservative threshold."""
+    return max(
         rows,
         key=lambda row: (
             _number(row["f1"], "F1"),
             _number(row["precision"], "precision"),
+            _number(row["threshold"], "threshold"),
         ),
     )
-    recall_candidates = [row for row in rows if _number(row["recall"], "recall") >= min_recall]
-    high_recall = (
-        max(
-            recall_candidates,
-            key=lambda row: (
-                _number(row["precision"], "precision"),
-                _number(row["f1"], "F1"),
-            ),
-        )
-        if recall_candidates
-        else None
+
+
+def _best_precision_row(rows: list[dict[str, float | int]]) -> dict[str, float | int]:
+    """Most precise row, breaking ties toward the most conservative threshold."""
+    return max(
+        rows,
+        key=lambda row: (
+            _number(row["precision"], "precision"),
+            _number(row["f1"], "F1"),
+            _number(row["threshold"], "threshold"),
+        ),
     )
+
+
+def summarize_threshold_sweep(
+    rows: list[dict[str, float | int]],
+    min_recall: float = 0.90,
+) -> dict[str, Any]:
+    """Summarize a validation sweep with production-oriented candidates.
+
+    Callers must pass a validation sweep; sweeping the held-out test split makes
+    the selected threshold a selection maximand rather than a generalisation
+    estimate.
+
+    Ties are broken toward the *highest* threshold. Sweep rows are produced in
+    ascending threshold order, so without this tie-break a flat region (for
+    example every row scoring ``f1 == 1.0``) would resolve to the lowest cutoff
+    in the range — a flag-everything operating point that looks optimal.
+    """
+    if not rows:
+        raise ValueError("threshold sweep summary requires at least one row")
+
+    best_f1 = _best_f1_row(rows)
+    recall_candidates = [row for row in rows if _number(row["recall"], "recall") >= min_recall]
+    high_recall = _best_precision_row(recall_candidates) if recall_candidates else None
     return {
         "best_f1": best_f1,
         "min_recall_target": _rounded(min_recall),
         "best_precision_at_min_recall": high_recall,
+        "tie_break": "highest_threshold",
     }

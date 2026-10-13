@@ -93,14 +93,84 @@ class BoundedNDJSONSpool:
 
     Writes records as one JSON object per line. When the file exceeds
     *max_bytes*, oldest lines are truncated until the file fits.
+
+    Durability / performance properties:
+      - Writes are O(1): a persistent append handle plus in-memory byte and
+        line counters mean the common path never re-reads the whole file. The
+        full scan only happens when the bound is actually exceeded.
+      - Every full rewrite goes to a sibling temp file and is moved into place
+        with :func:`os.replace`, so a SIGKILL mid-rewrite cannot leave a
+        truncated or mid-line spool.
+      - ``drain`` replays records *outside* the lock: the replay callback
+        blocks (Kafka send retries), so holding the lock across it would stall
+        every syslog handler thread for the whole outage.
     """
 
-    def __init__(self, path: Path, max_bytes: int) -> None:
+    # Quarantine is bounded to this fraction of *max_bytes*, with a floor so
+    # that small test/dev spools still get a usable quarantine file.
+    _BAD_BYTES_FRACTION = 0.1
+    _BAD_BYTES_FLOOR = 1_048_576
+
+    def __init__(
+        self,
+        path: Path,
+        max_bytes: int,
+        *,
+        bad_max_bytes: int | None = None,
+        drain_batch_size: int = 1000,
+    ) -> None:
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be >= 1")
+        if drain_batch_size < 1:
+            raise ValueError("drain_batch_size must be >= 1")
         self._path = path
         self._bad_path = path.with_name(f"{path.name}.bad")
         self._max_bytes = max_bytes
+        if bad_max_bytes is None:
+            bad_max_bytes = max(int(max_bytes * self._BAD_BYTES_FRACTION), self._BAD_BYTES_FLOOR)
+        if bad_max_bytes < 1:
+            raise ValueError("bad_max_bytes must be >= 1")
+        self._bad_max_bytes = bad_max_bytes
+        self._drain_batch_size = drain_batch_size
         self._lock = threading.Lock()
+        self._handle: Any | None = None
+        self._bytes = 0
+        self._lines = 0
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._scan_state()
+        _collector_spool_depth.set(self._lines)
+
+    # ── internal state ─────────────────────────────────────────────────────────
+
+    def _scan_state(self) -> None:
+        """Recompute byte/line counters from disk. Caller must hold ``self._lock``."""
+        self._close_handle()
+        if not self._path.exists():
+            self._bytes = 0
+            self._lines = 0
+            return
+        self._bytes = self._path.stat().st_size
+        with self._path.open("rb") as f:
+            self._lines = sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1 << 20), b""))
+
+    def _sync_state(self) -> None:
+        """Rescan only when the on-disk size disagrees with our counters.
+
+        Cheap in the steady state (a single ``stat``); it catches an external
+        writer, a replaced file, or a file left behind by a crashed process.
+        Caller must hold ``self._lock``.
+        """
+        try:
+            size = self._path.stat().st_size
+        except OSError:
+            size = -1
+        if size != self._bytes:
+            self._scan_state()
+
+    def _close_handle(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
 
     def _read_lines(self) -> list[str]:
         if not self._path.exists():
@@ -108,52 +178,166 @@ class BoundedNDJSONSpool:
         with self._path.open("r", encoding="utf-8") as f:
             return f.readlines()
 
-    def _write_lines(self, lines: list[str]) -> None:
-        with self._path.open("w", encoding="utf-8") as f:
-            f.writelines(lines)
+    def _rewrite(self, lines: list[str]) -> None:
+        """Atomically replace the spool contents with *lines*.
 
-    def _enforce_bound(self, lines: list[str]) -> list[str]:
-        while lines:
-            total = sum(len(line.encode("utf-8")) for line in lines)
-            if total <= self._max_bytes:
-                break
-            lines.pop(0)
-        return lines
+        Writes a temp file in the same directory and ``os.replace()``s it into
+        position, so a crash mid-rewrite leaves the previous spool intact
+        instead of a truncated one. Caller must hold ``self._lock``.
+        """
+        self._close_handle()
+        tmp_path = self._path.with_name(f"{self._path.name}.tmp.{os.getpid()}")
+        payload = [line.encode("utf-8") for line in lines]
+        try:
+            with tmp_path.open("wb") as f:
+                f.writelines(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        self._bytes = sum(len(chunk) for chunk in payload)
+        self._lines = len(lines)
+
+    def _compact(self) -> None:
+        """Drop oldest lines until the spool fits within *max_bytes*.
+
+        O(n) in the number of retained lines, but only runs once per bound
+        crossing. Caller must hold ``self._lock``.
+        """
+        lines = self._read_lines()
+        total = self._bytes
+        dropped = 0
+        while lines and total > self._max_bytes:
+            total -= len(lines.pop(0).encode("utf-8"))
+            dropped += 1
+        if dropped:
+            logger.warning("Spool bound exceeded; evicting oldest records", dropped=dropped)
+            self._rewrite(lines)
+
+    # ── public API ─────────────────────────────────────────────────────────────
 
     def write(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, ensure_ascii=False) + "\n"
         with self._lock:
-            lines = self._read_lines()
-            lines.append(line)
-            lines = self._enforce_bound(lines)
-            self._write_lines(lines)
-            _collector_spool_depth.set(len(lines))
+            self._sync_state()
+            if self._handle is None:
+                self._handle = self._path.open("a", encoding="utf-8")
+            self._handle.write(line)
+            self._handle.flush()
+            self._bytes += len(line.encode("utf-8"))
+            self._lines += 1
+            if self._bytes > self._max_bytes:
+                self._compact()
+            _collector_spool_depth.set(self._lines)
 
     def drain(self, callback: Callable[[dict[str, Any]], None]) -> int:
-        """Replay spooled records via *callback*; return count replayed."""
+        """Replay up to ``drain_batch_size`` spooled records via *callback*.
+
+        The spool lock is held only to snapshot and to rewrite the file — never
+        across ``callback``, which blocks on Kafka sends during an outage.
+        Returns the number of records successfully replayed.
+        """
         with self._lock:
+            self._sync_state()
             lines = self._read_lines()
             if not lines:
                 return 0
-            replayed = 0
-            remaining: list[str] = []
-            quarantined: list[str] = []
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                    callback(record)
-                    replayed += 1
-                except json.JSONDecodeError:
-                    quarantined.append(line)
-                    _collector_dropped_total.labels(reason="spool_malformed").inc()
-                except Exception:  # noqa: BLE001
-                    remaining.append(line)
+            batch = lines[: self._drain_batch_size]
+
+        replayed = 0
+        failed_indexes: list[int] = []
+        quarantined: list[str] = []
+        for index, line in enumerate(batch):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                quarantined.append(line)
+                _collector_dropped_total.labels(reason="spool_malformed").inc()
+                continue
+            try:
+                callback(record)
+                replayed += 1
+            except Exception:  # noqa: BLE001
+                failed_indexes.append(index)
+
+        with self._lock:
             if quarantined:
-                with self._bad_path.open("a", encoding="utf-8") as f:
-                    f.writelines(quarantined)
-            self._write_lines(remaining)
-            _collector_spool_depth.set(len(remaining))
-            return replayed
+                self._quarantine(quarantined)
+            self._settle_drain(batch, failed_indexes)
+
+        return replayed
+
+    # ── drain helpers (all called with ``self._lock`` held) ───────────────────
+
+    def _settle_drain(self, batch: list[str], failed_indexes: list[int]) -> None:
+        """Remove replayed records from the spool, keeping failed ones.
+
+        Re-reads the file because ``write()`` may have appended while the
+        callback was running. Only the still-matching prefix of *batch* is
+        removed, so records compacted away meanwhile are not miscounted and
+        freshly written records are never dropped.
+        """
+        current = self._read_lines()
+        matched = 0
+        while (
+            matched < len(batch)
+            and matched < len(current)
+            and current[matched] == batch[matched]
+        ):
+            matched += 1
+
+        failed = set(failed_indexes)
+        # Failed records inside the surviving prefix must be put back; failed
+        # records compacted away while we replayed are gone by design.
+        keep_head = [batch[i] for i in sorted(failed) if i < matched]
+        remaining = keep_head + current[matched:]
+        self._rewrite(remaining)
+        _collector_spool_depth.set(len(remaining))
+
+    def _quarantine(self, lines: list[str]) -> None:
+        """Append malformed lines to the ``.bad`` sibling, bounded by size."""
+        with self._bad_path.open("a", encoding="utf-8") as f:
+            f.writelines(lines)
+        self._enforce_bad_bound()
+
+    def _enforce_bad_bound(self) -> None:
+        """Evict oldest quarantined lines once the ``.bad`` file is too big."""
+        try:
+            size = self._bad_path.stat().st_size
+        except OSError:
+            return
+        if size <= self._bad_max_bytes:
+            return
+        with self._bad_path.open("r", encoding="utf-8") as f:
+            bad_lines = f.readlines()
+        total = size
+        dropped = 0
+        while bad_lines and total > self._bad_max_bytes:
+            total -= len(bad_lines.pop(0).encode("utf-8"))
+            dropped += 1
+        logger.warning(
+            "Quarantine bound exceeded; evicting oldest malformed records",
+            dropped=dropped,
+            max_bytes=self._bad_max_bytes,
+        )
+        tmp_path = self._bad_path.with_name(f"{self._bad_path.name}.tmp.{os.getpid()}")
+        payload = [line.encode("utf-8") for line in bad_lines]
+        try:
+            with tmp_path.open("wb") as f:
+                f.writelines(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._bad_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def close(self) -> None:
+        """Release the append handle."""
+        with self._lock:
+            self._close_handle()
 
 
 class SyslogCollector:
@@ -454,7 +638,12 @@ class SyslogCollector:
             if self.stop_event.is_set():
                 break
             try:
-                self._drain_spool()
+                # drain() replays at most one bounded batch per call; keep going
+                # until the backlog is empty or a whole batch fails to replay
+                # (Kafka still down — retry on the next tick).
+                while not self.stop_event.is_set():
+                    if self._drain_spool() == 0:
+                        break
             except Exception as exc:  # noqa: BLE001
                 logger.error("Spool drain failed", error=str(exc))
 
@@ -483,6 +672,8 @@ class SyslogCollector:
             for thread in threads:
                 thread.join(timeout=5.0)
             self.producer.close()
+            if self._spool is not None:
+                self._spool.close()
             logger.info("Syslog collector stopped")
 
 

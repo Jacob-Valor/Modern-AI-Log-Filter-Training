@@ -74,12 +74,30 @@ def test_secret_template_covers_all_logfilter_secret_refs() -> None:
         for document in _load_yaml_documents(manifest):
             referenced_keys.update(_collect_secret_refs(document))
 
-    assert referenced_keys <= secret_keys
+    # A subset check over an empty set is vacuously true, so prove the scan
+    # actually found the secretKeyRefs the deployments rely on.
+    assert referenced_keys, (
+        "no secretKeyRef to logfilter-secrets was found in k8s/*.yaml — the "
+        "collector or the manifests changed shape and this guard protects nothing"
+    )
+    assert {"LOGFILTER_API_TOKEN", "LOGFILTER_METRICS_TOKEN"} <= referenced_keys, (
+        "expected the api Deployment to reference the core secrets, found "
+        f"{sorted(referenced_keys)}"
+    )
+    assert referenced_keys <= secret_keys, (
+        f"secret.example.yaml is missing {sorted(referenced_keys - secret_keys)}; "
+        "the k8s apply target would fail at runtime"
+    )
 
 
 def test_no_init_containers_in_api_manifests() -> None:
+    deployments = 0
     for manifest in K8S_DIR.glob("*.yaml"):
         for document in _load_yaml_documents(manifest):
-            if document.get("kind") == "Deployment":
-                spec = document.get("spec", {}).get("template", {}).get("spec", {})
-                assert "initContainers" not in spec, f"{manifest.name} has initContainers"
+            if document.get("kind") != "Deployment":
+                continue
+            deployments += 1
+            spec = document.get("spec", {}).get("template", {}).get("spec", {})
+            assert "initContainers" not in spec, f"{manifest.name} has initContainers"
+
+    assert deployments, "no k8s Deployment manifests were scanned — the guard is vacuous"

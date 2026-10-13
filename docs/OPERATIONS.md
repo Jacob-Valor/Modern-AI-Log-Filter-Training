@@ -134,15 +134,28 @@ the models and pin exact revisions.
 
 ### Pin revisions in config
 
-Set per-model revision hashes in `config/config.yaml` or via environment:
+Each model entry in `config/config.yaml` accepts a `revision` key that is passed
+straight to `from_pretrained`:
 
-```bash
-LOGFILTER_NER_REVISION=abc123def456
-LOGFILTER_BIENCODER_REVISION=abc123def456
-LOGFILTER_CROSS_ENCODER_REVISION=abc123def456
+```yaml
+models:
+  ner:
+    revision: "abc123def456"
+  biencoder:
+    revision: "abc123def456"
+  cross_encoder:
+    revision: "abc123def456"
 ```
 
-Leave empty to use the default branch head.
+Omit the key to use the branch head.
+
+> An earlier revision of this document documented `LOGFILTER_NER_REVISION`,
+> `LOGFILTER_BIENCODER_REVISION`, and `LOGFILTER_CROSS_ENCODER_REVISION`
+> environment variables. **Nothing read them** — `config/config.yaml` has no
+> `revision:` key and `LogScorer` reads the value only from YAML, so those env
+> vars were silently inert. Use the YAML keys above. If you want env-var
+> overrides, add them to `config/config.yaml` as
+> `"${LOGFILTER_NER_REVISION:}"` so `load_config()` actually substitutes them.
 
 ### Docker image (baked models)
 
@@ -222,16 +235,34 @@ Panels:
 
 ## Service Level Objectives
 
-The table below defines formal SLOs, SLIs, and error budgets for the LogFilter
+The table below defines target SLOs, SLIs, and error budgets for the LogFilter
 scoring pipeline.
 
-| SLO | SLI | Target | Error Budget | Measurement Window |
-|---|---|---|---|---|
-| Latency | p99 scoring latency | < 500 ms | 1% of requests may exceed | 30 days |
-| Latency | p95 scoring latency | < 200 ms | 5% of requests may exceed | 30 days |
-| Availability | API health endpoint success rate | > 99.9% | 0.1% downtime | 30 days |
-| Throughput | Events scored per second | > 1000 rps | < 10% degradation | 30 days |
-| Model Freshness | Time since last model reload | < 7 days | N/A | Continuous |
+| SLO | SLI | Target | Error Budget | Measurement Window | Measured? |
+|---|---|---|---|---|---|
+| Latency | p99 scoring latency | < 500 ms | 1% of requests may exceed | 30 days | p99 ≈ 98 ms @ concurrency 1 |
+| Latency | p95 scoring latency | < 200 ms | 5% of requests may exceed | 30 days | p95 ≈ 96 ms @ concurrency 1 |
+| Availability | API health endpoint success rate | > 99.9% | 0.1% downtime | 30 days | not instrumented |
+| Throughput | Events scored per second | **TBD — measure before committing** | — | — | **measured 11–18 rps** (see below) |
+
+> **The throughput SLO is deliberately unset.** An earlier revision of this table
+> claimed `> 1000 rps`. That target was aspirational and was never measured: the
+> committed benchmark in `models/benchmark_api_http.json` records **11.4 rps** at
+> concurrency 1, **18.0 rps** at concurrency 8, and p99 latency degrading from 98 ms
+> to 3774 ms at concurrency 16. The gap between 1000 and 18 is a factor of ~55. Set a
+> real target only after a capacity run against your deployment shape — the model is
+> CPU-bound ONNX inference plus three transformer passes per event.
+
+There is also **no model-reload mechanism**: models are loaded once at process
+> start. "Model freshness" is therefore a deploy-time operational practice (redeploy
+> to pick up new artifacts), not an SLI the service can measure about itself. It was
+> removed from this table rather than left as an unmeasurable target.
+
+Re-run the benchmark to refresh these numbers:
+
+```bash
+PYTHONPATH=src python scripts/api_benchmark_http.py --concurrency 1 4 8 16
+```
 
 ### Alert severity and burn rate
 

@@ -24,10 +24,28 @@ class RateLimitBackend(Protocol):
 
 
 class InMemoryRateLimiter:
-    """Per-process sliding-window limiter backed by deques."""
+    """Per-process sliding-window limiter backed by deques.
+
+    The backing ``windows`` map is swept on every enforce call: an entry whose
+    whole window has fallen out of the 60-second horizon is deleted, so a stream
+    of one-shot client ids cannot grow the map without bound.
+    """
+
+    #: Sliding-window horizon, in seconds.
+    WINDOW_SECONDS = 60.0
 
     def __init__(self, windows: MutableMapping[str, deque[float]]) -> None:
         self._windows = windows
+
+    def _sweep(self, cutoff: float) -> None:
+        # Snapshot first: the map is shared across request threads.
+        stale = [
+            client_id
+            for client_id, window in list(self._windows.items())
+            if not window or window[-1] < cutoff
+        ]
+        for client_id in stale:
+            del self._windows[client_id]
 
     def enforce(
         self,
@@ -40,8 +58,12 @@ class InMemoryRateLimiter:
             return
 
         current_time = time.monotonic() if now is None else now
-        window = self._windows.setdefault(client_id, deque())
-        cutoff = current_time - 60.0
+        cutoff = current_time - self.WINDOW_SECONDS
+        self._sweep(cutoff)
+        window = self._windows.get(client_id)
+        if window is None:
+            window = deque()
+            self._windows[client_id] = window
         while window and window[0] < cutoff:
             window.popleft()
         if len(window) >= limit_per_minute:

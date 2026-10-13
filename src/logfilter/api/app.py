@@ -64,8 +64,44 @@ from logfilter.security.redaction import RedactionConfig
 logger = structlog.get_logger(__name__)
 
 # ── Config path ────────────────────────────────────────────────────────────────
-_CONFIG_PATH = Path("config/config.yaml")
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_CONFIG_PATH = _REPO_ROOT / "config" / "config.yaml"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+
+#: Delay before a previously-failed Redis rate limiter is re-probed (seconds).
+_REDIS_RETRY_SECONDS = 30.0
+
+#: How long a dependency-health fan-out result is reused before re-probing ES/Redis.
+_HEALTH_CACHE_SECONDS = 5.0
+
+
+def _health_cache_seconds() -> float:
+    """Return the dependency-health cache TTL, overridable via the environment."""
+    raw = os.environ.get("LOGFILTER_HEALTH_CACHE_SECONDS", "").strip()
+    if not raw:
+        return _HEALTH_CACHE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("LOGFILTER_HEALTH_CACHE_SECONDS must be a number") from exc
+    if value < 0:
+        raise ValueError("LOGFILTER_HEALTH_CACHE_SECONDS must not be negative")
+    return value
+
+
+def _redis_retry_seconds() -> float:
+    """Return the Redis re-probe delay, overridable via the environment."""
+    raw = os.environ.get("LOGFILTER_REDIS_RETRY_SECONDS", "").strip()
+    if not raw:
+        return _REDIS_RETRY_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("LOGFILTER_REDIS_RETRY_SECONDS must be a number") from exc
+    if value <= 0:
+        raise ValueError("LOGFILTER_REDIS_RETRY_SECONDS must be positive")
+    return value
+
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
 _events_total = Counter("logfilter_events_total", "Total log events scored", ["priority"])
@@ -126,6 +162,10 @@ class AppState:
         self.score_sum: float = 0.0
         self.latency_sum: float = 0.0
         self.rate_limit_windows: dict[str, deque[float]] = {}
+        self.redis_retry_at: float = 0.0
+        self.health_cache_at: float = 0.0
+        self.health_cache: dict[str, str] = {}
+        self.redis_url: str = ""
 
 
 _state = AppState()
@@ -184,28 +224,50 @@ def _configure_response_engine() -> None:
 
 
 def _configure_rate_limiter() -> None:
-    redis_url = os.environ.get("REDIS_URL", "").strip()
-    if not redis_url:
+    _state.redis_url = os.environ.get("REDIS_URL", "").strip()
+    if not _state.redis_url:
         _state.redis_client = None
         _state.rate_limiter = None
+        _state.redis_retry_at = 0.0
         return
+    _connect_rate_limiter()
 
+
+def _connect_rate_limiter() -> bool:
+    """Try to adopt Redis as the rate-limit backend; arm a retry when it fails."""
     try:
         redis_module = importlib.import_module("redis")
-        redis_client = redis_module.Redis.from_url(redis_url, decode_responses=True)
+        redis_client = redis_module.Redis.from_url(_state.redis_url, decode_responses=True)
         redis_client.ping()
-    except (ModuleNotFoundError, OSError, Exception) as exc:
+    except Exception as exc:  # noqa: BLE001
         _state.redis_client = None
         _state.rate_limiter = None
+        _state.redis_retry_at = time.monotonic() + _redis_retry_seconds()
         logger.warning(
-            "Redis rate limiter unavailable; falling back to in-memory",
+            "Redis rate limiter unavailable; limiting is per-process only until a retry succeeds",
             error=str(exc),
+            error_type=type(exc).__name__,
+            redis_url=_state.redis_url,
+            retry_in_seconds=_redis_retry_seconds(),
         )
-        return
+        return False
 
     _state.redis_client = redis_client
     _state.rate_limiter = RedisRateLimiter(redis_client)
+    _state.redis_retry_at = 0.0
     logger.info("Redis rate limiter enabled")
+    return True
+
+
+def _maybe_retry_rate_limiter() -> None:
+    """Re-probe Redis after the retry delay so a recovery is not permanent."""
+    if _state.rate_limiter is not None or not _state.redis_url:
+        return
+    if time.monotonic() < _state.redis_retry_at:
+        return
+    if _connect_rate_limiter():
+        logger.info("Redis rate limiter recovered; distributed limiting re-enabled")
+
 
 
 def _configure_archiver() -> None:
@@ -308,6 +370,23 @@ def _collect_dependency_health() -> dict[str, str]:
         except Exception as exc:  # noqa: BLE001
             dependencies["redis"] = f"down:{type(exc).__name__}"
     return dependencies
+
+
+def _cached_dependency_health() -> dict[str, str]:
+    """Return dependency health, re-fanning out to ES/Redis only after the TTL.
+
+    ``/health`` is unauthenticated, so without this cache any anonymous caller
+    could force one Elasticsearch ``cluster.health`` round-trip and one Redis
+    ``PING`` per request.
+    """
+    ttl = _health_cache_seconds()
+    now = time.monotonic()
+    if _state.health_cache and now - _state.health_cache_at < ttl:
+        return dict(_state.health_cache)
+    _state.health_cache = _collect_dependency_health()
+    _state.health_cache_at = now
+    return dict(_state.health_cache)
+
 
 
 def _dependencies_ready(dependencies: dict[str, str]) -> bool:
@@ -419,7 +498,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Admin-Token", "X-API-Token", "Authorization"],
+    allow_headers=["Content-Type", "X-API-Token", "Authorization"],
     allow_credentials=False,
     max_age=3600,
 )
@@ -692,6 +771,7 @@ def _enforce_rate_limit(request: Request) -> None:
         forwarded_for=request.headers.get("x-forwarded-for"),
         trusted_proxies=api_cfg.get("trusted_proxies", []),
     )
+    _maybe_retry_rate_limiter()
     if _state.rate_limiter is not None:
         try:
             enforce_rate_limit(
@@ -701,17 +781,23 @@ def _enforce_rate_limit(request: Request) -> None:
                 backend=_state.rate_limiter,
             )
             return
-        except AccessDenied:
-            raise
+        except AccessDenied as exc:
+            # Convert to HTTPException like the in-process fallback below.
+            # Re-raising the bare AccessDenied escaped FastAPI's handler and
+            # surfaced as HTTP 500, so a throttled client got a server-error
+            # instead of 429 whenever the Redis limiter was active.
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         except Exception as exc:
             logger.warning(
-                "Redis rate limiter failed; falling back to in-memory",
+                "Redis rate limiter request failed; limiting is per-process only "
+                "until a retry succeeds",
                 client_id=client_host,
                 error=str(exc),
+                error_type=type(exc).__name__,
             )
             _state.redis_client = None
             _state.rate_limiter = None
-
+            _state.redis_retry_at = time.monotonic() + _redis_retry_seconds()
     try:
         enforce_rate_limit(_state.rate_limit_windows, client_host, limit)
     except AccessDenied as exc:
@@ -722,6 +808,9 @@ async def _require_scoring_access(
     request: Request,
     x_api_token: str | None = Header(default=None),
 ) -> None:
+    # Rate-limit before the token comparison: a wrong-token flood must be
+    # throttled too, otherwise the token is brute-forceable without limit.
+    _enforce_rate_limit(request)
     token = _configured_api_token()
     try:
         require_configured_token(
@@ -732,13 +821,16 @@ async def _require_scoring_access(
         )
     except AccessDenied as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    _enforce_rate_limit(request)
+
 
 
 async def _require_metrics_access(
+    request: Request,
     x_metrics_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> None:
+    # Rate-limit before the token comparison so brute-force attempts are throttled.
+    _enforce_rate_limit(request)
     token = _configured_metrics_token()
     provided = x_metrics_token or _extract_bearer_token(authorization)
     try:
@@ -895,7 +987,7 @@ async def health(response: Response) -> HealthResponse:
     """
     with telemetry.start_as_current_span("api.health") as span:
         models_loaded = _collect_model_health()
-        dependencies = _collect_dependency_health()
+        dependencies = _cached_dependency_health()
         overall_status = (
             "healthy"
             if all(models_loaded.values()) and _dependencies_ready(dependencies)

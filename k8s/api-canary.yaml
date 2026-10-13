@@ -132,6 +132,15 @@ spec:
         - name: config
           configMap:
             name: logfilter-config
+            # Keep in sync with k8s/api.yaml: projects the Sigma corpus and the
+            # MITRE technique map to the paths the runtime expects.
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: mitre_techniques.json
+                path: mitre_techniques.json
+              - key: sigma_rules_baseline_rules.yml
+                path: sigma_rules/baseline_rules.yml
         - name: models
           persistentVolumeClaim:
             claimName: logfilter-models-pvc

@@ -145,6 +145,29 @@ def _resolve_path(value: str | Path) -> Path:
     return ROOT / p if not p.is_absolute() else p
 
 
+def _versioned(value: str | Path, model_version: str) -> str:
+    """Re-root a ``models/...`` path under ``models/<version>/...`` when versioning is on.
+
+    Every model artifact has to move together when ``LOGFILTER_MODEL_VERSION`` is
+    set, otherwise the rollout is not atomic: tier-1 and tier-2 would load from the
+    pinned version while NER / BiEncoder / CrossEncoder silently loaded from
+    whatever happened to be on disk, making the "version" a partial one.
+    Paths outside ``models/`` (e.g. ``config/mitre_techniques.json``) and absolute
+    paths are returned unchanged.
+    """
+    if not model_version:
+        return str(value)
+    p = Path(value)
+    if p.is_absolute() or not p.parts or p.parts[0] != "models":
+        return str(value)
+    return str(Path("models") / model_version / Path(*p.parts[1:]))
+
+
+def _model_path(value: str | Path, model_version: str) -> Path:
+    """Resolve a config-supplied model path, honouring the pinned model version."""
+    return _resolve_path(_versioned(value, model_version))
+
+
 def _enabled(value: Any, default: bool = True) -> bool:
     """Parse config values that may arrive as booleans or env-substituted strings."""
     if value is None:
@@ -175,7 +198,17 @@ def _int_value(value: Any, name: str) -> int:
 
 
 def _bounded_probability(value: Any) -> float:
-    return max(0.0, min(1.0, _float_value(value, "model probability")))
+    """Clamp to [0, 1], mapping non-finite input to 0.0.
+
+    ``max(0.0, min(1.0, nan))`` evaluates to 1.0 in CPython, because ``nan < 1.0``
+    is False, so a NaN from any model component would silently become the maximum
+    threat score. Non-finite values are a model failure, not a verdict, so they
+    degrade to 0.0 here and are surfaced through ``score_degraded`` by the caller.
+    """
+    parsed = _float_value(value, "model probability")
+    if not math.isfinite(parsed):
+        return 0.0
+    return max(0.0, min(1.0, parsed))
 
 
 def _probability_config(value: Any, name: str) -> float:
@@ -299,6 +332,10 @@ _ATTACK_TOOL_RE = re.compile(
     re.IGNORECASE,
 )
 _ATTACK_TOOL_FLOOR = 0.60
+
+# A matched Sigma rule is treated as authoritative: the classifier term is floored
+# so a rule hit cannot be scored down by a low model probability.
+_SIGMA_CLASSIFIER_FLOOR = 0.90
 
 _FEATURE_STOPWORDS = {
     "a",
@@ -431,20 +468,20 @@ class LogScorer:
             )
 
         models_cfg = config.get("models", {})
-        classifier_path = _resolve_path(
-            models_cfg.get("classifier", {}).get("path", "models/log_classifier.onnx")
+        # Every artifact below is re-rooted through _model_path() / _versioned(), so
+        # a pinned model_version moves the whole set atomically. Previously only the
+        # classifier and tier-2 were re-rooted: NER, BiEncoder, CrossEncoder, flow
+        # and endpoint kept loading from unversioned paths, so a "pinned" deployment
+        # was really a partial one.
+        v = self._model_version
+        if v:
+            logger.info("Pinned model version", model_version=v)
+        classifier_cfg = models_cfg.get("classifier", {})
+        classifier_path = _model_path(classifier_cfg.get("path", "models/log_classifier.onnx"), v)
+        scaler_path = _model_path(classifier_cfg.get("scaler_path", "models/scaler.json"), v)
+        feature_names_path = _model_path(
+            classifier_cfg.get("feature_names_path", "models/feature_names.json"), v
         )
-        scaler_path = _resolve_path(
-            models_cfg.get("classifier", {}).get("scaler_path", "models/scaler.json")
-        )
-        feature_names_path = _resolve_path(
-            models_cfg.get("classifier", {}).get("feature_names_path", "models/feature_names.json")
-        )
-        if self._model_version:
-            version_root = _resolve_path(Path("models") / self._model_version)
-            classifier_path = version_root / "log_classifier.onnx"
-            scaler_path = version_root / "scaler.json"
-            feature_names_path = version_root / "feature_names.json"
 
         self.classifier = classifier or LogClassifier(
             model_path=classifier_path,
@@ -452,9 +489,7 @@ class LogScorer:
             feature_names_path=feature_names_path,
         )
         tier2_cfg = scoring.get("tier2", {})
-        tier2_model_dir = _resolve_path(Path("models") / "tier2")
-        if self._model_version:
-            tier2_model_dir = _resolve_path(Path("models") / self._model_version / "tier2")
+        tier2_model_dir = _model_path("models/tier2", v)
         self.tier2_classifier = tier2_classifier or Tier2Classifier(
             model_dir=tier2_model_dir,
             uncertainty_low=tier2_cfg.get("uncertainty_low", 0.10),
@@ -468,7 +503,7 @@ class LogScorer:
         ner_revision = ner_cfg.get("revision", "")
         self.ner_model = ner_model or (
             NERModel(
-                model_id=ner_cfg.get("model_id", NERModel.MODEL_ID),
+                model_id=_versioned(ner_cfg.get("model_id", NERModel.MODEL_ID), v),
                 device=ner_cfg.get("device", "cpu"),
                 batch_size=_int_value(ner_cfg.get("batch_size", 32), "NER batch size"),
                 min_confidence=_float_value(
@@ -484,7 +519,7 @@ class LogScorer:
         bi_revision = biencoder_cfg.get("revision", "")
         self.biencoder = biencoder or (
             BiEncoderModel(
-                model_id=biencoder_cfg.get("model_id", BiEncoderModel.MODEL_ID),
+                model_id=_versioned(biencoder_cfg.get("model_id", BiEncoderModel.MODEL_ID), v),
                 device=biencoder_cfg.get("device", "cpu"),
                 batch_size=_int_value(biencoder_cfg.get("batch_size", 64), "BiEncoder batch size"),
                 dedup_threshold=_float_value(
@@ -507,7 +542,9 @@ class LogScorer:
         ce_revision = cross_encoder_cfg.get("revision", "")
         self.cross_encoder = cross_encoder or (
             CrossEncoderModel(
-                model_id=cross_encoder_cfg.get("model_id", CrossEncoderModel.MODEL_ID),
+                model_id=_versioned(
+                    cross_encoder_cfg.get("model_id", CrossEncoderModel.MODEL_ID), v
+                ),
                 device=cross_encoder_cfg.get("device", "cpu"),
                 batch_size=_int_value(
                     cross_encoder_cfg.get("batch_size", 16), "CrossEncoder batch size"
@@ -562,10 +599,10 @@ class LogScorer:
             flow_cfg.get("enabled", False), default=False
         )
         self.flow_classifier = flow_classifier or FlowClassifier(
-            model_path=_resolve_path(flow_cfg.get("path", "models/flow/flow_classifier.onnx")),
-            scaler_path=_resolve_path(flow_cfg.get("scaler_path", "models/flow/scaler.json")),
-            feature_names_path=_resolve_path(
-                flow_cfg.get("feature_names_path", "models/flow/feature_names.json")
+            model_path=_model_path(flow_cfg.get("path", "models/flow/flow_classifier.onnx"), v),
+            scaler_path=_model_path(flow_cfg.get("scaler_path", "models/flow/scaler.json"), v),
+            feature_names_path=_model_path(
+                flow_cfg.get("feature_names_path", "models/flow/feature_names.json"), v
             ),
         )
         bot_cfg = flow_cfg.get("bot", {})
@@ -573,13 +610,13 @@ class LogScorer:
             bot_cfg.get("enabled", False), default=False
         )
         self.bot_flow_classifier = bot_flow_classifier or _bot_classifier_module.BotFlowClassifier(
-            model_path=_resolve_path(bot_cfg.get("path", "models/flow/bot_classifier.onnx")),
-            scaler_path=_resolve_path(bot_cfg.get("scaler_path", "models/flow/bot_scaler.json")),
-            feature_names_path=_resolve_path(
-                bot_cfg.get("feature_names_path", "models/flow/bot_feature_names.json")
+            model_path=_model_path(bot_cfg.get("path", "models/flow/bot_classifier.onnx"), v),
+            scaler_path=_model_path(bot_cfg.get("scaler_path", "models/flow/bot_scaler.json"), v),
+            feature_names_path=_model_path(
+                bot_cfg.get("feature_names_path", "models/flow/bot_feature_names.json"), v
             ),
-            calibration_path=_resolve_path(
-                bot_cfg.get("calibration_path", "models/flow/bot_calibration.json")
+            calibration_path=_model_path(
+                bot_cfg.get("calibration_path", "models/flow/bot_calibration.json"), v
             ),
             target_fpr=str(bot_cfg.get("target_fpr", "0.01")),
             alert_floor=_probability_config(
@@ -587,8 +624,8 @@ class LogScorer:
             ),
         )
         self.flow_fusion_policy = _flow_fusion_module.FlowFusionPolicy(
-            calibration_path=_resolve_path(
-                flow_cfg.get("fusion_calibration_path", "models/flow/fusion_calibration.json")
+            calibration_path=_model_path(
+                flow_cfg.get("fusion_calibration_path", "models/flow/fusion_calibration.json"), v
             ),
             target_fpr=str(flow_cfg.get("fusion_target_fpr", "0.01")),
         )
@@ -626,11 +663,11 @@ class LogScorer:
             endpoint_cfg.get("enabled", False), default=False
         )
         self.endpoint_novelty_model = endpoint_novelty_model or EndpointNoveltyModel(
-            model_path=_resolve_path(
-                endpoint_cfg.get("path", "models/endpoint/endpoint_novelty.onnx")
+            model_path=_model_path(
+                endpoint_cfg.get("path", "models/endpoint/endpoint_novelty.onnx"), v
             ),
-            config_path=_resolve_path(
-                endpoint_cfg.get("config_path", "models/endpoint/novelty_config.json")
+            config_path=_model_path(
+                endpoint_cfg.get("config_path", "models/endpoint/novelty_config.json"), v
             ),
             score_scale=_float_value(
                 endpoint_cfg.get("score_scale", 0.03), "endpoint novelty score scale"
@@ -671,11 +708,21 @@ class LogScorer:
                     with open(artifact_path, "rb") as f:
                         for chunk in iter(lambda: f.read(8192), b""):
                             h.update(chunk)
-                    actual_hash = h.hexdigest()[:16]
-                    if actual_hash != meta.get("sha256"):
+                    # Compare the full 64-hex SHA-256 digest. Truncating to 16 hex
+                    # chars made this a 64-bit check (~2**32 birthday bound) while
+                    # README/SECURITY documented it as SHA-256 verification.
+                    actual_hash = h.hexdigest()
+                    expected_hash = str(meta.get("sha256", ""))
+                    if actual_hash != expected_hash:
+                        detail = ""
+                        if len(expected_hash) == 16:
+                            detail = (
+                                " (manifest holds a legacy 16-char truncated digest;"
+                                " run 'make model-manifest-generate' to rewrite it)"
+                            )
                         errors.append(
                             f"{key}: {pattern} hash mismatch "
-                            f"(expected {meta['sha256']}, got {actual_hash})"
+                            f"(expected {expected_hash}, got {actual_hash}){detail}"
                         )
             if errors:
                 message = "Model manifest validation failed: " + "; ".join(errors)
@@ -1198,6 +1245,12 @@ class LogScorer:
                 for index in flow_candidates:
                     scored[index].score_degraded = True
 
+        try:
+            syslog_head_ready = self.syslog_classifier.is_ready()
+        except Exception as exc:  # noqa: BLE001 - a broken head must not abort the batch
+            logger.warning("Syslog classifier readiness check failed", error=str(exc))
+            syslog_head_ready = False
+
         flow_index_set = set(flow_indices)
         endpoint_index_set = set(endpoint_indices)
         syslog_indices = [
@@ -1213,7 +1266,19 @@ class LogScorer:
                 LogSourceType.WINEVENT,
             )
         ]
-        structured_indices = flow_index_set | endpoint_index_set | set(syslog_indices)
+        # Events the syslog head cannot serve must still reach a head. Previously they
+        # stayed in structured_indices, so they were excluded from hdfs_indices, no
+        # classifier ever ran, and classifier_score kept its ScoredEvent default of
+        # 0.0 while score_degraded stayed False - a missing artifact was reported as a
+        # confident "benign" INFO verdict instead of a degraded one.
+        unserved_syslog_indices = [
+            index for index in syslog_indices if not syslog_head_ready
+        ]
+        structured_indices = (
+            flow_index_set
+            | endpoint_index_set
+            | (set(syslog_indices) - set(unserved_syslog_indices))
+        )
         hdfs_indices = [index for index in range(len(events)) if index not in structured_indices]
 
         with telemetry.start_as_current_span(
@@ -1221,7 +1286,7 @@ class LogScorer:
             {"logfilter.batch_size": len(events), "logfilter.flow_count": len(flow_indices)},
         ) as span:
             try:
-                if syslog_indices and self.syslog_classifier.is_ready():
+                if syslog_indices and syslog_head_ready:
                     syslog_events = [events[index] for index in syslog_indices]
                     syslog_vectors = self._syslog_feature_vectors(syslog_events)
                     syslog_probs = self.syslog_classifier.predict_proba(syslog_vectors)
@@ -1253,8 +1318,10 @@ class LogScorer:
                     or bool(endpoint_indices)
                     or bool(http_indices)
                     or self.classifier.is_ready()
-                    or self.syslog_classifier.is_ready()
+                    or syslog_head_ready
                 )
+                for index in unserved_syslog_indices:
+                    scored[index].score_degraded = True
                 if not ready:
                     for result in scored:
                         result.score_degraded = True
@@ -1287,6 +1354,11 @@ class LogScorer:
             if not self.tier2_classifier.is_ready():
                 span.set_attribute("logfilter.tier2.ready", False)
                 logger.warning("Tier-2 classifier unavailable; keeping Tier-1 uncertain scores")
+                # The escalation window is 0.10-0.90, so an unclassified event keeps a
+                # Tier-1 score that lands in MEDIUM or HIGH. Marking it degraded is what
+                # stops auto_response from enforcing an action on a score no model produced.
+                for index in escalation_indices:
+                    scored[index].score_degraded = True
                 return
 
             tier2_texts = [events[i].raw for i in escalation_indices]
@@ -1297,6 +1369,8 @@ class LogScorer:
                 logger.warning(
                     "Tier-2 classifier scoring failed; keeping Tier-1 scores", error=str(exc)
                 )
+                for index in escalation_indices:
+                    scored[index].score_degraded = True
                 return
 
             for index, prob in zip(escalation_indices, tier2_probs):
@@ -1434,21 +1508,39 @@ class LogScorer:
         isolated_flow = self._is_isolated_flow(se)
         if isolated_flow:
             return _bounded_probability(se.classifier_score)
-        # Sigma is outside the attested calibrated-flow policy.
-        if se.sigma_matched and not isolated_flow:
-            se.classifier_score = max(se.classifier_score, 0.90)
+        # A matched Sigma rule is outside the attested calibrated-flow policy and
+        # floors the classifier term. Kept in a local so this method has no side
+        # effects on the ScoredEvent: it previously mutated ``se.classifier_score``
+        # in place, so a second call, or any inspection of the event afterwards, saw
+        # an inflated classifier score that no model had produced.
+        classifier_score = (
+            max(se.classifier_score, _SIGMA_CLASSIFIER_FLOOR)
+            if se.sigma_matched
+            else se.classifier_score
+        )
 
-        # A dedup penalty is valid only when the cross-encoder has non-zero weight.
-        dedup = se.dedup_penalty if se.cross_encoder_max > 0 and w_ce > 0 else 0.0
+        # The dedup penalty compensates for Tier 3 being skipped on near-duplicates,
+        # so it applies exactly where the cross-encoder carries weight. The previous
+        # guard also required ``se.cross_encoder_max > 0``, but that field is only
+        # set for non-duplicates while the penalty is only set on duplicates — the
+        # conditions are mutually exclusive, which made the documented -0.30 term
+        # unreachable and this subtraction always 0.0.
+        dedup = se.dedup_penalty if w_ce > 0 else 0.0
 
         score = (
-            w_cls * se.classifier_score
+            w_cls * classifier_score
             + w_ent * se.entity_boost
             + w_ce * se.cross_encoder_max
             + w_nov * se.novelty_score
             - dedup
         )
-        # Clamp to [0, 1]
+        if not math.isfinite(score):
+            # A NaN/Inf component is a model failure, not a verdict. Routing it to
+            # HIGH would alert on the strength of a broken computation, and the naive
+            # clamp maps NaN to 1.0. Degrade explicitly instead: no alert, and
+            # score_degraded blocks automated response downstream.
+            se.score_degraded = True
+            return 0.0
         return max(0.0, min(1.0, score))
 
     def _routing_label(self, se: ScoredEvent) -> str:

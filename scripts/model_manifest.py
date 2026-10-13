@@ -76,7 +76,7 @@ def file_sha256(path: Path) -> str:
                 digest.update(chunk)
     except OSError as exc:
         raise RuntimeError(f"Cannot hash model artifact {path}") from exc
-    return digest.hexdigest()[:16]
+    return digest.hexdigest()
 
 
 def file_size_mb(path: Path) -> float:

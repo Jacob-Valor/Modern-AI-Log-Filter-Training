@@ -98,10 +98,12 @@ class TestLEEFEnricher:
         with pytest.raises(ValueError, match="es_doc_id is required"):
             self.enricher.enrich(scored, es_doc_id="")
 
-    def test_no_base64_fallback(self):
+    def test_raw_log_is_never_embedded_in_leef(self):
+        """The enricher emits a forensic reference, never the raw log text."""
         scored = _make_scored()
         leef = self.enricher.enrich(scored, es_doc_id=self.doc_id)
-        assert "raw_log_b64" not in leef
+        assert scored.raw not in leef
+        assert f"raw_log_ref={self.doc_id}" in leef
 
     def test_leef_header_uses_tab_delimiter(self):
         scored = _make_scored()
@@ -118,10 +120,36 @@ class TestLEEFEnricher:
         assert header == "LEEF:2.0|TestCo|TestFilter|1.0|LOG_EVENT"
 
     def test_pipe_in_value_is_sanitised(self):
-        scored = _make_scored(ai_mitre_technique="T1059|evil")
+        """A pipe injected into a value must not add a LEEF field."""
+        scored = _make_scored(
+            ai_mitre_technique="T1059|evil",
+            source_type="syslog|evil",
+            ai_entities="10.0.0.5|evil",
+        )
         leef = self.enricher.enrich(scored, es_doc_id=self.doc_id)
-        header_section = leef.split("|\t|")[0]
-        assert header_section.count("|") == 4
+        header, _, attrs = leef.partition("|\t|")
+
+        assert header.count("|") == 4
+        assert "|evil" not in leef
+        for key, value in (pair.split("=", 1) for pair in attrs.split("\t")):
+            assert "|" not in key, f"pipe leaked into LEEF key {key!r}"
+            assert "|" not in value, f"pipe leaked into the value of LEEF key {key!r}"
+
+    def test_pipe_in_event_id_is_sanitised(self):
+        """Event IDs come from parsed fields, not only from literals."""
+        scored = _make_scored(fields={"event_id": "EV|1|injected"})
+        leef = self.enricher.enrich(scored, es_doc_id=self.doc_id)
+        header, _, _ = leef.partition("|\t|")
+        assert header == "LEEF:2.0|TestCo|TestFilter|1.0|EV 1 injected"
+
+    def test_tab_and_newline_in_values_are_sanitised(self):
+        scored = _make_scored(ai_entities="10.0.0.5\tinjected\r\nnext")
+        leef = self.enricher.enrich(scored, es_doc_id=self.doc_id)
+        _, _, attrs = leef.partition("|\t|")
+        values = [pair.split("=", 1)[1] for pair in attrs.split("\t")]
+        # Each unsafe char becomes a single space, so "\r\n" leaves two.
+        assert "10.0.0.5 injected  next" in values
+        assert "\r" not in leef and "\n" not in leef
 
     def test_batch_enrichment(self):
         events = [_make_scored(), _make_scored(ai_threat_score=0.3, ai_priority="LOW")]

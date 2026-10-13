@@ -56,6 +56,14 @@ class DriftStatus:
 class DriftDetector:
     """Sliding-window PSI drift detector for model score distributions.
 
+
+    The *reference* window is frozen once primed from the first
+    ``window_size`` scores; it never rolls on its own. Call
+    :meth:`update_reference` to deliberately promote the current window to the
+    new baseline (e.g. after a model promotion). Auto-rolling is deliberately
+    not provided: a sustained shift would otherwise absorb itself into the
+    baseline and silently erase the drift signal.
+
     Parameters
     ----------
     window_size : int
@@ -71,6 +79,9 @@ class DriftDetector:
         Number of equal-width histogram bins spanning ``[0.0, 1.0]``.
     epsilon : float
         Minimum probability mass per bin to avoid division-by-zero in ``ln``.
+        The default (1e-6) sits in the standard 1e-6..1e-4 band: any smaller
+        value lets a single expected-empty bin that picks up a small slice of
+        actual mass manufacture a large PSI out of nothing.
     """
 
     def __init__(
@@ -80,7 +91,7 @@ class DriftDetector:
         check_interval: int = 100,
         auto_fallback: bool = True,
         num_bins: int = 10,
-        epsilon: float = 1e-10,
+        epsilon: float = 1e-6,
         on_drift_detected: Any | None = None,
     ) -> None:
         if window_size < 1:
@@ -155,13 +166,27 @@ class DriftDetector:
 
     def reset_reference(self) -> None:
         """Promote the current window to the new reference baseline."""
+        self.update_reference()
+
+    def update_reference(self) -> int:
+        """Roll the reference baseline onto the current window; return its size.
+
+        The reference window is intentionally *frozen* for the lifetime of the
+        baseline: silently re-rolling it on a timer would let a sustained
+        distribution shift absorb itself into the baseline and destroy the
+        drift signal. Operators therefore roll it explicitly — typically after
+        a new model/promotion, or after concluding that an alert was a benign
+        one-off.
+        """
         with self._lock:
             self._reference = deque(self._current, maxlen=self.window_size)
             self._drift_detected = False
             self._last_psi = 0.0
+            self._scores_since_check = 0
             if self.auto_fallback:
                 self._fallback_active = False
-            logger.info("Drift reference baseline reset", reference_size=len(self._reference))
+            logger.info("Drift reference baseline updated", reference_size=len(self._reference))
+            return len(self._reference)
 
     def is_fallback_active(self) -> bool:
         """True when auto-fallback is enabled and drift is currently detected."""
@@ -186,11 +211,7 @@ class DriftDetector:
         expected = self._hist(self._reference)
         actual = self._hist(self._current)
 
-        psi = 0.0
-        for e, a in zip(expected, actual):
-            e_adj = max(e, self.epsilon)
-            a_adj = max(a, self.epsilon)
-            psi += (a_adj - e_adj) * np.log(a_adj / e_adj)
+        psi = self._psi(expected, actual)
 
         self._last_psi = float(psi)
         was_drifting = self._drift_detected
@@ -224,3 +245,22 @@ class DriftDetector:
         if total == 0:
             return np.full(self.num_bins, self.epsilon)
         return counts / total
+
+    def _psi(self, expected: np.ndarray, actual: np.ndarray) -> float:
+        """Population Stability Index between two normalised histograms.
+
+        Bins whose *expected* mass is empty are merged away before the sum.
+        Without this, a bin that is legitimately empty in the baseline but
+        picks up a small slice of actual mass contributes
+        ``a * ln(a / epsilon)``, which dwarfs the genuine signal: a benign 1%
+        shift into one empty bin would otherwise read as ~0.18 PSI and two
+        would trip the 0.25 alarm threshold.
+        """
+        populated = expected > 0
+        if not populated.any():
+            return 0.0
+        e = expected[populated]
+        a = actual[populated]
+        e_adj = np.maximum(e, self.epsilon)
+        a_adj = np.maximum(a, self.epsilon)
+        return float(np.sum((a_adj - e_adj) * np.log(a_adj / e_adj)))

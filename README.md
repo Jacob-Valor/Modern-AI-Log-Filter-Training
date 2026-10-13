@@ -35,12 +35,12 @@ Core services:
 
 ## Dual-Classifier Architecture
 
-The scoring pipeline uses a cascade of two classifiers with source-type routing. Syslog, web, firewall, and Windows events route to a dedicated syslog classifier (100-feature XGBoost trained on sparse real-world patterns). All other events (HDFS TraceBench traces, generic) route to the HDFS classifier (2255-feature XGBoost). Tier-2 escalation is applied only to HDFS-classified events.
+The scoring pipeline uses a cascade of two classifiers with source-type routing. Syslog, web, firewall, and Windows events route to a dedicated syslog classifier (110-feature XGBoost trained on sparse real-world patterns). All other events (HDFS TraceBench traces, generic) route to the HDFS classifier (2255-feature XGBoost). Tier-2 escalation is applied only to HDFS-classified events. Feature counts are those recorded in `models/model_manifest.json` (`onnx_input_features`), which matches the length of `models/feature_names.json` and `models/syslog/feature_names_syslog.json`.
 
 ```
 event ──► source-type router
               │
-              ├─ syslog / web / firewall / winevent ──► syslog classifier (XGBoost, 100 feat)
+              ├─ syslog / web / firewall / winevent ──► syslog classifier (XGBoost, 110 feat)
               │                                              │
               │                                              └─► final score (no tier-2)
               │
@@ -53,7 +53,20 @@ event ──► source-type router
                                                                                 └─► override classifier_score
 ```
 
-The syslog classifier was retrained with sparse-feature data (1-7 features per sample) to handle real-world events that activate far fewer features than the dense HDFS training set. Events with no matching features receive a neutral 0.5 score. See `training/retrain_syslog_sparse.py` for the retraining script.
+The syslog classifier was retrained on sparse-feature data (WitFoo Precinct6) to handle real-world events that activate far fewer features than the dense HDFS training set. See `training/retrain_syslog_witfoo.py` for the retraining script — it is the only producer of `models/syslog/*`.
+
+> **Known limitation — zero-vector dominance.** An event that activates none of the
+> 110 syslog features produces an all-zero feature vector, which collapses every
+> distinct such event into a single model input. The zero-vector clamp was removed
+> after this retraining (`src/logfilter/models/syslog_classifier.py`), so a zero
+> vector is scored by the model rather than forced to a neutral 0.5 — and the model
+> scores it **benign**: `models/syslog/training_metrics.json` records
+> `zero_vector_p_malicious: 0.0009724` for that same run. Because syslog routing has
+> no tier-2 fallback, the majority of production syslog traffic that matches no
+> known feature is classified by this single all-zero vector and receives a low
+> threat score. Treat syslog-classified scores for feature-less events as
+> effectively uninformative; Sigma rules and tier-3 components remain the usable
+> signal there.
 
 Before changing production thresholds, generate a Tier-2 threshold report:
 
@@ -61,7 +74,7 @@ Before changing production thresholds, generate a Tier-2 threshold report:
 PYTHONPATH=src python scripts/evaluate_tier2_thresholds.py
 ```
 
-That report shows precision/recall/F1 and false-positive/false-negative tradeoffs across candidate cutoffs.
+That report shows precision/recall/F1 and false-positive/false-negative tradeoffs across candidate cutoffs. **Treat its recommendations as directional only:** the committed report (`models/tier2/tier2_threshold_report.json`) was produced from a 3-sample test split with 1 failure (`test_samples: 3`, `test_failures: 1`). On samples that small, the `best_f1` candidate degenerates to the lowest cutoff — the flag-everything point — so do **not** select operating points from it. Use it only to confirm the sweep mechanics run, and choose real thresholds from a representative labelled log sample.
 
 Runtime thresholds are configurable without changing code. Defaults preserve the shipped cascade
 behavior; invalid ranges fail startup instead of being silently clamped.
@@ -96,9 +109,51 @@ ai_threat_score = (0.35 × classifier_score)
 | entity_boost | 0.25 | Tier 3 NER | IOC/malware/CVE detection |
 | cross_encoder_max | 0.40 | Tier 3 CrossEncoder | ATT&CK technique relevance |
 | novelty_score | 0.15 | Tier 3 Novelty | Zero-day/rare event detection |
-| dedup_penalty | -0.30 | Tier 2 BiEncoder | Near-duplicate suppression |
+| dedup_penalty | -0.30 | Tier 2 BiEncoder | Near-duplicate suppression, applied where the cross-encoder carries weight |
 
 Routing thresholds: HIGH (≥0.80), MEDIUM (≥0.50), LOW (≥0.20), INFO (<0.20).
+
+### Scoring overrides and guards
+
+The formula and thresholds above are the **default** source profile. Five behaviours
+change the effective result, and all five matter when you tune `LOGFILTER_SCORE_HIGH`:
+
+- **Sigma override.** When a Sigma rule matches, the scorer floors the classifier
+  term at `0.90` *before* computing the score, and the routing step forces `HIGH`
+  regardless of the final score. No threshold can pull a Sigma-matched event below
+  HIGH. The floor is computed in a local and does not mutate the event's reported
+  `classifier_score`. Set `LOGFILTER_SIGMA_ENABLED=false` to disable this behaviour.
+- **Source-profile overrides.** `config/config.yaml` defines `source_profiles` for
+  `firewall_flow` and `firewall_http`. These **replace the base weights entirely**
+  (`classifier: 1.0`, `entity_boost: 0.0`, `cross_encoder: 0.0`, `novelty: 0.0`)
+  and carry their own routing thresholds, so `LOGFILTER_SCORE_*` does not apply to
+  them. Tune `LOGFILTER_FLOW_SCORE_*` and `LOGFILTER_HTTP_SCORE_*` instead.
+- **dedup_penalty scope.** The penalty compensates for Tier 3 being skipped on a
+  near-duplicate, so it applies exactly where the cross-encoder carries weight —
+  i.e. under the default profile. It is `0.0` under `firewall_flow` and
+  `firewall_http`, where Tier 3 was never part of the score to begin with.
+- **Non-finite scores degrade; they do not alert.** If any model component yields
+  NaN or Inf, the composite score becomes `0.0` and the event is flagged
+  `score_degraded` rather than being clamped upward. (`max(0.0, min(1.0, nan))`
+  evaluates to `1.0` in CPython, so a naive clamp turns a broken computation into a
+  maximum-threat verdict.) A degraded event therefore routes as INFO, not HIGH.
+- **A missing or broken model marks the event degraded.** When the syslog head
+  cannot serve an event, it is scored by the HDFS head *and* flagged
+  `score_degraded`; when Tier-2 is unavailable or its inference fails, the escalated
+  events keep their Tier-1 scores and are likewise flagged. In both cases the score
+  you see is a best-effort fallback rather than a model verdict.
+
+**`score_degraded` is what blocks automated response.** In armed response mode a
+degraded (or duplicate) event is never the subject of a destructive action such as
+an IP block, regardless of how high its score is. Watch it in the LEEF `degraded`
+field and in the API's `score_degraded` response attribute.
+
+`firewall` events select a profile by content: those carrying
+`http_lexical_features` route to `firewall_http`, those carrying `dpt`, `duration`,
+or `fwdPackets` route to `firewall_flow`, and everything else falls back to the
+default profile. When the calibrated flow-isolation policy is active, a
+`firewall_flow` event's score is the bounded classifier probability alone — no
+entity, cross-encoder, novelty, Sigma, or dedup term applies.
 
 ### LEEF Output Fields
 
@@ -138,18 +193,27 @@ LOGFILTER_NOVELTY_ENABLED=true make up
 
 **Configuration:**
 
-```bash
-LOGFILTER_NOVELTY_ENABLED=false        # Enable/disable
-LOGFILTER_NOVELTY_WINDOW_SIZE=10000    # Baseline window size
-LOGFILTER_NOVELTY_MIN_BASELINE=100     # Events before scoring activates
-LOGFILTER_NOVELTY_WARMUP_EVENTS=500    # Events to collect first
-LOGFILTER_NOVELTY_DISTANCE_SCALE=2.0   # Distance → score scaling
+Only the on/off switch is environment-driven; the remaining knobs are literals in
+`config/config.yaml` (`monitoring.novelty`) and require a config edit plus a
+restart:
+
+```dotenv
+LOGFILTER_NOVELTY_ENABLED=false
+```
+
+```yaml
+# config/config.yaml — monitoring.novelty
+window_size: 10000        # baseline window size (events)
+min_baseline: 100        # events required before scoring activates
+warmup_events: 500       # events collected before any score is emitted
+distance_scale: 2.0      # cosine distance → novelty score scaling
 ```
 
 **Tuning for false positives:**
-- Start with weight=0.0, gradually increase to 0.15
+- Start with weight=0.0, gradually increase to 0.15 (`scoring.weights.novelty`)
 - Monitor `ai_novelty_score` in LEEF output (target: < 0.1 for normal events)
 - If false positives are high, decrease `distance_scale` or increase `warmup_events`
+  in `config/config.yaml`
 
 ## Security Defaults
 
@@ -232,7 +296,7 @@ service before crossing trust boundaries.
 
 ## Validation
 
-Run the fast local engineering gate:
+Run the local engineering gate before opening a change:
 
 ```bash
 make verify
@@ -240,9 +304,20 @@ make verify
 
 That runs:
 
-- Ruff linting
-- Unit tests
-- End-to-end pipeline smoke test with heavy ML models mocked
+- Ruff linting (`lint`)
+- The test suite under the coverage gate from `pyproject.toml`
+  (`test-coverage`; `tool.coverage.report.fail_under = 90`, so the run fails if
+  measured branch coverage falls below the gate)
+- End-to-end pipeline smoke test (`smoke-pipeline` →
+  `scripts/smoke_test_pipeline.py`), which runs the normalizer, ONNX tier-1
+  classifier, LEEF enricher, and router logic against a mocked syslog sender —
+  then scores a real event through the **full tiered pipeline using the installed
+  BiEncoder, NER, and CrossEncoder artifacts** (`models/biencoder/final`,
+  `models/ner/final`, `models/cross_encoder/final`).
+
+Because the smoke test loads real transformers, it needs the `models/` artifacts
+installed and takes roughly 10 seconds; the final `scorer_real` section is what
+cannot run without them.
 
 Run a dependency audit separately:
 
@@ -317,22 +392,69 @@ Dashboards are provisioned from `config/grafana/dashboards/`. Access at
 
 ## Model Artifacts
 
-```
-models/
-├── log_classifier.onnx        # Tier-1 XGBoost classifier
-├── scaler.json                # SafeMaxAbsScaler (JSON, not pickle)
-├── model_manifest.json        # SHA-256 hashes + feature counts
-├── ner/final/                 # SecureBERT 2.0 NER (~1.2 GB)
-│   ├── model.onnx
-│   ├── tokenizer/
-│   └── label_map.json
-└── cross_encoder/final/       # SecureBERT 2.0 CrossEncoder (~600 MB)
-    ├── model.onnx
-    └── tokenizer/
+The manifest tracks nine model groups. Regenerate this listing from
+`models/model_manifest.json` rather than trusting a copy:
+
+```bash
+PYTHONPATH=src python scripts/model_manifest.py validate
 ```
 
-The scorer validates `model_manifest.json` on startup. If hashes mismatch,
-it logs a warning (non-fatal) so you can detect corrupted or stale artifacts.
+```text
+models/
+├── model_manifest.json          # SHA-256 hashes + sizes + feature counts, all 9 groups
+├── log_classifier.onnx          # Tier-1 HDFS XGBoost classifier (2255 features)
+├── scaler.json                  # SafeMaxAbsScaler (JSON, not pickle)
+├── feature_names.json           # 2255 HDFS feature names
+├── syslog/                      # Syslog-routed Tier-1 (110 features)
+│   ├── log_classifier_syslog.onnx
+│   ├── scaler_syslog.json
+│   ├── feature_names_syslog.json
+│   ├── log_classifier_syslog.json
+│   └── training_metrics.json    # includes zero_vector_p_malicious
+├── ner/final/                   # SecureBERT 2.0 NER
+│   ├── model.safetensors        # ~571 MB
+│   ├── model.onnx               # ~571 MB
+│   ├── ner_label_map.json
+│   └── tokenizer.json / special_tokens_map.json
+├── biencoder/final/             # SecureBERT 2.0 BiEncoder (dedup + ATT&CK retrieval)
+│   ├── model.safetensors        # ~568 MB
+│   └── tokenizer.json / sentence_bert_config.json
+├── cross_encoder/final/         # SecureBERT 2.0 CrossEncoder (ATT&CK relevance)
+│   ├── model.safetensors        # ~571 MB
+│   └── tokenizer.json / sentence_bert_config.json
+├── tier2/                       # Tier-2 SecureBERT 2.0 classifier (uncertain band)
+│   ├── log_classifier_tier2.onnx
+│   ├── model.safetensors
+│   └── tier2_label_map.json / tier2_threshold_report.json
+├── flow/                        # CICFlowMeter flow head + bot head (33 features each)
+│   ├── flow_classifier.onnx     # general flow head
+│   ├── bot_classifier.onnx      # Bot-vs-rest head
+│   ├── fusion_calibration.json  # attested general/bot fusion policy
+│   ├── bot_calibration.json / calibration.json
+│   ├── bot_scaler.json / scaler.json
+│   ├── bot_feature_names.json / feature_names.json
+│   └── development_feature_hashes.txt / bot_development_feature_hashes.txt
+├── http/                        # WAF/HTTP lexical calibration
+│   └── lexical_calibration.json
+└── endpoint/                    # BETH endpoint IsolationForest novelty (136 features)
+    ├── endpoint_novelty.onnx
+    └── novelty_config.json / novelty_metrics.json
+```
+
+### Manifest integrity validation
+
+The scorer validates `models/model_manifest.json` at startup: for every tracked
+artifact it recomputes the SHA-256 digest, compares it against the stored value,
+and reports each mismatch. A mismatch is **non-fatal by default** — it is logged as
+a warning so corrupted or stale artifacts are detectable without taking the service
+down. Set `LOGFILTER_MODELS_STRICT=1` to make a mismatch fatal instead: model
+loading then raises and the service refuses to start.
+
+Run the standalone check before a deploy:
+
+```bash
+make model-manifest-validate
+```
 
 ## Throughput Benchmark
 
@@ -353,13 +475,25 @@ make benchmark-standalone BENCHMARK_ARGS="--samples 10000 --concurrency 8"
 
 ```text
 config/       Runtime configuration and observability config
-docker/       Service Dockerfiles
+docker/       Per-service Dockerfiles (api, archive, collector, router, nginx) — single-stage
 scripts/      Local validation and smoke-test scripts
 src/          Python package source
-tests/        Unit and security-contract tests
+tests/        Unit, security-contract, and integration tests
 training/     Model training and evaluation entrypoints
 notebooks/    Optional training notebooks and artifact notes
+docs/         Operations and threat-upgrade notes
+models/       Trained artifacts, indexed by models/model_manifest.json
+uv.lock       Resolved dependency graph — all four Python images build from this via `uv export --frozen`
 ```
+
+Python image dependencies are resolved from `uv.lock` at build time (`uv export
+--frozen --only-group <api|archive|collector|router>`); no requirements file is
+consumed by a Dockerfile, and `.dockerignore` keeps everything except `src/`,
+`config/`, `pyproject.toml`, `uv.lock`, and `scripts/download_hf_models.py` out of
+the build context.
+
+`HDFS_v3_TraceBench/` holds the preprocessed dataset and is gitignored — it
+exists only on machines where the dataset was downloaded (~5 GB).
 
 ## Production Notes
 

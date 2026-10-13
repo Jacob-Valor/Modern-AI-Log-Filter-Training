@@ -5,15 +5,15 @@
       "path": "models",
       "artifacts": {
         "log_classifier.onnx": {
-          "sha256": "1b5c8fcb6ae38328",
+          "sha256": "1b5c8fcb6ae38328d8b435fd7c80ca3fde939e72a70961629dedd1f6dd7c0d75",
           "size_mb": 0.11
         },
         "scaler.json": {
-          "sha256": "43307e3f81350ac0",
+          "sha256": "43307e3f81350ac084a14b05c9021f0448e9b426ad124566004e906975322fbb",
           "size_mb": 0.02
         },
         "feature_names.json": {
-          "sha256": "6ed8ddd5149ec7f3",
+          "sha256": "6ed8ddd5149ec7f3104efdb9d5075f7db45dfc3880b655a8c704718b257158a2",
           "size_mb": 0.39
         }
       },
@@ -25,7 +25,7 @@
       "path": "models/syslog",
       "artifacts": {
         "log_classifier_syslog.onnx": {
-          "sha256": "e08a7c3dbdeb9ace",
+          "sha256": "e08a7c3dbdeb9acebe19ae7163ae563fb4ac882493981a80a8b540210a6a5f79",
           "size_mb": 0.09
         }
       },
@@ -35,15 +35,15 @@
       "path": "models/ner/final",
       "artifacts": {
         "config.json": {
-          "sha256": "601634fd6fe5a6c4",
+          "sha256": "601634fd6fe5a6c4d8b9ea464f0c1656c53d8c57dc2532ead783515f3f5c1838",
           "size_mb": 0.0
         },
         "model.safetensors": {
-          "sha256": "bd1032fd77046336",
+          "sha256": "bd1032fd770463366276cae8146b6c4701d6df02504a8ce18a7fa9bd79960ace",
           "size_mb": 570.74
         },
         "model.onnx": {
-          "sha256": "b6baa30317e931ea",
+          "sha256": "b6baa30317e931ea41e915e97bb33bf6bc4b0744c6848ec3cb00f4673f66162b",
           "size_mb": 571.28
         }
       }
@@ -52,11 +52,11 @@
       "path": "models/biencoder/final",
       "artifacts": {
         "config.json": {
-          "sha256": "4adbd75e6de6c4e3",
+          "sha256": "4adbd75e6de6c4e300f6fed991aed6ae109e48e6b084314c9eb81b1b64348855",
           "size_mb": 0.0
         },
         "model.safetensors": {
-          "sha256": "e7b2e8f8802f962c",
+          "sha256": "e7b2e8f8802f962c5e961b27e71f9c9a02376ec2df3c5235b2171dfdb6024e27",
           "size_mb": 568.46
         }
       }
@@ -65,11 +65,11 @@
       "path": "models/cross_encoder/final",
       "artifacts": {
         "config.json": {
-          "sha256": "ba170e000eb70493",
+          "sha256": "ba170e000eb70493e5147b93b4ea246e0bd9d9cdaf36a72ab4249797af0a807a",
           "size_mb": 0.0
         },
         "model.safetensors": {
-          "sha256": "47fa96a8e06dedb9",
+          "sha256": "47fa96a8e06dedb9caf6d9cb81666b5608fac95097c2e31164e68d0b3b19f91d",
           "size_mb": 570.71
         }
       }
@@ -78,7 +78,7 @@
       "path": "models/tier2",
       "artifacts": {
         "log_classifier_tier2.onnx": {
-          "sha256": "77e0308dfbd8d8e3",
+          "sha256": "77e0308dfbd8d8e3e700fca4ecbd7c92dfa2bb6661b16a4529757f7849f5dda8",
           "size_mb": 571.25
         }
       }
@@ -87,63 +87,63 @@
       "path": "models/flow",
       "artifacts": {
         "flow_classifier.onnx": {
-          "sha256": "16ff48e4504b859b",
+          "sha256": "16ff48e4504b859beac19b849934911ab388880bb168986d48b57a7ddaff4c3c",
           "size_mb": 0.04
         },
         "flow_classifier.json": {
-          "sha256": "78bfd19086efc48a",
+          "sha256": "78bfd19086efc48a10653923e454986a89194ab60ff63494b35dd94c3f466311",
           "size_mb": 0.27
         },
         "scaler.json": {
-          "sha256": "54b579909b042372",
+          "sha256": "54b579909b042372645083bd64cd4db7e8709c880e5ebe5280c7b583538ae189",
           "size_mb": 0.0
         },
         "feature_names.json": {
-          "sha256": "b44cbd8eb1ee9685",
+          "sha256": "b44cbd8eb1ee96852cf5c3599ae92825b4fb51fd905c8e87e1cdd99b348cb54d",
           "size_mb": 0.0
         },
         "metrics.json": {
-          "sha256": "e0a9ea83707337b9",
+          "sha256": "e0a9ea83707337b9f621772f7035081d1414b27189e28135e83b98b4e14bf7b8",
           "size_mb": 0.01
         },
         "calibration.json": {
-          "sha256": "f790c5d0211b18b7",
+          "sha256": "f790c5d0211b18b78fd44fb21aaee6d0ab0341ac8c7b399f61e0540558c6bd97",
           "size_mb": 0.0
         },
         "development_feature_hashes.txt": {
-          "sha256": "e6fa1d3d1f5ac433",
+          "sha256": "e6fa1d3d1f5ac433dfd8cc1b6924988a00356222b42192b5ba443bf46afe4d2e",
           "size_mb": 14.15
         },
         "fusion_calibration.json": {
-          "sha256": "2b095e127d8cc80a",
+          "sha256": "2b095e127d8cc80ab1fb32f180f6695a11a9a8f0042565e9394d417f86c4f00f",
           "size_mb": 0.0
         },
         "bot_classifier.onnx": {
-          "sha256": "5c55916f6f6e4dcf",
+          "sha256": "5c55916f6f6e4dcfc90062bd891b9026f5cce1189175db48b300e89c3c6bfc88",
           "size_mb": 0.29
         },
         "bot_classifier.json": {
-          "sha256": "cb984205ca8bf414",
+          "sha256": "cb984205ca8bf41439142458f92671298c1454a86ad42629dfc6c4d99cf9633d",
           "size_mb": 0.66
         },
         "bot_scaler.json": {
-          "sha256": "39c0dedd48035712",
+          "sha256": "39c0dedd48035712bb58a1b1d62db25624305bb8d658488df8a6398bfac076b6",
           "size_mb": 0.0
         },
         "bot_feature_names.json": {
-          "sha256": "b44cbd8eb1ee9685",
+          "sha256": "b44cbd8eb1ee96852cf5c3599ae92825b4fb51fd905c8e87e1cdd99b348cb54d",
           "size_mb": 0.0
         },
         "bot_metrics.json": {
-          "sha256": "9bb73a50a6d2932d",
+          "sha256": "9bb73a50a6d2932de8742871ba81901ac63965587656077f2de708ca816e4565",
           "size_mb": 0.0
         },
         "bot_calibration.json": {
-          "sha256": "cdfa6d7ad988959f",
+          "sha256": "cdfa6d7ad988959ffa39148e26e7d5be926c371e9b6fa84d6d8a96b3a9556419",
           "size_mb": 0.0
         },
         "bot_development_feature_hashes.txt": {
-          "sha256": "c4f5d045df47e4b1",
+          "sha256": "c4f5d045df47e4b10e8730386c39de01191a80bb67429b91da4a0c187131a4d9",
           "size_mb": 8.15
         }
       },
@@ -160,7 +160,7 @@
       "path": "models/http",
       "artifacts": {
         "lexical_calibration.json": {
-          "sha256": "9f1c3803783bec50",
+          "sha256": "9f1c3803783bec50f8a53c8da86170cc0025b1690a6fdfbaefaefb33db4c9ecd",
           "size_mb": 0.0
         }
       }
@@ -169,15 +169,15 @@
       "path": "models/endpoint",
       "artifacts": {
         "endpoint_novelty.onnx": {
-          "sha256": "7d1c45b49ff4b4be",
+          "sha256": "7d1c45b49ff4b4bee83266017248016a86cf13a61bb768754312d092cd6ddc3a",
           "size_mb": 5.71
         },
         "novelty_config.json": {
-          "sha256": "592955048a221dac",
+          "sha256": "592955048a221dacf09eaf7bec66cca148bcc6f949ee53ecc3c7e23010cad582",
           "size_mb": 0.0
         },
         "novelty_metrics.json": {
-          "sha256": "49f4fc17e335f0b5",
+          "sha256": "49f4fc17e335f0b55c03dbf27ad0382a905e35fb9d83eee243397f6bb88627b5",
           "size_mb": 0.0
         }
       },

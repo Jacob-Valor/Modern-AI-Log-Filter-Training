@@ -97,3 +97,24 @@ def test_cli_help_imports_cleanly() -> None:
 def test_build_report_requires_scores() -> None:
     with pytest.raises(ValueError, match="score"):
         eval_prod.build_report([eval_prod.LabeledLog(raw="x", label=1, score=None)])
+
+
+def test_threshold_ties_resolve_to_the_highest_cutoff() -> None:
+    """Flat F1 regions must not collapse onto the lowest (flag-everything) cutoff."""
+    rows = [
+        eval_prod.LabeledLog(raw="a", label=1, score=0.95),
+        eval_prod.LabeledLog(raw="b", label=1, score=0.85),
+        eval_prod.LabeledLog(raw="c", label=0, score=0.40),
+        eval_prod.LabeledLog(raw="d", label=0, score=0.30),
+        eval_prod.LabeledLog(raw="e", label=0, score=0.05),
+    ]
+
+    report = eval_prod.build_report(rows, threshold=0.5, min_recall=1.0)
+
+    summary = report["threshold_summary"]
+    assert summary["tie_break"] == "highest_threshold"
+    tied = [row for row in report["threshold_sweep"] if row["f1"] == 1.0]
+    assert len(tied) > 1, "fixture must contain a flat F1 region to exercise the tie-break"
+    assert summary["best_f1"]["threshold"] == max(row["threshold"] for row in tied)
+    assert summary["best_f1"]["threshold"] == 0.85
+    assert summary["best_precision_at_min_recall"]["threshold"] == 0.85

@@ -37,6 +37,9 @@ services:
       KAFKA_LOG_RETENTION_HOURS: 168
       KAFKA_LOG_SEGMENT_BYTES: 1073741824
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    networks:
+      - backend
+
     volumes:
       - kafka-data-2:/var/lib/kafka/data
     healthcheck:
@@ -74,6 +77,8 @@ services:
       timeout: 10s
       retries: 5
     restart: unless-stopped
+    networks:
+      - backend
 
   kafka-init:
     depends_on:
@@ -97,6 +102,9 @@ services:
       - cluster.name=logfilter-cluster
       - discovery.seed_hosts=elasticsearch,elasticsearch-2,elasticsearch-3
       - cluster.initial_master_nodes=elasticsearch,elasticsearch-2,elasticsearch-3
+      # Explicit multi-node override: the base file pins discovery.type=single-node,
+      # which makes ES ignore discovery.seed_hosts and form a 1-node cluster.
+      - discovery.type=multi-node
       - xpack.security.enabled=true
       - ELASTIC_PASSWORD=${ES_PASSWORD:?ES_PASSWORD must be set in .env}
       - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
@@ -109,11 +117,14 @@ services:
       - cluster.name=logfilter-cluster
       - discovery.seed_hosts=elasticsearch,elasticsearch-2,elasticsearch-3
       - cluster.initial_master_nodes=elasticsearch,elasticsearch-2,elasticsearch-3
+      - discovery.type=multi-node
       - xpack.security.enabled=true
       - ELASTIC_PASSWORD=${ES_PASSWORD:?ES_PASSWORD must be set in .env}
       - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
     volumes:
       - es-data-2:/usr/share/elasticsearch/data
+    networks:
+      - backend
     ulimits:
       memlock:
         soft: -1
@@ -135,6 +146,7 @@ services:
       - cluster.name=logfilter-cluster
       - discovery.seed_hosts=elasticsearch,elasticsearch-2,elasticsearch-3
       - cluster.initial_master_nodes=elasticsearch,elasticsearch-2,elasticsearch-3
+      - discovery.type=multi-node
       - xpack.security.enabled=true
       - ELASTIC_PASSWORD=${ES_PASSWORD:?ES_PASSWORD must be set in .env}
       - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
@@ -152,6 +164,8 @@ services:
       timeout: 10s
       retries: 5
     restart: unless-stopped
+    networks:
+      - backend
 
   logfilter-api:
     environment:
@@ -161,6 +175,9 @@ services:
       LOGFILTER_FLOW_ENABLED: "true"
       LOGFILTER_ENDPOINT_NOVELTY_ENABLED: "true"
       LOGFILTER_BOT_FLOW_ENABLED: "false"
+      # The API provisions the archive index too (api/app.py reads the same key), so
+      # it must agree with the archive service. See the archive block below.
+      LOGFILTER_ES_INDEX_REPLICAS: "2"
       LOGFILTER_RESPONSE_MODE: "${LOGFILTER_RESPONSE_MODE:-dry_run}"
 
   collector:
@@ -171,6 +188,10 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
       ES_HOST: http://elasticsearch:9200
+      # The base stack pins index_replicas=0, which is correct for a 1-node dev
+      # cluster but means zero copies. This overlay is what actually forms a 3-node
+      # cluster, so the raw-log archive must hold copies on the other nodes.
+      LOGFILTER_ES_INDEX_REPLICAS: "2"
 
   router:
     environment:

@@ -6,7 +6,7 @@ This document explains the design decisions behind the tier-2 transformer classi
 
 ### Failure Modes of Tier-1 Alone
 
-The tier-1 classifier consumes bag-of-events count vectors (one integer per event template, 2,155 dimensions total). This representation is fast and effective for HDFS TraceBench, but has fundamental limitations:
+The tier-1 classifier consumes bag-of-events count vectors (one integer per event template, 2,255 dimensions total). This representation is fast and effective for HDFS TraceBench, but has fundamental limitations:
 
 1. **Template brittleness**. Tier-1 sees event identifiers, not text. Any novel log line that fails to match the existing template vocabulary becomes invisible or is collapsed to a generic "unmatched" bucket.
 
@@ -24,7 +24,7 @@ We evaluated four candidate transformers for the tier-2 role. The selection crit
 
 | Model | Params | Context | License | Pretraining Domain | Last Updated | Why pick / Why not pick |
 |-------|--------|---------|---------|-------------------|--------------|------------------------|
-| [cisco-ai/SecureBERT2.0-base](https://huggingface.co/cisco-ai/SecureBERT2.0-base) | 149.7M | 1024 | Apache-2.0 | Security/CTI threat reports + codebases | 2025-10-30 | **PRIMARY**: Domain match (security logs) + ModernBERT speed. Built on ModernBERT architecture with 8K native context, but distilled to 1024 for efficiency. Pretraining corpus includes threat intel, CVE descriptions, and security code. |
+| [cisco-ai/SecureBERT2.0-base](https://huggingface.co/cisco-ai/SecureBERT2.0-base) | 149.7M | 8192 | Apache-2.0 | Security/CTI threat reports + codebases | 2025-10-30 | **PRIMARY**: Domain match (security logs) + ModernBERT speed. Pretraining corpus includes threat intel, CVE descriptions, and security code. **Context caveat**: the published card lists 1024, but the shipped artifact's `config.json` records `max_position_embeddings: 8192`; the 1024 figure used by the original run was an inference/training *setting* (`training_args.max_length`), not a model limit. See "Inference Length" below. |
 | [answerdotai/ModernBERT-base](https://huggingface.co/answerdotai/ModernBERT-base) | 149.7M | 8192 | Apache-2.0 | 2T tokens English+code | 2025-01-15 | **FALLBACK**: Longest context (8K), ModernBERT architecture, no security-specific pretraining. Use when tier-2 must ingest very long windows or when SecureBERT2.0 proves unstable. [Model docs](https://huggingface.co/docs/transformers/main/en/model_doc/modernbert) |
 | [microsoft/deberta-v3-base](https://huggingface.co/microsoft/deberta-v3-base) | ~184M | 512 | MIT | BookCorpus+Wikipedia | 2022-09-22 | **NOT picked**: Heavier than alternatives, short 512-token context, older architecture. Disqualified because the text-window builder can emit 256 lines; with 12 tokens per line average, we approach the context limit rapidly. |
 | [distilbert/distilbert-base-uncased](https://huggingface.co/distilbert/distilbert-base-uncased) | 67.0M | 512 | Apache-2.0 | BookCorpus+Wikipedia | 2024-05-06 | **SPEED FALLBACK**: Use if latency matters more than accuracy. 40% fewer parameters than base BERT, but 512 context and no domain pretraining limits effectiveness on security logs. |
@@ -37,7 +37,24 @@ SecureBERT2.0-base is the primary tier-2 model for three reasons:
 
 2. **Architectural currency**. Built on ModernBERT (2025), not BERT (2018). The attention implementation and positional encoding are more efficient for sequence classification.
 
-3. **Operational fit**. 149M parameters and 1024 context is a balance between DeBERTa-v3 (184M) and DistilBERT (67M). On Kaggle T4 GPU, a single forward pass under 50ms is achievable, which fits the cascade latency budget.
+3. **Operational fit**. 149M parameters and an 8192-token positional table balance against DeBERTa-v3 (184M, 512 ctx) and DistilBERT (67M, 512 ctx). On Kaggle T4 GPU a forward pass under 50ms is achievable, which fits the cascade latency budget.
+
+### Inference Length — The Most Consequential Setting
+
+`max_length` is not a detail. On HDFS TraceBench, failure windows run to ~2100+ subword tokens while the p50 is ~160. Measured on the held-out test split with the shipped 1024-token artifact:
+
+| Bucket | Windows | Recall | F1 |
+|---|---|---|---|
+| Fits within 1024 tokens | 564 | **1.0000** | **1.0000** |
+| Truncated at 1024 | 636 | **0.8059** | 0.8916 |
+
+Overall recall decomposes exactly as `0.9074 × 0.8059 + 0.0926 × 1.0 = 0.824`. At a 1024 cap, **~90% of failure windows are truncated** and the discriminative exception lines — which sit at the *end* of the window, median token position 2113 — are cut away. No backbone change can recover tokens that were never fed to the model, so recall is capped near 0.82 regardless of architecture.
+
+At `max_length = 4096`, fewer than 1% of failure windows are truncated.
+
+**What to do:** the committed `models/tier2/` artifact is still the 1024-trained one, so it will keep scoring ~0.82 until regenerated. Retrain via `notebooks/kaggle_train_transformer_READY.ipynb`, which now trains at `--max-length 4096` and packages `tier2_config.json` (recording the length) alongside the ONNX graph. `Tier2Classifier._load_export_metadata()` reads that file, so serving follows training automatically instead of falling back to a hardcoded default — which is what let the original 1024 truncation go unnoticed.
+
+Reordering the window builder so the exception lines come first does **not** work: it recovers only 23 of 1353 truncated signal-bearing windows (1.7%). The signal genuinely lies past the cut.
 
 The SecureBERT2.0 paper ([arXiv:2510.00240](https://arxiv.org/abs/2510.00240)) reports F1=0.89 on the log anomaly detection benchmark, competitive with domain-specific models trained from scratch.
 
@@ -46,8 +63,8 @@ The SecureBERT2.0 paper ([arXiv:2510.00240](https://arxiv.org/abs/2510.00240)) r
 | Condition | Fallback Model | Trigger |
 |-----------|---------------|---------|
 | SecureBERT2.0 unavailable or export fails | ModernBERT-base | `--model-id answerdotai/ModernBERT-base` |
-| Latency SLA < 20ms per inference | DistilBERT-base | `--model-id distilbert/distilbert-base-uncased --max-length 256` |
-| Context > 1024 tokens required | ModernBERT-base | Native 8K context handles long traces without truncation |
+| Latency SLA < 20ms per inference | DistilBERT-base | `--model-id distilbert/distilbert-base-uncased --max-length 256`. **Caveat**: its 512-token window is worse than the 1024 this pipeline already suffers from — at 512, ~99.9% of failure windows are truncated. Treat this as a last resort, not a like-for-like speedup. |
+| Context > 4096 tokens required | ModernBERT-base | Native 8K context handles long traces without truncation. |
 
 The fallback selection is exposed via CLI flags in `training/train_transformer.py`. The notebook defaults to SecureBERT2.0-base.
 
@@ -70,7 +87,7 @@ Step-by-step:
 
 3. **Cap and truncate**. Per-task emissions are capped at 256 total lines (default) with per-event repeats clipped at 16. If a task exceeds the cap, events are ranked by count and the highest-count templates are retained preferentially.
 
-4. **Join and tokenize**. Lines are joined with newlines into a single string per task. The tokenizer maps this to input IDs and attention masks, truncating or padding to `max_length` (default 1024).
+4. **Join and tokenize**. Lines are joined with newlines into a single string per task. The tokenizer maps this to input IDs and attention masks, truncating or padding to `max_length`. The notebook trains at **4096**; 1024 truncates ~90% of failure windows (see "Inference Length").
 
 5. **HF Dataset**. The result is a HuggingFace `Dataset` with `input_ids`, `attention_mask`, and `labels` columns, suitable for `transformers.Trainer`.
 
@@ -92,7 +109,7 @@ syslog event ──► tier-1 (XGBoost / ONNX, ms)
 
 ### Uncertainty Band Selection
 
-The band 0.10-0.90 is intentionally conservative. On the HDFS TraceBench test set, tier-1 achieves precision=1.0, recall=1.0, F1=1.0, ROC-AUC=1.0. This is not because the model is perfect, but because the dataset is separable: failure traces emit specific exception templates that normal traces never do. The tier-1 uncertainty band is expected to be nearly empty on this dataset.
+The band 0.10-0.90 is intentionally conservative. On the HDFS TraceBench test set, tier-1 achieves precision=0.9997, recall=0.9997, F1=0.9997, ROC-AUC=1.0 (source: `models/training_metrics.json`). This is not because the model is perfect, but because the dataset is separable: failure traces emit specific exception templates that normal traces never do. The tier-1 uncertainty band is expected to be nearly empty on this dataset.
 
 In production, with noisier logs and novel templates, the uncertainty band will populate. The 0.10-0.90 range should be tuned based on observed false-positive and false-negative rates. A narrower band (0.30-0.70) reduces tier-2 invocations but risks missing edge cases. A wider band (0.05-0.95) catches more edge cases but increases latency and compute cost.
 
@@ -109,7 +126,9 @@ Both exports use ONNX Runtime for consistent inference. The API decides tier-2 i
 
 ### Dataset-Specific Tier-1 Metrics
 
-The reported tier-1 metrics (precision=1.0, recall=1.0, F1=1.0, ROC-AUC=1.0 on 60K test samples: 50K normal + 10K failure) are an artefact of HDFS TraceBench, not a benchmark of the system. Failure traces in this dataset emit exception templates (E.g., "java.io.IOException: Connection reset by peer") that never appear in normal traces. The bag-of-events representation therefore achieves perfect separability.
+The recorded tier-1 metrics (`models/training_metrics.json`) are precision=0.9997, recall=0.9997, F1=0.9997, ROC-AUC=1.0 on the test split. They are an artefact of HDFS TraceBench, not a benchmark of the system: the split is derived from 226,767 normal and 29,817 failure traces, and failure traces emit exception templates (e.g. "java.io.IOException: Connection reset by peer") that never appear in normal traces. The bag-of-events representation therefore achieves near-perfect separability.
+
+> An earlier revision of this document reported "precision=1.0, recall=1.0, F1=1.0 on 60K test samples: 50K normal + 10K failure". Those figures were wrong twice over: they did not match `models/training_metrics.json`, and the "50K + 10K" figures are the **training subsample**, not the test split. Always source metrics from the committed artifact rather than restating them here.
 
 This is not expected to hold in production. Real-world logs contain:
 
@@ -144,10 +163,46 @@ PYTHONPATH=src python scripts/evaluate_tier2_thresholds.py \
 
 Use the report to choose the operating point:
 
-- **Alert-fatigue posture:** prefer the `best_f1` candidate or a higher threshold when false
-  positives are operationally expensive.
-- **Missed-incident posture:** prefer `best_precision_at_min_recall` with an explicit recall
-  target when false negatives are more expensive.
+- **Alert-fatigue posture:** prefer a higher threshold when false positives are
+  operationally expensive.
+- **Missed-incident posture:** prefer a lower threshold, with an explicit recall
+  target, when false negatives are more expensive.
+
+### Current Report
+
+The committed report (`models/tier2/tier2_threshold_report.json`) was regenerated
+from **841 validation windows containing 240 failures**, comfortably above the
+script's 200-row / 200-failure reliability floor
+(`recommendation_reliable: true`). It is swept on the **validation** split; the
+test split is never swept, because a threshold chosen by maximising over test rows
+is a selection maximand rather than a generalisation estimate.
+
+| Threshold | Precision | Recall | F1 | FP | FN | Posture |
+|---|---|---|---|---|---|---|
+| 0.05 | 0.8681 | 0.9875 | 0.9240 | 36 | 3 | flag almost everything |
+| 0.25 | 0.8722 | 0.9667 | 0.9170 | 34 | 8 | missed-incident posture |
+| **0.45** | **0.8992** | **0.9292** | 0.9139 | 25 | 17 | highest precision meeting the 0.90 recall target |
+| **0.50+** | **0.9950** | **0.8375** | 0.9095 | **1** | 39 | **alert-fatigue posture** |
+
+Two things stand out:
+
+1. **`best_f1` still collapses onto the lowest cutoff (0.05) — the flag-everything
+   point.** That is not a bug; F1 rewards recall on an 88:12 normal/failure skew, so
+   the sweep will always prefer alerting more. Do not adopt `best_f1` blindly.
+2. **Precision jumps from 0.8992 to 0.9950 between 0.45 and 0.50**, and false
+   positives fall from 25 to 1. If alert fatigue is the binding constraint, 0.50 is
+   the far better operating point — it buys back 24 false positives for 22 additional
+   misses.
+
+The flat recall of 0.8375 from 0.50 upward is the truncation ceiling from
+"Inference Length" showing up here too: raising the Tier-2 threshold cannot recover
+the failure windows whose signal was cut off before the model ever saw it.
+
+> **Sample-size caveat.** An earlier committed report was generated from a 3-sample
+> split containing 1 failure, in which every threshold row read 1.0. That report has
+> been replaced. If you regenerate with small `--sample-normal` / `--sample-failure`
+> values, check `recommendation_reliable` in the output before trusting any field —
+> the script sets it false and prints a warning below its own floor.
 
 Do not change the default `0.10`-`0.90` cascade band or routing thresholds until this report has
 been reviewed against production-like logs. The Kaggle HDFS split is useful for reproducibility,

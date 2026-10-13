@@ -1,8 +1,5 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-05-25
-**Commit:** 51bc95f
-**Branch:** dev
 
 ## OVERVIEW
 
@@ -27,18 +24,21 @@ Core stack: Python 3.10+, FastAPI, Kafka, Elasticsearch, XGBoost, Transformers (
 │   ├── kafka_router.py     # Kafka-to-Kafka routing
 │   └── config.py           # YAML config loader with ${VAR:default} resolution
 ├── training/               # Training scripts for XGBoost and transformers
-├── tests/                  # pytest suite (coverage target: 90%)
+├── tests/                  # pytest suite (unit, security-contract, integration)
 ├── notebooks/              # Kaggle training notebooks
 ├── scripts/                # Utility scripts (smoke tests, verification)
 ├── config/                 # Runtime YAML configs
-├── models/                 # Output directory for trained artifacts
-├── HDFS_v3_TraceBench/     # Preprocessed HDFS dataset
+├── docs/                   # Operations and threat-upgrade notes
+├── models/                 # Trained artifacts, indexed by models/model_manifest.json
+├── docker/                 # Single-stage Dockerfiles (api, archive, collector, router, nginx)
 ├── docker-compose.yml      # Full stack (API, Kafka, ES, Grafana)
-├── Dockerfile*             # Multi-stage builds
+├── uv.lock                 # Resolved dependency graph; all Python images build from it
 ├── Makefile                # Dev/test/train automation
-├── pyproject.toml          # Packaging, ruff, pytest, coverage config
-└── requirements-api.txt    # API Docker image deps (torch CPU + transformers)
+└── pyproject.toml          # Packaging, ruff, pytest, coverage config
 ```
+
+`HDFS_v3_TraceBench/` (preprocessed dataset, ~5 GB) is gitignored and present only
+on machines where it was downloaded.
 
 ## WHERE TO LOOK
 
@@ -53,7 +53,7 @@ Core stack: Python 3.10+, FastAPI, Kafka, Elasticsearch, XGBoost, Transformers (
 | Train tier-1 | `make train` or `training/train.py` | Outputs ONNX + JSON to `models/` |
 | Train tier-2 | `training/train_transformer.py` | Fine-tunes SecureBERT2.0-base |
 | Add Kafka topic | `src/logfilter/kafka_router.py` | Uses `kafka-python` with manual commits |
-| Rebuild Docker | `make build` | Multi-stage Dockerfile for production |
+| Rebuild Docker | `make build` | Single-stage Dockerfiles under `docker/`, deps resolved from `uv.lock` |
 | Run smoke test | `make smoke-pipeline` | End-to-end via `scripts/smoke_test_pipeline.py` |
 
 ## CONVENTIONS
@@ -65,7 +65,7 @@ Core stack: Python 3.10+, FastAPI, Kafka, Elasticsearch, XGBoost, Transformers (
 - **Config**: YAML with `${ENV_VAR:default}` placeholder resolution via `config.py`
 - **Security env vars**: Use `${VAR:?error message}` for required tokens in config.yaml, not `${VAR:}` (empty default), to prevent fail-open auth paths
 - **Models**: ONNX Runtime for inference; native format kept for retraining
-- **Security**: API tokens via `X-API-Token` / `X-Admin-Token` headers; no default secrets
+- **Security**: API tokens via `X-API-Token` (scoring) and `X-Metrics-Token` (metrics); no default secrets and no admin endpoints
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -74,7 +74,7 @@ Core stack: Python 3.10+, FastAPI, Kafka, Elasticsearch, XGBoost, Transformers (
 - **Never** commit `.env` — only `.env.example` with placeholder values
 - **Never** skip ONNX export — every trained model must export to ONNX for production
 - **Never** use unbounded Kafka consumer loops — always implement graceful shutdown
-- **Coverage must stay ≥90%** — `tool.coverage.report.fail_under = 90` in pyproject.toml
+- **Coverage gate is 90%** — `tool.coverage.report.fail_under = 90` in pyproject.toml; `make test-coverage` fails when measured coverage falls below it
 
 ## UNIQUE STYLES
 

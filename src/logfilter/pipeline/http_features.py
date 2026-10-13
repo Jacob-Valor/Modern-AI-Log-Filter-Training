@@ -32,15 +32,34 @@ HTTP_FEATURE_NAMES = (
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 _MALFORMED_PERCENT_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _SQL_KEYWORD_RE = re.compile(
-    r"\b(?:union\s+(?:all\s+)?select|select\s+.+?\s+from|insert\s+into|"
-    r"update\s+\w+\s+set|delete\s+from|drop\s+(?:table|database)|"
-    r"information_schema|sleep\s*\(|benchmark\s*\()",
+    # The ``select ... from`` branch is written so that no two adjacent quantifiers
+    # can match the same character. An unbounded ``\s+.+?\s+`` is catastrophically
+    # backtracking on attacker-controlled text (measured 2.7 s at 1.6 KB, growing
+    # ~n**2.5, because every start position re-scanned a long whitespace run while
+    # backtracking for "from"). Merely bounding the wildcard is NOT enough: the
+    # adjacent ``\s+`` quantifiers still overlapped and the same blowup remained
+    # (measured 160 s at 20 KB). The fix is to make each quantifier's character class
+    # disjoint from its neighbour's - ``\s`` here never touches ``[\w,()*'"=-]`` -
+    # and to bound every repetition, so each start position costs a fixed ~1 k ops.
+    r"\b(?:union\s{1,32}(?:all\s{1,32})?select"
+    r"|select\s{1,256}[\w,()*'\"=-]{0,512}\s{1,256}from"
+    r"|insert\s{1,32}into"
+    r"|update\s{1,32}\w{1,64}\s{1,32}set"
+    r"|delete\s{1,32}from"
+    r"|drop\s{1,32}(?:table|database)"
+    r"|information_schema|sleep\s{0,8}\(|benchmark\s{0,8}\()",
     re.IGNORECASE,
 )
 _SQL_COMMENT_RE = re.compile(r"(?:--(?:\s|$)|/\*|\*/|#[^&\s]*)")
 _SQL_TAUTOLOGY_RE = re.compile(
-    r"(?:['\"]?\s*(?:or|and)\s+['\"]?(?:\d+|[a-z]+)['\"]?\s*=\s*"
-    r"['\"]?(?:\d+|[a-z]+)|\bor\s+1\s*=\s*1\b)",
+    # Same disjoint-class/bounded-quantifier rule as _SQL_KEYWORD_RE: adjacent optional
+    # quantifiers that can both match whitespace made the original cost ~6.9 s on a
+    # 32 KB whitespace run. Every ``\s*`` becomes ``\s{0,16}`` and every ``\s+`` becomes
+    # ``\s{1,16}`` so the original match semantics are preserved exactly - in particular
+    # zero-or-one whitespace around ``=``, which canonical ``or 1=1`` forms depend on.
+    r"(?:['\"]?\s{0,16}(?:or|and)\s{1,16}['\"]?(?:\d{1,32}|[a-z]{1,32})"
+    r"['\"]?\s{0,16}=\s{0,16}['\"]?(?:\d{1,32}|[a-z]{1,32})"
+    r"|\bor\s{1,16}1\s{1,16}=\s{1,16}1\b)",
     re.IGNORECASE,
 )
 _XSS_TAG_RE = re.compile(r"<\s*/?\s*(?:script|svg|iframe|img|object|embed|style)\b", re.I)
@@ -51,6 +70,12 @@ _SENSITIVE_PATH_RE = re.compile(
     r"(?:/etc/(?:passwd|shadow)|/proc/self|boot\.ini|win\.ini|windows/system32)", re.I
 )
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_+/=-]+")
+
+# Cap on the text handed to the pattern scanners. ``percent_decode_layers`` returns
+# up to five progressively decoded copies of the input, so the joined string can
+# reach several hundred KB even though the raw URI/body are already truncated.
+# Truncating here bounds the cost of every regex below regardless of input size.
+_SCAN_LIMIT = 32768
 
 
 def _body_text(body: Any) -> str:
@@ -104,7 +129,7 @@ def extract_http_features(uri: str, body: Any = "") -> dict[str, float]:
     raw_body = _body_text(body)[:32768]
     combined = f"{raw_uri}\n{raw_body}"
     layers = percent_decode_layers(combined)
-    decoded = "\n".join(layers).lower()
+    decoded = "\n".join(layers).lower()[:_SCAN_LIMIT]
     tokens = _TOKEN_RE.findall(decoded)
     query = urllib.parse.urlsplit(raw_uri).query
     features = {

@@ -95,7 +95,11 @@ class NoveltyDetector:
         self._lock = threading.Lock()
         self._baseline: deque[np.ndarray] = deque(maxlen=window_size)
         self._centroid: np.ndarray | None = None
+        self._centroid_sum: np.ndarray | None = None
         self._centroid_dirty = True
+        # Number of centroid derivations performed; exposed for regression
+        # tests asserting the hot path never re-stacks the window.
+        self._centroid_recompute_count = 0
         self._event_count = 0
         self._total_novelty_score = 0.0
         self._score_count = 0
@@ -109,7 +113,16 @@ class NoveltyDetector:
         event in its own baseline.
         """
         with self._lock:
-            self._baseline.append(embedding.copy())
+            # Maintain a running element-wise sum so deriving the centroid is
+            # O(dim) per event instead of an O(window_size x dim) re-stack.
+            stored = np.array(embedding, dtype=np.float64, copy=True)
+            if len(self._baseline) == self.window_size and self._centroid_sum is not None:
+                self._centroid_sum -= self._baseline[0]
+            if self._centroid_sum is None:
+                self._centroid_sum = stored.copy()
+            else:
+                self._centroid_sum += stored
+            self._baseline.append(stored)
             self._centroid_dirty = True
             self._event_count += 1
 
@@ -139,7 +152,7 @@ class NoveltyDetector:
                     baseline_size=len(self._baseline),
                 )
 
-            # Lazy centroid recomputation
+            # Lazy centroid derivation from the running sum (O(dim)).
             if self._centroid_dirty:
                 self._recompute_centroid_locked()
 
@@ -177,6 +190,7 @@ class NoveltyDetector:
                 "score_count": self._score_count,
                 "avg_novelty_score": round(avg_score, 4),
                 "centroid_dirty": self._centroid_dirty,
+                "centroid_recompute_count": self._centroid_recompute_count,
             }
 
     def reset(self) -> None:
@@ -184,7 +198,9 @@ class NoveltyDetector:
         with self._lock:
             self._baseline.clear()
             self._centroid = None
+            self._centroid_sum = None
             self._centroid_dirty = True
+            self._centroid_recompute_count = 0
             self._event_count = 0
             self._total_novelty_score = 0.0
             self._score_count = 0
@@ -193,17 +209,18 @@ class NoveltyDetector:
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _recompute_centroid(self) -> None:
-        """Recompute the centroid from the current baseline window.
+        """Derive the centroid from the running element-wise sum.
 
-        Must be called while ``self._lock`` is held.
+        O(dim) work; the window is never re-stacked. Must be called while
+        ``self._lock`` is held.
         """
-        if not self._baseline:
+        self._centroid_recompute_count += 1
+        if not self._baseline or self._centroid_sum is None:
             self._centroid = None
+            self._centroid_dirty = False
             return
 
-        # Stack embeddings and compute mean
-        embeddings = np.stack(list(self._baseline))
-        centroid = np.mean(embeddings, axis=0)
+        centroid = self._centroid_sum / len(self._baseline)
 
         # L2-normalize the centroid
         norm = np.linalg.norm(centroid)

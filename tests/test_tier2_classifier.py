@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -232,36 +234,97 @@ def test_tier2_load_label_map_with_inverted_labels(tmp_path) -> None:
     assert classifier._failure_label_index == 0
 
 
-def test_tier2_predict_onnx_returns_neutral_when_tokenizer_missing(tmp_path) -> None:
+def test_tier2_predict_onnx_raises_when_tokenizer_missing(tmp_path) -> None:
+    """A half-initialised backend must raise, not return a fabricated 0.5."""
     classifier = Tier2Classifier(model_dir=tmp_path)
     classifier._session = FakeONNXSession()
     classifier._tokenizer = None
-    result = classifier._predict_onnx(["log line"])
-    np.testing.assert_allclose(result, np.array([0.5], dtype=np.float32))
+    with pytest.raises(RuntimeError, match="not fully initialised"):
+        classifier._predict_onnx(["log line"])
 
 
-def test_tier2_predict_handles_session_run_exception(tmp_path) -> None:
+def test_tier2_predict_onnx_raises_when_graph_requires_missing_input(tmp_path) -> None:
+    """A graph-required input the tokenizer omits must raise, not be silently dropped."""
     (tmp_path / "tokenizer.json").write_text("{}")
     (tmp_path / "log_classifier_tier2.onnx").write_bytes(b"fake")
     (tmp_path / "tier2_label_map.json").write_text('{"0": "normal", "1": "failure"}')
 
-    class BrokenSession:
-        def get_inputs(self) -> list:
-            return [FakeInput("input_ids")]
-
-        def run(self, output_names, feed):  # noqa: ANN001
-            del output_names, feed
-            raise RuntimeError("ORT crashed")
-
     classifier = Tier2Classifier(model_dir=tmp_path)
     classifier._tokenizer = FakeTokenizer()
-    classifier._session = BrokenSession()
-    classifier._onnx_input_names = ["input_ids"]
+    classifier._session = FakeONNXSession()
+    # The tokenizer only emits input_ids; the graph also demands token_type_ids.
+    classifier._onnx_input_names = ["input_ids", "token_type_ids"]
     classifier._load_attempted = True
 
-    result = classifier.predict_proba(["log line"])
+    with pytest.raises(RuntimeError, match="token_type_ids"):
+        classifier._predict_onnx(["log line"])
 
-    np.testing.assert_allclose(result, np.array([0.5], dtype=np.float32))
+
+def test_tier2_max_length_adopted_from_artifact_metadata(tmp_path) -> None:
+    """Inference length is read from the export metadata the trainer writes."""
+    (tmp_path / "tier2_config.json").write_text('{"inference_max_length": 4096}')
+    classifier = Tier2Classifier(model_dir=tmp_path)
+
+    classifier._load_export_metadata()
+
+    assert classifier._max_length() == 4096
+
+
+def test_tier2_max_length_ignores_unusable_metadata(tmp_path) -> None:
+    """Missing, malformed, or non-positive metadata must not change the fallback."""
+    fallback = Tier2Classifier(model_dir=tmp_path)._max_length()
+
+    assert fallback > 0, "there must be a positive fallback length"
+
+    for payload in (
+        "{}",
+        '{"inference_max_length": 0}',
+        '{"inference_max_length": -8}',
+        '{"inference_max_length": "not-a-number"}',
+        "not json at all",
+    ):
+        (tmp_path / "tier2_config.json").write_text(payload)
+        classifier = Tier2Classifier(model_dir=tmp_path)
+        classifier._load_export_metadata()
+        assert classifier._max_length() == fallback, payload
+
+
+def test_tier2_shipped_artifact_declares_its_inference_length() -> None:
+    """The committed models/tier2 artifact must carry export metadata.
+
+    Nothing used to write tier2_config.json, so every deployment silently fell
+    back to the hardcoded default regardless of the length the model was trained
+    at. Requiring the file makes a missing export a test failure instead of a
+    silent truncation regression. Regenerate the artifact after changing
+    --max-length; see notebooks/MODEL_SELECTION.md.
+    """
+    artifact = Path(__file__).resolve().parents[1] / "models" / "tier2" / "tier2_config.json"
+    assert artifact.exists(), (
+        "models/tier2/tier2_config.json is missing — retrain/export tier-2 so the "
+        "artifact records the inference length it was trained at"
+    )
+
+    declared = json.loads(artifact.read_text())["inference_max_length"]
+    assert declared > 0
+
+    # The recorded length must fit inside the model's positional table, otherwise
+    # ONNX inference fails outright at runtime.
+    config = json.loads((artifact.parent / "config.json").read_text())
+    assert declared <= config["max_position_embeddings"]
+
+
+def test_tier2_predict_raises_on_session_run_exception(tmp_path) -> None:
+    """A broken inference backend must not yield a plausible-looking 0.5.
+
+    Returning a fabricated neutral probability was indistinguishable from a real
+    prediction: the scorer recorded it as ``classifier_score`` and set
+    ``tier2_used`` without setting ``score_degraded``, so an event no model ever
+    classified could reach the automated-response enforcement gate.
+    """
+    classifier = _broken_session_classifier(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Tier-2 classifier inference failed"):
+        classifier.predict_proba(["log line"])
 
 
 def _broken_session_classifier(tmp_path):

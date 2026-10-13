@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-FastAPI scoring service. Exposes `/score`, `/score/batch`, `/health`, `/metrics`, and admin `/reload` endpoints.
+FastAPI scoring service. Exposes `/score`, `/score/batch`, `/health`, `/health/drift`, `/metrics`, and `/metrics/snapshot`. There are no admin or reload endpoints.
 
 ## STRUCTURE
 
@@ -30,7 +30,7 @@ src/logfilter/api/
 - All endpoints use Pydantic v2 schemas for request/response validation
 - Security is framework-independent — `security.py` can be reused outside FastAPI
 - Rate limiting is in-memory per-process (not distributed)
-- Admin endpoints require `X-Admin-Token`; scoring requires `X-API-Token`
+- Scoring requires `X-API-Token`; `/metrics` and `/metrics/snapshot` require `X-Metrics-Token`
 - Metrics endpoint returns Prometheus text format
 
 ## ANTI-PATTERNS

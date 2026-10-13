@@ -230,3 +230,102 @@ class TestDriftCallback:
         for _ in range(300):
             d.record_score(0.5 + rng.random() * 0.5)
         assert d.check_drift().drift_detected is True
+
+
+class TestPsiNumerics:
+    def test_default_epsilon_is_in_the_standard_band(self) -> None:
+        """1e-10 let a single empty-bin gain dominate PSI; the floor is 1e-6."""
+        d = DriftDetector()
+        assert d.epsilon == 1e-6
+        assert 1e-6 <= d.epsilon <= 1e-4
+
+    def test_benign_shift_into_empty_bin_does_not_alarm(self) -> None:
+        """1% of mass moving into one empty bin must not trip the 0.25 threshold."""
+        d = DriftDetector(window_size=1000, psi_threshold=0.25, check_interval=100)
+
+        # Reference: all mass in bin 0 (scores in [0.0, 0.1)); nine empty bins.
+        for _ in range(1000):
+            d.record_score(0.05)
+
+        # Current: 99% still in bin 0, 1% moves into the empty bin 5.
+        for n in range(1000):
+            d.record_score(0.55 if n < 10 else 0.05)
+
+        status = d.check_drift()
+        assert status.psi < 0.25, status.psi
+        assert status.drift_detected is False
+
+    def test_two_empty_bin_shifts_do_not_alarm(self) -> None:
+        """Two 1% shifts into empty bins previously exceeded the 0.25 threshold."""
+        d = DriftDetector(window_size=1000, psi_threshold=0.25, check_interval=100)
+        for _ in range(1000):
+            d.record_score(0.05)
+
+        for n in range(1000):
+            if n < 10:
+                d.record_score(0.55)
+            elif n < 20:
+                d.record_score(0.85)
+            else:
+                d.record_score(0.05)
+
+        status = d.check_drift()
+        assert status.psi < 0.25, status.psi
+        assert status.drift_detected is False
+
+    def test_large_shift_still_alarms(self) -> None:
+        """A genuine half-window shift must still exceed the threshold."""
+        d = DriftDetector(window_size=1000, psi_threshold=0.25, check_interval=100)
+        for _ in range(1000):
+            d.record_score(0.05)
+        for _ in range(1000):
+            d.record_score(0.95)
+
+        status = d.check_drift()
+        assert status.psi > 0.25, status.psi
+        assert status.drift_detected is True
+
+
+class TestUpdateReference:
+    def test_update_reference_returns_window_size_and_clears_drift(self) -> None:
+        d = DriftDetector(window_size=200, psi_threshold=0.25, check_interval=100)
+        rng = random.Random(42)
+        for _ in range(300):
+            d.record_score(rng.random() * 0.5)
+        for _ in range(300):
+            d.record_score(0.5 + rng.random() * 0.5)
+        assert d.check_drift().drift_detected is True
+
+        size = d.update_reference()
+
+        assert size == 200
+        status = d.check_drift()
+        assert status.drift_detected is False
+        assert status.fallback_active is False
+        assert status.reference_count == 200
+
+    def test_reference_does_not_roll_on_its_own(self) -> None:
+        """The baseline is intentionally frozen; only update_reference moves it."""
+        d = DriftDetector(window_size=100, psi_threshold=0.25, check_interval=50)
+        rng = random.Random(7)
+        for _ in range(100):
+            d.record_score(rng.random() * 0.2)
+        reference_before = list(d._reference)
+
+        for _ in range(2000):
+            d.record_score(0.9)
+
+        assert list(d._reference) == reference_before
+
+    def test_update_reference_makes_shifted_data_the_new_normal(self) -> None:
+        d = DriftDetector(window_size=200, psi_threshold=0.25, check_interval=100)
+        rng = random.Random(42)
+        for _ in range(300):
+            d.record_score(rng.random() * 0.5)
+        for _ in range(600):
+            d.record_score(0.5 + rng.random() * 0.5)
+        assert d.check_drift().drift_detected is True
+
+        d.update_reference()
+
+        assert d.check_drift().drift_detected is False

@@ -128,7 +128,6 @@ def load_syslog_data(
 
         df, y = generate_dataset(n_normal, n_anomaly)
         df.insert(0, "TaskID", range(len(df)))
-        df[normal_path.name.replace(".csv", "")] = ...  # placeholder
 
         # Save
         normal_mask = y == 0

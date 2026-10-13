@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from logfilter.http_gateway import SignedHttpGatewayClient
+from logfilter.http_gateway import SignedHttpGatewayClient, canonical_signature_string
 from logfilter.pipeline.router import AcknowledgedHttpSender
 from logfilter.response.auto_response import SignedResponseGateway
 
@@ -25,14 +25,26 @@ def _client(handler) -> SignedHttpGatewayClient:
     )
 
 
+def _verify(request: httpx.Request, *, method: str, path: str) -> bool:
+    """Recompute the signature exactly as a receiver serving ``method path`` would."""
+    request_id = request.headers["Idempotency-Key"]
+    timestamp = request.headers["X-LogFilter-Timestamp"]
+    body_digest = hashlib.sha256(request.content).hexdigest()
+    canonical = canonical_signature_string(
+        method=method,
+        path=path,
+        timestamp=int(timestamp),
+        request_id=request_id,
+        body_digest=body_digest,
+    )
+    expected = hmac.new(_SECRET.encode(), canonical, hashlib.sha256).hexdigest()
+    return request.headers["X-LogFilter-Signature"] == f"v1={expected}"
+
+
 def test_gateway_signs_canonical_body_and_requires_matching_receipt() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         request_id = request.headers["Idempotency-Key"]
-        timestamp = request.headers["X-LogFilter-Timestamp"]
-        body_digest = hashlib.sha256(request.content).hexdigest()
-        canonical = f"{timestamp}\n{request_id}\n{body_digest}".encode()
-        expected = hmac.new(_SECRET.encode(), canonical, hashlib.sha256).hexdigest()
-        assert request.headers["X-LogFilter-Signature"] == f"v1={expected}"
+        assert _verify(request, method="POST", path="/v1/events")
         assert json.loads(request.content)["request_id"] == request_id
         return httpx.Response(200, json={"request_id": request_id, "status": "accepted"})
 
@@ -40,6 +52,67 @@ def test_gateway_signs_canonical_body_and_requires_matching_receipt() -> None:
 
     assert receipt.request_id == "event-1"
     assert receipt.status == "accepted"
+
+
+def test_signature_is_bound_to_path_and_method() -> None:
+    """A signature captured for one route must not validate on another."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_id = request.headers["Idempotency-Key"]
+        captured["signature"] = request.headers["X-LogFilter-Signature"]
+        captured["timestamp"] = request.headers["X-LogFilter-Timestamp"]
+        captured["request_id"] = request_id
+        captured["body_digest"] = hashlib.sha256(request.content).hexdigest()
+        return httpx.Response(200, json={"request_id": request_id, "status": "accepted"})
+
+    _client(handler).send(request_id="event-1", payload={"action": "block"})
+
+    for method, path in (("POST", "/quarantine"), ("PUT", "/v1/events"), ("POST", "/v1/events/")):
+        forged = hmac.new(
+            _SECRET.encode(),
+            canonical_signature_string(
+                method=method,
+                path=path,
+                timestamp=int(captured["timestamp"]),
+                request_id=captured["request_id"],
+                body_digest=captured["body_digest"],
+            ),
+            hashlib.sha256,
+        ).hexdigest()
+        assert f"v1={forged}" != captured["signature"]
+
+
+def test_gateway_rejects_payload_that_shadows_envelope_keys() -> None:
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        request_id = request.headers["Idempotency-Key"]
+        return httpx.Response(200, json={"request_id": request_id, "status": "accepted"})
+
+    client = _client(handler)
+
+    with pytest.raises(ValueError, match="reserved keys"):
+        client.send(request_id="event-1", payload={"request_id": "attacker-chosen"})
+    with pytest.raises(ValueError, match="reserved keys"):
+        client.send(request_id="event-1", payload={"schema_version": "9.9"})
+
+    assert sent == []
+
+
+def test_envelope_keys_always_come_from_the_gateway() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        request_id = request.headers["Idempotency-Key"]
+        return httpx.Response(200, json={"request_id": request_id, "status": "accepted"})
+
+    _client(handler).send(request_id="event-1", payload={"message": "leef"})
+
+    assert bodies[0]["request_id"] == "event-1"
+    assert bodies[0]["schema_version"] == "1.0"
 
 
 def test_gateway_treats_receiver_duplicate_as_durable_success() -> None:

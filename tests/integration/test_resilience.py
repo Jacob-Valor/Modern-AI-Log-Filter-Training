@@ -13,6 +13,10 @@ import pytest
 
 from logfilter.utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, State
 
+# These exercise the circuit breaker under simulated dependency failures and
+# run with the rest of the Docker-backed integration tier.
+pytestmark = pytest.mark.integration
+
 
 class FlakyDependency:
     """Mock downstream service that fails a configurable number of times."""

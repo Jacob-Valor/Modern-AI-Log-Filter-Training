@@ -139,7 +139,7 @@ def test_log_producer_send_dlq_builds_payload() -> None:
     )
 
     producer.send_dlq(
-        original_message={"raw": "failed log", "host": "host1"},
+        original_message={"raw": "failed log", "host": "host1", "raw_log_ref": "ref-1"},
         error="ES bulk failed",
         original_topic="raw-logs",
         retry_count=2,
@@ -155,16 +155,33 @@ def test_log_producer_send_dlq_builds_payload() -> None:
     assert fake.sent[0]["key"] == "host1"
 
 
-def test_log_producer_send_dlq_skips_when_not_configured() -> None:
-    producer = LogProducer(topic="raw-logs")
+def test_log_producer_send_dlq_carries_raw_log_ref_for_replay() -> None:
+    """The replayed event must keep the archive ref minted on first consumption."""
+    producer = LogProducer(topic="raw-logs", dlq_topic="logfilter-dlq")
 
     producer.send_dlq(
-        original_message={"raw": "failed log"},
-        error="ES bulk failed",
+        original_message={"raw": "failed log", "host": "h", "raw_log_ref": "ref-42"},
+        error="boom",
         original_topic="raw-logs",
     )
 
-    assert len(FakeKafkaProducer.instances) == 0
+    payload = FakeKafkaProducer.instances[0].sent[0]["value"]
+    assert payload["raw_log_ref"] == "ref-42"
+    assert payload["original"]["raw_log_ref"] == "ref-42"
+
+
+def test_log_producer_send_dlq_without_topic_raises_instead_of_dropping() -> None:
+    """A silently dropped DLQ message loses the raw log while callers commit."""
+    producer = LogProducer(topic="raw-logs")
+
+    with pytest.raises(producer_module.DlqNotConfiguredError):
+        producer.send_dlq(
+            original_message={"raw": "failed log"},
+            error="ES bulk failed",
+            original_topic="raw-logs",
+        )
+
+    assert FakeKafkaProducer.instances == []
 
 
 def test_log_producer_send_dlq_raises_on_kafka_error() -> None:
@@ -173,23 +190,12 @@ def test_log_producer_send_dlq_raises_on_kafka_error() -> None:
     fake.fail_next = True
 
     with pytest.raises(producer_module.KafkaError):
-        cast(Any, producer.send_dlq).retry.statistics.clear()
+        cast(Any, producer._send_dlq_payload).retry.statistics.clear()
         producer.send_dlq(
             original_message={"raw": "failed log"},
             error="ES bulk failed",
             original_topic="raw-logs",
         )
-
-
-def test_log_producer_send_dlq_no_topic_warns() -> None:
-    producer = LogProducer(topic="raw-logs")
-    producer.send_dlq(
-        original_message={"raw": "failed log"},
-        error="ES bulk failed",
-        original_topic="raw-logs",
-    )
-
-    assert len(FakeKafkaProducer.instances) == 0
 
 
 def test_log_producer_send_retry_exit_branch() -> None:
@@ -221,3 +227,38 @@ def test_log_producer_send_batch_exception_handling() -> None:
 
     count = producer.send_batch([{"raw": "a", "host": "h1"}])
     assert count == 0
+
+
+def test_log_producer_send_batch_excludes_unacknowledged_sends() -> None:
+    """A future carrying a KafkaError means the broker never took the message."""
+
+    class PerRecordFuture:
+        def __init__(self, fail: bool) -> None:
+            self._fail = fail
+
+        def get(self, timeout: int):
+            if self._fail:
+                raise producer_module.KafkaError("not acknowledged")
+            return FakeRecordMetadata()
+
+    class PerRecordProducer:
+        def send(self, topic, value, key=None, headers=None):
+            return PerRecordFuture(fail=key == "bad-host")
+
+        def flush(self, timeout: int) -> None:
+            pass
+
+    producer = LogProducer(topic="raw-logs")
+    producer._producer = cast(Any, PerRecordProducer())
+
+    count = producer.send_batch(
+        [
+            {"raw": "a", "host": "good-host"},
+            {"raw": "b", "host": "bad-host"},
+            {"raw": "c", "host": "good-host"},
+        ]
+    )
+
+    assert count == 2
+
+
